@@ -128,8 +128,14 @@ export function canonicalize(doc: Doc): string {
 /**
  * 解析并要求"当且仅当 canonical"：
  *  1. 结构合法（validateDoc 负责，含引用完整性、深度上限、未知键拒绝）
- *  2. 重新序列化后与输入逐字节相等 —— 这条同时钉住键顺序、默认值省略、无空格
+ *  2. **normalize 之后**重新序列化与输入逐字节相等 —— 这条同时钉住键顺序、
+ *     默认值省略、无空白，以及两条归一规则（相邻同格式 span 合并、空 p 块剔除）
  * 这是"接受当且仅当 canonical"的实现方式：不比较语义，比较字节。
+ *
+ * 🔴 判据必须走 normalize 而不是裸 canonicalize：归一规则是 canonical 的一部分，
+ *   "未合并相邻 span" 的字节表示和 "已合并" 的语义相同但不是合法真源形态。
+ *   早先这里用裸 canonicalize，于是 normalize 产出的文档反被 parseDoc 拒收 ——
+ *   自己写的归一自己都不认，测试直接红两条。
  *
  * 顺序很重要：先 validate 再比字节。反过来的话，非法结构可能被"恰好字节相等"
  * 蒙混过关（例如 blocks 缺失时 canonicalize 输出 {"v":1}，与非法输入字节相同）。
@@ -155,7 +161,7 @@ export function parseDoc(input: string): Doc {
     }
     throw e;
   }
-  if (canonicalize(doc) !== input) {
+  if (canonicalize(normalize(doc)) !== input) {
     throw new NotCanonicalError('非 canonical 表示（键顺序、默认值省略或空白不符合规范）');
   }
   return doc;
@@ -167,9 +173,187 @@ export function parseDoc(input: string): Doc {
  * 输出与 parseDoc 同构：blocks / reminders 一定是数组（空文档得到 [] 而非 undefined）。
  * 这一点必须与 parseDoc 一致，否则"同一份内容有两种内存形态"的老问题会在
  * 测试断言里反复咬人（第一版就因为这里不一致白红了两轮）。
+ *
+ * 🔴 归一还负责压掉"同一内容多种表示"（canonical 存在的唯一理由就在这里）：
+ *
+ *  1. **相邻同格式 span 合并**。`[{t:'A',b:true},{t:'B',b:true}]` 与 `[{t:'AB',b:true}]`
+ *     逐字符读出来完全一样，但字节不同。两台设备只要在同一段文字上的切分粒度差一点
+ *     （一个是从服务器拉来的、一个是本地重排过的），blockSig 就不同 → 判"这段两边都改过"
+ *     → 一次纯噪音冲突。编辑器（Lexical）一定会把连续同格式 TextNode 合成一个，
+ *     所以真源层不合并的话，**客户端导出的永远是合并后的、服务器存的可能没合并**，
+ *     两端永远对不上。这条不是洁癖，是 S3-21 用例逼出来的。
+ *
+ *  2. **剔除空 `p` 块**（含 children 里的）。空段落 `{"t":"p"}` 在真源里"存在但没内容"，
+ *     而编辑器永远需要多一个空段落当光标落点 —— 两边对"空段"的理解天生不一致：
+ *     用户敲三个回车留下两个空行，服务端存了两个空 `p`，编辑器导出时那两个是"占位段落"
+ *     会被丢，回来就少了两行。这与 ARCH §4.6「跨块退格 100 次无残留空块」是同一条纪律：
+ *     空段落是**渲染层的落点**，不是**真源层的内容**。真源里表达"空"只有一个办法：
+ *     整篇没有 `p` 块。
+ *
+ *  3. **合并相邻同类型列表**。Lexical 的 ListNode 有 transform 会把紧邻的同类型
+ *     ul/ol 合成一个（源码里明确写了 "merges adjacent same-type lists"），
+ *     所以编辑器侧结构上装不下"两个独立空列表"。真源层跟着合并，
+ *     两端才对得上。这也是 S3-21 用例逼出来的：随机生成两个相邻空 ol 就会红。
  */
 export function normalize(doc: Doc): Doc {
-  return validateDoc(JSON.parse(canonicalize(doc)));
+  const base = validateDoc(JSON.parse(canonicalize(doc)));
+  // 🔴 顺序铁律：**先剔空 p，再合并相邻列表**。
+  //   [ul[], p(空), ul] 剔掉中间的空 p 之后两个 ul 就变成相邻了 ——
+  //   反过来做（先合并）的话它们中间还隔着一个 p，合并不到，
+  //   归一结果 `ul, ul` 会在第二轮才合并，幂等性破掉、parseDoc 拒收自己产出的形态。
+  //   这类"顺序依赖"在属性测试里表现为**随机红**（取决于生成了几个空 p），
+  //   定向用例永远测不出来，所以顺序必须写在代码注释里钉死。
+  const blocks = mergeAdjacentLists(stripEmptyParas(base.blocks ?? []));
+  const reminders = base.reminders ?? [];
+  // 🔴 归一后的 `blocks` 可能是空数组，而 canonical 规则 2 要求空数组整个键不出现。
+  //   这里必须用条件展开而不是 `blocks: [...]`：后者会产出一个"带空数组键"的非法真源
+  //   （`parseDoc` 会拒它自己normalize 的输出，幂等性当场破掉）。
+  //   `exactOptionalPropertyTypes` 下也不能写 `blocks: maybeEmpty`，那会留下 `undefined` 键。
+  //
+  // 🔴🔴 blocks 与 reminders 必须**各自独立判断**，不能合成一个三元。
+  //   实锤：写成 `blocks.length || reminders.length ? {v, blocks, reminders} : {v}` 时，
+  //   「blocks 非空 + reminders 为空」会产出一个**把空 reminders 塞回去**的形态 ——
+  //   于是 normalize 的输出自己就不是 canonical 了（e2e 实测捕到：
+  //   页面里的 JSON 带 `"reminders":[]`，判据 red）。
+  //   这类"两个维度被捆在一起判断"的 bug 只在**恰好一个维度非空**时暴露，
+  //   定向用例容易漏，必须靠 e2e 真数据兜住。
+  const out: Doc = { v: base.v };
+  if (blocks.length > 0) out.blocks = blocks;
+  if (reminders.length > 0) out.reminders = reminders;
+  return out;
+}
+
+/** 递归剔除空p 块（不进 list 合并逻辑，纯剔除） */
+function stripEmptyParas(bs: readonly Block[]): Block[] {
+  const out: Block[] = [];
+  for (const b of bs) {
+    if (b.children !== undefined) {
+      const kids = stripEmptyParas(b.children);
+      if (kids.length > 0) b.children = kids;
+      else delete b.children;
+    }
+    if (isEmptyPara(b)) continue;
+    out.push(b);
+  }
+  return out;
+}
+
+/**
+ * 合并相邻同类型列表（ul 接ul、ol 接 ol），children 直接接起来。
+ *
+ * 🔴 只合并**同类型**：ul 紧邻 ol 在真源里是合法的两段（用户先列项目符号再列编号），
+ *   Lexical 的 transform 也不合并异类型，所以不能顺手一起并 —— 那会改用户内容。
+ * 递归处理 children：fold 里、li 里同样会撞上这个 transform。
+ */
+function mergeAdjacentLists(bs: readonly Block[]): Block[] {
+  const out: Block[] = [];
+  for (const b0 of bs) {
+    // 先就地归一（fields 规范化 + 子树递归合并），再拿归一后的结果参与相邻合并。
+    // 🔴 顺序不能反：第一版先把原样块 push 进 out 再合并，得到
+    //   `ul[ol, ol]`（内层两个相邻 ol 没被合并），
+    //   第二轮 normalize 才把内层合掉 —— 于是 normalize 不幂等，
+    //   parseDoc(canonicalize(normalize(d))) 与 normalize(d) 深比较当场红。
+    //   归一必须**一轮到位**：任何一层都在同一次调用里被合并干净。
+    const b = normalizeBlock(b0);
+    const prev = out[out.length - 1];
+    if (prev !== undefined && prev.t === b.t && (prev.t === 'ul' || prev.t === 'ol')) {
+      // 🔴 合并 children 后必须**就地再扫一遍**：join 本身会造出新的相邻同类型列表
+      //   （两个 ul 各带一个 ol → join 后变成 ul[ol, ol]），而这两个 ol 从没一起走过
+      //   合并判定。只 push 不重扫的话，normalize 第一轮留下 ul[ol, ol]，
+      //   第二轮才合掉 —— 幂等性破掉，且 parseDoc 会拒收自己刚产出的形态。
+      const joined = [...(prev.children ?? []), ...(b.children ?? [])];
+      const mergedKids = mergeAdjacentLists(stripEmptyParas(joined));
+      if (mergedKids.length > 0) prev.children = mergedKids;
+      else delete prev.children;
+      continue;
+    }
+    out.push(b);
+  }
+  return out;
+}
+
+/** 合并 span 数组里相邻且格式完全相同的项（格式含 rem/href，两者不同就不能合） */
+function coalesceSpans(ss: readonly Span[]): Span[] {
+  if (ss.length < 2) return ss.slice();
+  const out: Span[] = [];
+  for (const s of ss) {
+    const last = out[out.length - 1];
+    if (last !== undefined && sameSpanFormat(last, s)) {
+      last.t += s.t;
+      continue;
+    }
+    out.push({ ...s });
+  }
+  return out;
+}
+
+function sameSpanFormat(a: Span, b: Span): boolean {
+  if ((a.rem ?? '') !== (b.rem ?? '')) return false;
+  if ((a.href ?? '') !== (b.href ?? '')) return false;
+  for (const k of SPAN_KEY_ORDER) {
+    if (k === 't' || k === 'rem' || k === 'href') continue;
+    if ((a[k] === true) !== (b[k] === true)) return false;
+  }
+  return true;
+}
+
+/**
+ * 空段落判定：`t==='p'` 且没有任何非空 span。
+ *
+ * 🔴 只认 `p`：`{"t":"h3"}`、`{"t":"quote"}`、`{"t":"li"}`、`{"t":"fold"}` 的空壳是真源里的
+ *   合法块（用户可以留一个空标题），吞掉它们是数据丢失。折叠块的空 children 不剔
+ *   （`{"t":"fold"}` 与 `{"t":"fold",children:[]}` 靠 canonical 规则 2 已经同形）。
+ */
+function isEmptyPara(b: Block): boolean {
+  if (b.t !== 'p') return false;
+  for (const s of b.spans ?? []) {
+    if (s.t !== '') return false;
+    if ((s.rem ?? '') !== '') return false;
+    if ((s.href ?? '') !== '') return false;
+  }
+  return true;
+}
+
+function normalizeBlock(b: Block): Block {
+  const out: Block = { t: b.t };
+  for (const k of BLOCK_KEY_ORDER) {
+    if (k === 't') continue;
+    const v = b[k];
+    switch (k) {
+      case 'spans': {
+        // 空数组省略：与 children 同理，normalize 不负责凭空造空数组，也不留下空数组
+        if (v !== undefined) {
+          const ss = coalesceSpans(v as Span[]);
+          if (ss.length > 0) out.spans = ss;
+        }
+        break;
+      }
+      case 'title': {
+        if (v !== undefined) {
+          const ss = coalesceSpans(v as Span[]);
+          if (ss.length > 0) out.title = ss;
+        }
+        break;
+      }
+      case 'text':
+      case 'lang':
+      case 'src':
+      case 'imgAlt': {
+        if (typeof v === 'string' && v !== '') (out as unknown as Record<string, unknown>)[k] = v;
+        break;
+      }
+      case 'children': {
+        // 与顶层同一套顺序：先剔空 p，再合并相邻列表。空数组省略 ——
+        // 真源里"没有这个字段"只有一种表示：键不存在。
+        if (v !== undefined) {
+          const kids = mergeAdjacentLists(stripEmptyParas(v as Block[]));
+          if (kids.length > 0) out.children = kids;
+        }
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /**

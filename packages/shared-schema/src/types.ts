@@ -66,8 +66,20 @@ export interface Reminder {
 export interface Doc {
   /** schema 版本，用于将来演进 */
   v: 1;
-  blocks: Block[];
-  reminders: Reminder[];
+  /**
+   * 🔴 `blocks` / `reminders` 是**可选**的，不是必填。
+   *   canonical 规则 2 要求「省略默认值」，空数组必须整个键不出现，
+   *   所以 `{"v":1}` 才是空文档的合法形态。若这里声明成必填，
+   *   全项目每个消费方都得写 `(doc.blocks ?? [])` 兜底 —— 那正是本项目一度出现
+   *   serialize.ts 里`?? []` 补丁的根源：类型与序列化规则不一致时，
+   *   代码会假装接受非法形态，问题被推到运行时才爆（实测炸点：`doc.reminders.map`
+   *   读undefined 抛 TypeError，整页白屏）。
+   *
+   *   判据：core.test.mjs「emptyDoc 的 canonical 形式是 {"v":1}"」+
+   *   e2e E2E-02 的 `assert.deepEqual(doc, {v:1})`。
+   */
+  blocks?: Block[];
+  reminders?: Reminder[];
 }
 
 /** canonical 序列化中每个对象类型的键顺序（规则 1：按 schema 定义顺序，不是字典序） */
@@ -121,8 +133,20 @@ export const BLOCK_TYPES: ReadonlySet<string> = new Set<BlockT>([
 /** 允许 children 的块类型（其余带 children 一律拒绝） */
 export const BLOCKS_WITH_CHILDREN: ReadonlySet<string> = new Set(['fold', 'li', 'ul', 'ol']);
 
+/**
+ * 空文档。
+ *
+ * 🔴 必须直出 **canonical 形态**，即 `{"v":1}` 而不是 `{v:1, blocks:[], reminders:[]}`。
+ *   canonical 规则 2 要求省略空数组键，所以带空数组的这个对象**不是合法真源**——
+ *   `parseDoc` 会拒它。原先这里返回带空数组的形态，等于每次新建文档都持有一份非法真源，
+ *   靠调用方 downstream 兜住（serialize.ts 里那些`?? []` 就是这么来的）。
+ *   判据：core.test.mjs 的「emptyDoc 的 canonical 形式是 {"v":1}"」与 e2e E2E-02 的
+ *   `assert.deepEqual(doc, {v:1})` 都在钉这一条。
+ *
+ * 键序即 schema 键序（v → blocks → reminders），省略后只剩 v，天然满足 canonical。
+ */
 export function emptyDoc(): Doc {
-  return { v: 1, blocks: [], reminders: [] };
+  return { v: 1 };
 }
 
 /** 取块的纯文本（合并与签名用；不读 spans 之外的字段） */

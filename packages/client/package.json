@@ -7,7 +7,22 @@
   "main": "./src/main.ts",
   "scripts": {
     "build": "node ../../tools/build.mjs",
+    "test": "node --test test/*.test.mjs",
     "test:e2e": "node --test --test-concurrency=6 test/e2e/*.test.js",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json"
+  },
+  "dependencies": {
+    "@lexical/clipboard": "^0.52.0",
+    "@lexical/code": "^0.52.0",
+    "@lexical/extension": "^0.52.0",
+    "@lexical/history": "^0.52.0",
+    "@lexical/html": "^0.52.0",
+    "@lexical/link": "^0.52.0",
+    "@lexical/list": "^0.52.0",
+    "@lexical/rich-text": "^0.52.0",
+    "@lexical/selection": "^0.52.0",
+    "@lexical/text": "^0.52.0",
+    "@lexical/utils": "^0.52.0",
+    "lexical": "^0.52.0"
   }
 }

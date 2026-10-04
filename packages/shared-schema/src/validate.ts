@@ -151,8 +151,20 @@ function validateReminder(r: unknown, path: string, seen: Set<string>): void {
 }
 
 /**
- * 校验文档结构。返回规范化后的 Doc（只补 blocks/reminders 必填数组，不改其余）。
+ * 校验文档结构。**只校验，不改数据** —— 返回的就是 `raw` 本身（同一对象引用）。
  * 抛 ValidateError 表示拒绝；不返回"带 warning 的结果"——拒绝必须确定。
+ *
+ * 🔴🔴 为什么不再补 `blocks:[] / reminders:[]`（原先 `raw ?? []` 的行为）：
+ *   那个"补空数组"是**同一内容两种内存表示**的老坑本体：
+ *     - canonical 字节里空数组必须省略（规则 2）
+ *     - 但 validateDoc 返回的内存对象里却带着 `blocks: []`
+ *   于是 `parseDoc(canonicalize(normalize(d)))` 的返回值 ≠ `normalize(d)`，
+ *   内存态与字节态各说各话。代价是实打实的：
+ *     · 调用方每处都要写 `?? []` 兜底（serialize.ts 里那些补丁就是它逼出来的）
+ *     · 一旦漏一处就是**运行时 TypeError**（实测炸点：`doc.reminders.map` 读 undefined →整页白屏）
+ *   现在 `Doc.blocks / Doc.reminders` 是**可选**的，与 canonical 规则 2 对齐，
+ *   内存态与字节态统一为"空即缺省"。需要数组的调用方自己写 `(doc.blocks ?? [])`，
+ *   那是**显式**的、可被 review 看见的，而不是被validate 悄悄塞进来的。
  */
 export function validateDoc(raw: unknown): Doc {
   if (!isPlainObject(raw)) throw new ValidateError('E_ROOT', '$');
@@ -166,7 +178,7 @@ export function validateDoc(raw: unknown): Doc {
   if (remsRaw !== undefined && !Array.isArray(remsRaw)) {
     throw new ValidateError('E_REMINDERS_TYPE', '$.reminders');
   }
-  const rems: Reminder[] = remsRaw ?? [];
+  const rems: readonly Reminder[] = remsRaw ?? [];
   const seen = new Set<string>();
   rems.forEach((r, i) => validateReminder(r, `$.reminders[${i}]`, seen));
   const remIds: ReadonlySet<string> = seen;
@@ -175,10 +187,13 @@ export function validateDoc(raw: unknown): Doc {
   if (blocksRaw !== undefined && !Array.isArray(blocksRaw)) {
     throw new ValidateError('E_BLOCKS_TYPE', '$.blocks');
   }
-  const blocks: Block[] = blocksRaw ?? [];
+  const blocks: readonly Block[] = blocksRaw ?? [];
   blocks.forEach((b, i) => validateBlock(b, `$.blocks[${i}]`, remIds, 0));
 
-  return { v: 1, blocks, reminders: rems };
+  // 原样返回：块与提醒的校验只读不写，键序与键存在性完全保持调用方给定的形态。
+  // （上面已逐项断言过 v / blocks / reminders 三个键的类型与存在性，
+  //   所以这里的断言是安全的，不是"绕过校验"。）
+  return raw as unknown as Doc;
 }
 
 /** 便捷：直接校验一个 Doc 对象（前端内存态用） */

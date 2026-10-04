@@ -48,38 +48,95 @@ test('不变量1: canonicalize 幂等 —— 反复序列化逐字节不变', ()
 
 /* ---------------- 2. 往返无损 ---------------- */
 
-test('不变量2: parseDoc(canonicalize(d)) 等于 normalize(d)', () => {
-  // 注意：断言对象是 normalize(d) 而不是 d。canonical 规则 2 规定"空数组省略"，
-  // 而生成器会产出 children:[] / blocks:[] 这类形态 —— 往返后省略它们正是设计意图。
-  // 用 d 直接比会把 canonical 的核心规则误判成 bug（第一版就是这么写错的）。
+/**
+ * 「内存态的规范形态」。
+ *
+ * 🔴 为什么需要这个辅助函数（这是S3 后期才想清楚的一层）：
+ *   `normalize` / `validateDoc` 现在都**省略空数组**（与 canonical 规则 2 对齐），
+ *   所以 `{v:1, blocks:[], reminders:[非空]}` 归一后是 `{v:1, reminders:[非空]}`
+ *   —— `blocks` 键整个不存在。往返断言必须按这个契约比，
+ *   否则会拿"生成器原始输入带空数组"当参照物，把canonical 规则误判成 bug。
+ *
+ *   注意它**只补键、不补值**：`(doc.blocks ?? [])` 里的 `[]` 是"这个维度是空的"，
+ *   而不是"往真源里塞一个空数组键"。后者正是被明令禁止的。
+ */
+function 内存规范态(d) {
+  return {
+    v: d.v,
+    ...(d.blocks && d.blocks.length > 0 ? { blocks: d.blocks } : {}),
+    ...(d.reminders && d.reminders.length > 0 ? { reminders: d.reminders } : {}),
+  };
+}
+
+test('不变量2: parseDoc(canonicalize(normalize(d))) 等于 normalize(d) 的内存规范态', () => {
+  // 注意：断言对象是 normalize(d) 的**内存规范态**而不是 d。
+  // canonical 规则 2 规定"空数组省略"，而生成器会产出 children:[] / blocks:[] 这类形态
+  // —— 往返后省略它们正是设计意图。用 d 直接比会把 canonical 的核心规则误判成 bug。
+  //
+  // 🔴 往返起点是 canonicalize(normalize(d)) 而不是 canonicalize(d)：
+  //   normalize 现在还负责压掉"同一内容多种表示"（相邻同格式 span 合并、空 p 块剔除），
+  //   所以**归一后的形态才是唯一合法真源**。未归一的 d 走 parseDoc 会被拒 —— 那是设计，
+  //   由下面「不变量2b-归一」那条专门钉住。
   fc.assert(
     fc.property(docArb, (d) => {
-      const round = parseDoc(canonicalize(d));
-      assert.deepEqual(round, normalize(d));
+      const norm = normalize(d);
+      const round = parseDoc(canonicalize(norm));
+      assert.deepEqual(round, 内存规范态(norm));
     }),
     { numRuns: NUM_RUNS },
   );
 });
 
-test('不变量2-bis: 无空数组形态的文档，往返严格等于原对象', () => {
-  // 补上"文档本身已 canonical"这个前提下的强往返断言，避免上一条的宽松掩盖真 bug
+test('不变量2-bis: 已归一的文档，往返严格等于原对象', () => {
+  // 补上"文档本身已是规范形态"这个前提下的强往返断言，避免上一条的宽松掩盖真 bug。
+  // 🔴 判据用 canonicalize(normalize(d))：规范形态是归一后的那个，不是 d 自己的字节。
+  //   d 里若带空数组 / 未合并 span / 空 p 块，normalize 会改写它，此时 d 本身就不是规范形态。
+  // 🔴 参照物走同一个「内存规范态」辅助函数 —— 内存态与字节态现在统一为"空即缺省"，
+  //   不再有"parseDoc 返回刻意比字节多出 blocks:[]"这层差异（那正是老坑，已在
+  //   validateDoc 改成纯校验时消掉）。
   fc.assert(
     fc.property(docArb, (d) => {
-      const can = canonicalize(d);
-      if (can !== JSON.stringify(d)) return; // 本身非 canonical（如带空数组），跳过
-      assert.deepEqual(parseDoc(can), JSON.parse(can));
+      const norm = normalize(d);
+      const can = canonicalize(norm);
+      assert.deepEqual(parseDoc(can), 内存规范态(norm));
     }),
     { numRuns: NUM_RUNS },
   );
 });
 
 test('不变量2b: 带 rem 引用的文档同样往返无损', () => {
+  //🔴 同样走「内存规范态」：带 rem 引用的文档里blocks 常常是空的，
+  //   归一后blocks 键整个不存在（这正是 canonical 规则 2 的意图）。
   fc.assert(
     fc.property(docWithRefsArb, (d) => {
-      const round = parseDoc(canonicalize(d));
-      assert.deepEqual(round, normalize(d));
+      const norm = normalize(d);
+      const round = parseDoc(canonicalize(norm));
+      assert.deepEqual(round, 内存规范态(norm));
     }),
     { numRuns: NUM_RUNS },
+  );
+});
+
+test('不变量2b-归一: 未归一的表示被parseDoc 拒绝（同一内容只有一种合法字节）', () => {
+  // 这条是归一规则的存在理由：相邻同格式 span 未合并时，parseDoc 必须拒收。
+  // 症状若反（照单全收），就是"同一内容两种字节"回来了 → 假冲突的源头。
+  const d = {
+    v: 1,
+    blocks: [{ t: 'p', spans: [{ t: 'A', b: true }, { t: 'B', b: true }] }],
+    reminders: [],
+  };
+  const unmerged = '{"v":1,"blocks":[{"t":"p","spans":[{"t":"A","b":true},{"t":"B","b":true}]}]}';
+  assert.throws(() => parseDoc(unmerged), /非 canonical/);
+  assert.equal(canonicalize(normalize(d)), '{"v":1,"blocks":[{"t":"p","spans":[{"t":"AB","b":true}]}]}');
+  // 空 p 块同样被剔除（真源里表达"空"的唯一办法是整篇没有 p 块）
+  assert.equal(
+    canonicalize(normalize({ v: 1, blocks: [{ t: 'p', spans: [{ t: 'x' }] }, { t: 'p' }], reminders: [] })),
+    '{"v":1,"blocks":[{"t":"p","spans":[{"t":"x"}]}]}',
+  );
+  // 但空标题 / 空折叠块是合法块，绝不能被一起吞掉
+  assert.equal(
+    canonicalize(normalize({ v: 1, blocks: [{ t: 'h3' }, { t: 'fold' }, { t: 'quote' }], reminders: [] })),
+    '{"v":1,"blocks":[{"t":"h3"},{"t":"fold"},{"t":"quote"}]}',
   );
 });
 
@@ -195,6 +252,43 @@ test('不变量4: normalize 幂等且输出必 canonical', () => {
     }),
     { numRuns: NUM_RUNS },
   );
+});
+
+test('不变量4b: 恰好一个维度非空时，normalize 不把另一维的空数组塞回去', () => {
+  //🔴🔴 这条是 e2e 逼出来的：属性测试全绿、41 条定向用例全绿，
+  //   但真浏览器里跑出来的真源 JSON 带着 `"reminders":[]` —— 不是 canonical。
+  //   根因：normalize 里写成
+  //     `blocks.length || reminders.length ? {v, blocks, reminders} : {v}`
+  //   两个维度**捆在一起判断**，于是「blocks 非空 + reminders 为空」时
+  //   把空 reminders 又塞了回去，normalize 的输出自己就不是 canonical。
+  //
+  //   为什么属性测试抓不到：docArb 生成的文档两个维度几乎总同时非空，
+  //   「恰好一个非空」是低概率形态；定向用例也没写这个形态。
+  //   → 纪律：**归一类的函数必须对每个维度独立断言**，
+  //     不能只断言"整体是 canonical"（那属于"看起来对但没生效"的盲区）。
+  const cases = [
+    ['blocks 非空 / reminders 空', { v: 1, blocks: [{ t: 'p', spans: [{ t: 'x' }] }], reminders: [] }],
+    ['blocks 空 / reminders 非空', { v: 1, blocks: [], reminders: [{ id: 'r1', at: '2026-10-05T08:30:00+08:00', text: 't' }] }],
+    ['两个都空', { v: 1, blocks: [], reminders: [] }],
+  ];
+  for (const [label, d] of cases) {
+    const out = normalize(d);
+    // 直接查键是否存在 —— 比字符串比对更能指出"是哪个维度被塞回去了"
+    if ((d.blocks ?? []).length === 0) {
+      assert.ok(!('blocks' in out), `${label}：blocks 为空却仍带blocks 键`);
+    } else {
+      assert.ok('blocks' in out, `${label}：blocks 非空却缺 blocks 键`);
+    }
+    if ((d.reminders ?? []).length === 0) {
+      assert.ok(!('reminders' in out), `${label}：reminders 为空却仍带 reminders 键`);
+    } else {
+      assert.ok('reminders' in out, `${label}：reminders 非空却缺 reminders 键`);
+    }
+    // 字节形态也钉一下：必须与 parseDoc 的往返一致
+    const can = canonicalize(out);
+    assert.equal(can, canonicalize(normalize(JSON.parse(can))), `${label}：不幂等`);
+    assert.deepEqual(parseDoc(can), out, `${label}：parseDoc 收不下自己的产物`);
+  }
 });
 
 /* ---------------- 5. 合并吸收律 ---------------- */

@@ -120,6 +120,20 @@ contenteditable 的 DOM 就是真源
   DOM 与编辑器测试**全部走 Playwright**。
 - **不引 Workbox**：SW 策略就两条且已踩坑固化（缓存名版本驱动、10s AbortController 超时），
   75 行手写足够。🔴 **APK 内不注册 SW**（与热更新打架，老项目踩过）。
+- 🔴🔴 **节点清单与行为清单必须同批次评审**（Lexical 0.52 实锤，见 `packages/client/src/behaviors.ts`）：
+  `createEditor({nodes})` 只解决"节点能被创建"，**打字/格式化/缩进/剪贴板/撤销全部由
+  `@lexical/*` 插件包提供，不在 `lexical` 核心里**。
+  漏注册 `registerRichText` 的症状是教科书级**静默降级**：渲染正常、聚焦正常、
+  `beforeinput` 照常触发、`updateEditor` 照常执行、**console 一个错都没有**，
+  但敲键盘一个字都进不去（`CONTROLLED_TEXT_INSERTION_COMMAND` 被 dispatch 到
+  没有监听者的黑洞）。纯逻辑单测对此完全无感，**只有 e2e 能抓**——
+  这也是"E2E-02 真浏览器打字"被列为全项目最重要回归闸的原因。
+- 🔴 **Lexical 0.52 的 Extension 体系（`defineExtension` / `RichTextExtension`）在本项目不可用**：
+  实测 `extension-core/` 只有 `.d.ts` 无 `.js`，`CreateEditorArgs` 与 `EditorConfig`
+  **都没有 extensions 字段**，Activation 入口在 `@lexical/react` 那一侧。
+  纯 DOM 宿主照抄 React 侧写法会得到"看起来注册了、实际 `register` 回调从未被调用"的
+  **第二层静默故障**。故统一走 `register*` 函数式（`registerRichText` / `registerList` /
+  `registerAutoLink`），并手工保证"兜底行为最后注册"。升级 Lexical 版本时**必须复核这条**。
 
 ## 5. 五条红线（写进 code review checklist）
 

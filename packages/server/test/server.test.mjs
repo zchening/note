@@ -208,10 +208,22 @@ test('/api/latest 无发布元数据时 404（App 靠这个查新版）', async 
   assert.equal(j.error, 'no release metadata');
 });
 
-test('未知路由 404 JSON', async () => {
-  const r = await fetch(`${base}/no/such/route`);
+test('未知资源 404 JSON（带扩展名，不走 SPA 回落）', async () => {
+  //🔴 这里必须用**带扩展名**的路径。用 /no/such/route 这类无扩展名路径时，
+  //   服务端按SPA 回落设计返回 200 index.html（见下面那条用例），那是**正确行为**。
+  //   本用例守的是另一条边界：伪装成静态资源的未知文件必须 404 JSON，不能回落。
+  const r = await fetch(`${base}/no/such/route.js`);
   assert.equal(r.status, 404);
   assert.equal((await r.json()).error, 'not found');
+});
+
+test('未知 API 路径 404 JSON（API 命名空间不参与 SPA 回落）', async () => {
+  // /api/* 永远不回落 —— 回落会把"接口404"变成"200 HTML"，
+  // 客户端拿到 HTML 去JSON.parse 会炸出一句完全看不出真相的 SyntaxError。
+  const r = await fetch(`${base}/api/no/such/endpoint`);
+  assert.equal(r.status, 404);
+  const j = await r.json();
+  assert.equal(j.error, 'not found');
 });
 
 test('不支持的方法 405', async () => {
@@ -226,9 +238,13 @@ test('静态资源：路径穿越被挡（403），不泄露文件系统', async
   assert.ok(!text.includes('root:'), '🔴 泄露了系统文件');
 });
 
-test('静态资源：无扩展名路径回落 index.html（存在时）', async () => {
-  // 本隔离实例的 WWW 指向仓库 www/（可能还不存在 index.html）
+test('静态资源：无扩展名路径回落 index.html（前端路由由客户端解析）', async () => {
+  // 本隔离实例的 WWW 指向仓库 www/，构建后 index.html 必然存在 → 必须 200 HTML。
+  // 🔴 判据不能写"200 或 404 都可以"：那种宽松断言等于没断言，
+  //   真出问题时（比如回落被误删）它照样绿。
   const r = await fetch(`${base}/some/spa/route`);
-  // 有 index.html → 200 HTML；没有 → 404 JSON。两者都可接受，但不许 500
-  assert.ok(r.status === 200 || r.status === 404, `实际 ${r.status}`);
+  assert.equal(r.status, 200, '无扩展名路径未回落到 index.html');
+  assert.match(r.headers.get('content-type') ?? '', /text\/html/);
+  const html = await r.text();
+  assert.match(html, /<div id="app">/, '回落内容不是应用外壳');
 });

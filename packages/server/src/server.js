@@ -369,6 +369,15 @@ async function route(req, res) {
 
   /* ---------- 静态资源 ---------- */
   if (method === 'GET' || method === 'HEAD') {
+    // 🔴 `/api/*` 永不走 SPA 回落。
+    //   前面所有 API 分支都没命中 → 这里就是"接口不存在"，必须 404 JSON。
+    //   若让它落进 serveStatic 的无扩展名回落，客户端会拿到 200 + index.html，
+    //   然后 JSON.parse 炸出一句 `Unexpected token '<' in JSON`——
+    //   报错位置离真正的原因（接口路径拼错了）十万八千里，且完全看不出是404 被吃掉了。
+    //   与 sw.js 里"`/api/*` 永不走缓存"是同一条纪律的两面：一个管离线，一个管回落。
+    if (p === '/api' || p.startsWith('/api/')) {
+      return sendJson(res, 404, { error: 'not found' });
+    }
     return serveStatic(p, res, method === 'HEAD');
   }
 
