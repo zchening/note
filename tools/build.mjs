@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WWW = join(ROOT, 'www');
 const ENTRY = join(ROOT, 'packages', 'client', 'src', 'main.ts');
+const CSS = join(ROOT, 'packages', 'client', 'src', 'ui', 'styles.css');
 const HTML = join(WWW, 'index.html');
 
 /** 唯一的版本来源（ARCH.md §4.6） */
@@ -40,22 +41,31 @@ async function ensureDirs() {
   await mkdir(WWW, { recursive: true });
 }
 
-function indexHtml(version, date, sha) {
+/**
+ * 生成 index.html。
+ *
+ * 🔴 CSS **inline 进 HTML 而不是引app.css** —— 单文件原子性是 OTA 的根基（文件头），
+ *   多一个外链就多一个"发了一半"的中间态。
+ *
+ * 🔴 `<meta name="color-scheme" content="light dark">` 而不是写死 light：
+ *   夜间模式下浏览器 UI（滚动条、表单控件）不配套会很难看。
+ *   注意这**不等于**"跟随系统" —— 那是 CSS 变量层面的事，见 ui/theme.ts 的 resolveTheme。
+ *
+ * 🔴 主题色取浅色底`#FBFBF8`（老项目色板的值，不是随手写的 #FAFAF8），
+ *   它决定移动端地址栏/启动屏的颜色，是"用户一眼看到的第一个颜色"。
+ */
+function indexHtml(version, date, sha, css) {
   return `<!doctype html>
-<html lang="zh-CN" >
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
-<meta name="color-scheme" content="light">
-<meta name="theme-color" content="#FAFAF8">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#FBFBF8">
 <meta name="referrer" content="no-referrer">
 <title>NoteSync</title>
 <style>
-/* 骨架样式；UI 外壳在 S4 填充。这里只保证首屏不是白屏。 */
-html,body{margin:0;height:100%;background:#FAFAF8;color:#1a1a1a;
-  font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-  -webkit-text-size-adjust:100%;overscroll-behavior:none}
-#boot{min-height:100%;display:flex;align-items:center;justify-content:center;font-size:14px;color:#888}
+${css}
 </style>
 </head>
 <body>
@@ -112,11 +122,12 @@ async function run() {
 
   const js = await readFile(join(WWW, 'app.js'));
   const sha = createHash('sha256').update(js).digest('hex');
-  await writeFile(HTML, indexHtml(version, date, sha), 'utf8');
+  const css = await readFile(CSS, 'utf8');
+  await writeFile(HTML, indexHtml(version, date, sha, css), 'utf8');
 
   const kb = (n) => (n / 1024).toFixed(1) + ' KB';
   console.log(`[build] app.js ${kb(js.length)}  sha256:${sha.slice(0, 16)}`);
-  console.log(`[build] index.html 就绪  版本 v${version}  ${date}`);
+  console.log(`[build] index.html 就绪（CSS inline ${kb(css.length)}）  版本 v${version}  ${date}`);
 }
 
 run().catch((e) => {

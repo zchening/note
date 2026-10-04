@@ -1,22 +1,23 @@
 /**
- * e2e：写入 → 同步 → 重载（真浏览器）
+ * e2e：写入 → 真源 → 重载（真浏览器，走完整用户路径）
  *
  * 🔴 为什么这条必须用真浏览器而不能用 jsdom（ARCH.md §4.6）：
  *   jsdom 的 Selection / beforeinput 残缺是老项目整套 mock 纪律税的根源。
- *   本用例的每一步都碰 DOM：contenteditable 聚焦、真实输入事件、SW 注册。
+ *   本用例的每一步都碰 DOM：contenteditable 聚焦、真实输入事件、落地页净化、
+ *   口令页提交、SW 注册。
  *
- * 🔴🔴 本文件是S3 唯一能抓到「行为插件漏注册」这类故障的地方。
+ * 🔴🔴 本文件是全项目唯一能抓到「行为插件漏注册」这类故障的地方。
  *   那个故障的特征是：渲染正常、事件正常、零报错，但字打不进去。
- *   纯逻辑单测（41 条）对此完全无感 —— 它们不需要行为插件。
+ *   纯逻辑单测对此完全无感 —— 它们不需要行为插件。
  *   所以 **E2E-02 是全项目最重要的回归闸**，任何动编辑器的改动都必须让它保持绿。
  *
  * 判据（不是"页面没报错"，而是逐项可验）：
- *   1. 页面真挂载了编辑器（不是空 div）
+ *   1. 产物版本 == package.json 版本（ARCH 明令：不许版本字面量断言）
  *   2. 真浏览器里输入 → **真源模型 JSON 变了**，且是 canonical 形态
  *   3. 重载后编辑器仍在（S5 起还要验内容留存）
- *   4. 产物版本 == package.json 版本（ARCH 明令：不许版本字面量断言）
  *
  * 用法：node --test --test-concurrency=6 test/e2e/*.test.js
+ *🔴 **不要传 --test-timeout**，原因见 harness.mjs 文件头。
  */
 
 import test from 'node:test';
@@ -24,10 +25,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
 // 🔴 直接引生产代码那份 canonicalize / parseDoc 当判据参照物，**不手写第二份实现**
 //   （手写必然漂移，且已经漂过一次：字典序 vs schema 定义顺序）。
 import { canonicalize, parseDoc } from '../../../shared-schema/src/canonical.ts';
+import { installHarness, openEditor } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // test/e2e → test → client → packages → 仓库根（**四级**）。
@@ -36,98 +37,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..', '..', '..', '..');
 const WWW = join(ROOT, 'www');
 
-/** 起一个静态服务伺服 www/。用 node:http，不引任何包。 */
-async function serveStatic(dir) {
-  const { createServer } = await import('node:http');
-  const { readFile: rf } = await import('node:fs/promises');
-  const types = {
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-  };
-  const srv = createServer(async (req, res) => {
-    try {
-      const p = new URL(req.url, 'http://x');
-      const rel = p.pathname === '/' ? '/index.html' : p.pathname;
-      const file = join(dir, rel);
-      const body = await rf(file);
-      const ext = rel.slice(rel.lastIndexOf('.'));
-      res.writeHead(200, { 'content-type': types[ext] ?? 'application/octet-stream' });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end('not found');
-    }
-  });
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  const { port } = srv.address();
-  return { srv, base: `http://127.0.0.1:${port}/` };
-}
-
-let browser;
-let base;
-let server;
-
-/** 全局硬超时：单个 await 再慢也不许拖住整个 runner。
- *  🔴 不用 node --test 的默认超时（默认无限），也不用只靠 --test-timeout：
- *     本机实测 browser.close() 偶发挂住，会把 runner 一起拖死，
- *     连汇总行都打不出来（旧项目 e2e ">15 分钟跑不完" 就是这么来的）。
- *     所以每个 await 都套一层 withTimeout，超时按"失败"记而不是"挂住"。 */
-function withTimeout(p, ms, label) {
-  return Promise.race([
-    p,
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error(`${label} 超时 ${ms}ms`)), ms).unref?.(),
-    ),
-  ]);
-}
-
-/**
- * 打开一个页面并等到编辑器就绪。
- * 🔴 两条失败信息必须分开报：编辑器没挂载 vs 页面脚本崩了。
- *   合成一句"页面有问题"会让人先去查网络，白费一轮。
- */
-async function openReadyPage() {
-  const page = await withTimeout(browser.newPage(), 30_000, 'newPage');
-  const errors = [];
-  page.on('pageerror', (e) => errors.push(String(e.message)));
-  await page.goto(base);
-  try {
-    await page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
-  } catch (e) {
-    const fatal = await page.textContent('.ns-fatal').catch(() => null);
-    const detail = fatal ? `启动失败横幅：${fatal}` : `页面错误：${errors.join(' | ') || '(无)'}`;
-    throw new Error(`编辑器未挂载。${detail}`);
-  }
-  return page;
-}
-
-test.before(async () => {
-  const s = await serveStatic(WWW);
-  base = s.base;
-  server = s.srv;
-  browser = await withTimeout(chromium.launch(), 60_000, 'chromium.launch');
-});
-
-test.after(async () => {
-  // 逐个兜住：任一 close 挂住都不许影响收尾
-  await Promise.race([browser?.close(), new Promise((r) => setTimeout(r, 5000))]);
-  await Promise.race([
-    new Promise((r) => server?.close(r)),
-    new Promise((r) => setTimeout(r, 3000)),
-  ]);
-});
+const h = installHarness(test, { dir: WWW });
 
 test('E2E-01 产物版本 == package.json 版本（唯一来源纪律）', async () => {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
-  const page = await openReadyPage();
+  const page = await openEditor(h.browser(), h.baseUrl(), 'e2e1');
   // 从 DOM 上的 data-version 读，与 package.json 比 —— 不写版本字面量
-  const v = await page.getAttribute('#root', 'data-version');
+  // 🔴 选择器是 #shell 不是 #root：S4 起外壳由 ui/shell.ts 渲染，根元素 id 叫 shell。
+  const v = await page.getAttribute('#shell', 'data-version');
   assert.equal(v, pkg.version, '产物版本与 package.json 不一致');
   await page.close();
 });
 
 test('E2E-02 真浏览器里打字 → 真源模型 JSON 变且是 canonical 形态', async () => {
-  const page = await openReadyPage();
+  const page = await openEditor(h.browser(), h.baseUrl(), 'e2e2');
 
   // 编辑器真挂载了（不是空 div）
   const editable = await page.$('#editor-host[contenteditable="true"]');
@@ -142,7 +65,7 @@ test('E2E-02 真浏览器里打字 → 真源模型 JSON 变且是 canonical 形
   await page.keyboard.press('Enter');
   await page.keyboard.type('真源第二行');
 
-  //🔴 判据落在**真源模型 JSON** 上，不是 DOM 文本。
+  // 🔴 判据落在**真源模型 JSON** 上，不是 DOM 文本。
   //   DOM 有字只说明浏览器渲染了；真源 JSON 变了才说明数据链路是通的。
   //   这两者可以分开坏（正是"行为插件漏注册"的症状：DOM 与真源都不变）。
   const after = await page.evaluate(() => window.__NOTESYNC_DOC__());
@@ -153,7 +76,7 @@ test('E2E-02 真浏览器里打字 → 真源模型 JSON 变且是 canonical 形
   const texts = after.blocks.map((b) => (b.spans ?? []).map((s) => s.t).join(''));
   assert.deepEqual(texts, ['真源第一行', '真源第二行']);
 
-  // 必须是 canonical 形态。判据 = **用生产代码的 canonicalize 再序列化一次，逐字节相同**。
+  // 必须是 canonical 形态。判据 = **用生产代码的canonicalize 再序列化一次，逐字节相同**。
   //
   // 🔴🔴 判据实现踩过的坑，写在这里防止重犯：
   //   我第一版手写了 `sortKeys`（字典序）当参照物，结果判据自己红了 ——
@@ -178,20 +101,19 @@ test('E2E-02 真浏览器里打字 → 真源模型 JSON 变且是 canonical 形
 });
 
 test('E2E-03 重载后编辑器仍在（本地持久化在 S5 接入后才有意义）', async () => {
-  const ctx = await withTimeout(browser.newContext(), 30_000, 'newContext');
-  const page = await ctx.newPage();
-  await page.goto(base);
-  await page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
+  const page = await openEditor(h.browser(), h.baseUrl(), 'e2e3');
 
   await (await page.$('#editor-host[contenteditable="true"]')).click();
   await page.keyboard.type('重载后要还在');
 
-  // 重载
+  // 重载。同一个 context 里 localStorage 还在 → 不再问口令，直接进编辑器
+  // 🔴 这条同时验了"记住口令"这个行为：若记住失效，重载后会停在口令页，
+  //   而症状是 waitForFunction 超时，不会有人想到是 localStorage 的问题。
   await page.reload();
   await page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
   const text = await page.textContent('#editor-host');
   // 本地持久化在 S5 接入同步后才有意义；这里只要求页面能重载起来且编辑器在
   // （内容留存是 S5 的验收项，不在 S3 范围）
   assert.ok(text !== null, '重载后编辑器不存在');
-  await ctx.close();
+  await page.close();
 });

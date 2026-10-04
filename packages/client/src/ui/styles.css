@@ -1,0 +1,254 @@
+/**
+ * 界面样式 —— 由 tools/build.mjs inline 进 index.html
+ *
+ * 🔴 颜色一律 var(--*)，**本文件不出现颜色字面量**（除透明/无色）。
+ *   值由 ui/theme.ts 在运行时写进 documentElement.style，
+ *   切换主题零重排样式表。改配色只改 theme.ts。
+ *
+ * 🔴 浅色是默认且是主体验（用户明确"浅色高级风、拒黑底"）：
+ *   body 背景取 --bg（暖白 #FBFBF8），卡片用 --box-bg 纯白 + 1px 描边
+ *   ——浅底上白卡**必须靠描边区分**，只靠填充色会看不见（用户踩过）。
+ */
+
+/* ---------- reset ---------- */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  /* 🔴 主题切换的过渡：只过渡颜色，不动布局属性（避免重排抖动） */
+  transition: background-color .18s ease, color .18s ease;
+}
+button, input { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; padding: 0; }
+svg.ic { display: block; }
+/* 次级描边：老项目用它做双层线条的分层 */
+.dark .ic .g { opacity: .45; }
+.ic .g { opacity: .6; }
+
+/* ---------- 启动占位 ---------- */
+#boot { min-height: 100%; display: flex; align-items: center; justify-content: center;
+        font-size: 14px; color: var(--muted); }
+
+/* ---------- 通用弹层 ---------- */
+.mask {
+  position: fixed; inset: 0; z-index: 40;
+  /* 🔴 值由 ui/theme.ts 的 OVERLAY 写进来（本文件不出现颜色字面量） */
+  background: var(--mask-bg);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+.mask.hidden { display: none; }
+.box {
+  width: 100%; max-width: 420px;
+  background: var(--box-bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 10px 40px var(--ring);
+  max-height: 86vh; overflow-y: auto;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.modal-head h1 { font-size: 17px; font-weight: 600; margin: 0; }
+.box-x { width: 32px; height: 32px; display: grid; place-items: center;
+         border-radius: 8px; color: var(--muted); }
+.box-x:hover { background: var(--hover); color: var(--fg); }
+
+/* ---------- 落地页 ---------- */
+.landing { min-height: 100%; display: flex; align-items: center; justify-content: center;
+           padding: 24px 20px 32px; }
+.landing-in { width: 100%; max-width: 380px; text-align: center; }
+.ns-logo { color: var(--accent); margin: 0 auto 6px; display: block; }
+.landing h1 { font-family: var(--serif); font-size: 26px; font-weight: 600;
+              margin: 4px 0 2px; letter-spacing: .2px; }
+.landing .sub { margin: 0 0 22px; font-size: 13px; color: var(--muted); letter-spacing: 2px; }
+.lrow { display: flex; gap: 8px; }
+.lrow input {
+  flex: 1; min-width: 0;
+  background: var(--box-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 12px;
+  font-size: 15px;
+  outline: none;
+}
+.lrow input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.lrow button {
+  flex: none; padding: 0 18px; border-radius: 10px;
+  background: var(--upload-bg); color: var(--bg);
+  font-size: 15px; font-weight: 500;
+}
+.dark .lrow button { color: var(--bg); }
+.lrow button:disabled { opacity: .35; cursor: not-allowed; }
+.warn { margin-top: 8px; font-size: 12px; color: var(--danger); }
+.hidden { display: none !important; }
+.lurl { margin-top: 10px; font-size: 12px; color: var(--muted);
+        font-family: var(--mono); word-break: break-all; min-height: 1em; }
+.legghint { margin-top: 4px; font-size: 12px; color: var(--accent); min-height: 1em; }
+.lscan { margin-top: 20px; font-size: 13px; color: var(--accent); cursor: pointer;
+         display: inline-block; padding: 6px 10px; border-radius: 8px; }
+.lscan:hover { background: var(--accent-soft); }
+.trust { margin-top: 26px; display: flex; justify-content: center; gap: 14px;
+         font-size: 11px; color: var(--muted); transition: opacity .2s ease; }
+/* 🔴 聚焦输入时信任行淡出：给软键盘留出视觉空间（老项目 .trust-away） */
+.landing.trust-away .trust { opacity: 0; }
+
+/* ---------- 口令页 / 首页 ---------- */
+.box .hint { font-size: 12.5px; line-height: 1.7; color: var(--muted); margin: 10px 0 14px; }
+.box input[type="password"] {
+  width: 100%; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 12px; font-size: 15px; outline: none;
+}
+.box input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.err { min-height: 1.2em; margin-top: 8px; font-size: 12.5px; color: var(--danger); }
+.box > button#ok {
+  width: 100%; margin-top: 6px; padding: 11px;
+  border-radius: 10px; background: var(--upload-bg); color: var(--bg);
+  font-size: 15px; font-weight: 500; letter-spacing: 4px;
+}
+.box > button#ok:disabled { opacity: .35; cursor: not-allowed; }
+.home { min-height: 100%; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; }
+.home h1 { font-family: var(--serif); font-size: 22px; margin: 0; }
+.home p { font-size: 13px; color: var(--muted); line-height: 2; margin: 0; }
+.home code { font-family: var(--mono); font-size: 12.5px; color: var(--accent);
+             background: var(--accent-soft); padding: 3px 8px; border-radius: 6px; }
+
+/* ---------- 应用外壳（顶栏 / 编辑器 / 底栏） ---------- */
+.shell { display: flex; flex-direction: column; min-height: 100%; }
+header.ns-top {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 20;
+  background: var(--bg);
+}
+.ns-brand { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ns-brand .ns-mark { color: var(--accent); flex: none; }
+.ns-brand b { font-family: var(--serif); font-weight: 600; font-size: 13px; letter-spacing: .3px; }
+.ns-top .sp { flex: 1; }
+.ns-top button.ns-ic {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: grid; place-items: center; color: var(--fg);
+  transition: background-color .14s ease;
+}
+.ns-top button.ns-ic:hover { background: var(--hover); }
+.ns-top button.ns-ic:active { background: var(--accent-soft); }
+/* 🔴 老项目把 themeBtn / lock 用 display:none 永久隐藏（功能已迁入菜单）。
+   这里照实复刻：不是 disabled、不是 visibility，是真的不占位。 */
+.ns-top button#themeBtn, .ns-top button#lock { display: none; }
+
+.ns-main { flex: 1; min-height: 0; display: flex; }
+.ns-editor {
+  flex: 1; min-width: 0;
+  padding: 16px 18px 40px;
+  outline: none;
+  font-size: 16px; line-height: 1.85;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.ns-editor:focus { outline: none; }
+.ns-p { margin: 0; min-height: 1.85em; }
+.ns-h1, .ns-h2, .ns-h3 { font-family: var(--serif); font-weight: 600; margin: 1em 0 .4em; }
+.ns-h1 { font-size: 1.5em; } .ns-h2 { font-size: 1.28em; } .ns-h3 { font-size: 1.1em; }
+.ns-quote { margin: .6em 0; padding-left: 12px; border-left: 2px solid var(--accent);
+           color: var(--muted); }
+.ns-ul, .ns-ol { margin: .5em 0; padding-left: 1.6em; }
+.ns-li { margin: .2em 0; }
+.ns-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.ns-b { font-weight: 700; } .ns-i { font-style: italic; } .ns-u { text-decoration: underline; }
+.ns-s { text-decoration: line-through; }
+.ns-c { font-family: var(--mono); font-size: .92em; background: var(--accent-soft);
+       padding: 1px 5px; border-radius: 4px; }
+.ns-list-body { display: block; }
+
+/* 提醒标记：对应老项目 <u class="rem-mark">；到点后加 .rem-done 变删除线 */
+.ns-rem { text-decoration: none; border-bottom: 1.5px solid var(--accent);
+          cursor: pointer; }
+.ns-rem-done { text-decoration: line-through; color: var(--muted); border-bottom-color: var(--line); }
+/* 折叠块：手风琴把手 + 折叠体。open 状态是 ephemeral UI 态，不进真源 */
+.ns-fold-head { display: flex; align-items: center; gap: 6px; cursor: pointer;
+                padding: 5px 0; color: var(--accent); }
+.ns-fold-head::before { content: "▸"; font-size: .8em; transition: transform .15s ease; }
+.ns-fold[data-open="true"] > .ns-fold-head::before { transform: rotate(90deg); }
+.ns-fold-body { padding-left: 14px; border-left: 1px solid var(--line); }
+.ns-fold[data-open="false"] > .ns-fold-body { display: none; }
+.ns-img { display: block; max-width: 100%; border-radius: 8px; margin: 6px 0; }
+
+footer.ns-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; font-size: 11.5px; color: var(--muted);
+  border-top: 1px solid var(--line);
+  position: relative; min-height: 40px;
+}
+footer.ns-foot #menuBtn { position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+                          width: 30px; height: 30px; display: grid; place-items: center;
+                          border-radius: 8px; }
+footer.ns-foot #menuBtn:hover { background: var(--hover); }
+footer.ns-foot .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+                      margin-left: 38px; flex: none; }
+footer.ns-foot .dot.on { background: var(--accent); }
+footer.ns-foot .dot.off { background: var(--danger); }
+#refreshBtn { margin-left: auto; width: 30px; height: 30px; display: grid; place-items: center;
+              border-radius: 8px; }
+#refreshBtn:hover { background: var(--hover); }
+.offlinebar { color: var(--muted); }
+
+/* ---------- 菜单面板 ---------- */
+#menuMainView, .menu-view { display: flex; flex-direction: column; gap: 8px; }
+#menuMainView { max-height: min(72vh, 560px); overflow-y: auto; }
+/* 菜单盒比普通弹层宽一点：菜单项有一列 112px 标签 + 26px 图标，420px 会挤 */
+.menu-box { max-width: 460px; position: relative; padding-top: 46px; }
+/* 关闭键浮在盒内右上角（老项目同此：菜单是从底栏升起的浮层，不是居中模态） */
+.menu-box > #menuClose { position: absolute; right: 12px; top: 12px; }
+.menu-item {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 42px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+  cursor: pointer; background: var(--box-bg);
+  transition: background-color .14s ease;
+}
+.menu-item:hover { background: var(--hover); }
+.menu-item .ic { width: 26px; height: 26px; flex: none; color: var(--fg); }
+/* 🔴 标签列定宽 112px —— 老项目 CSS 的原值，别"顺手改成自适应" */
+.menu-item .mi-l, #menuThemeLabel { width: 112px; text-align: left; font-size: 14px; }
+.menu-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.menu-head .sp { flex: 1; }
+.menu-head .mi-l { font-size: 15px; font-weight: 600; }
+.list-kicker { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+.link-hint { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin-top: 4px; }
+.empty { padding: 26px 0; text-align: center; font-size: 13px; color: var(--muted); }
+.list-row { display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+            border: 1px solid var(--line); border-radius: 10px; font-size: 13.5px;
+            background: var(--box-bg); }
+.list-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
+.row-btn { flex: none; padding: 6px 12px; border-radius: 8px; font-size: 12.5px;
+           border: 1px solid var(--line); background: var(--bg); }
+.row-btn:hover { background: var(--hover); }
+
+/* ---------- 皮肤覆膜层 ---------- */
+/* 🔴 非色彩、低透明、**不拦截交互**（pointer-events:none），老项目同此。
+   背景纹理由 ui/theme.ts 的 skinOverlayStyle() 直接写 style.background ——
+   这里只管几何与层序。 */
+#skinFx { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
+/* 复古皮肤的字标走等宽（只改字形，不动全局配色） */
+body.skin-a { --serif: var(--mono); }
+body.skin-b { --serif: var(--mono); }
+/* 终端绿皮肤的正文也等宽 */
+body.skin-a .ns-editor, body.skin-a .ns-top, body.skin-a .ns-foot { font-family: var(--mono); }
+/* 打字机纸皮肤：正文用衬线、行距更松、纸感格线由覆膜层负责 */
+body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
+
+/* 借壳反色（国产浏览器强制夜间时）老项目有，本项目按媒体查询兜底即可 */
+@media (prefers-color-scheme: dark) {
+  html:not(.force-light) body { color-scheme: dark; }
+}
