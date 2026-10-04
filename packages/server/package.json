@@ -1,0 +1,12 @@
+{
+  "name": "@bj/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "零依赖 Node 服务端：静态托管 + 密文中继 + SSE 推送 + failMap 持久化。",
+  "type": "module",
+  "main": "./src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}

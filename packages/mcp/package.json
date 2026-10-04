@@ -1,0 +1,14 @@
+{
+  "name": "@bj/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP stdio 服务端：读写密文，全程不解密（与老项目同策略，独立进程独立数据目录）。",
+  "type": "module",
+  "main": "./src/main.js",
+  "bin": {
+    "notesync-bj-mcp": "./src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js"
+  }
+}

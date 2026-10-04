@@ -1,0 +1,39 @@
+# 密钥与凭据（红线：绝不入库）
+*.p12
+*.jks
+*.keystore
+.env
+.env.*
+deploy_secrets.json
+secrets.json
+
+# 数据目录（含密文档与限流快照）
+data/
+data-bj/
+*.data
+
+# 构建产物（由 CI / 构建脚本物化）
+www/
+android/
+dist/
+*.apk
+*.aab
+
+# 依赖与缓存
+node_modules/
+.npm/
+.pnpm-store/
+*.tsbuildinfo
+
+# Playwright
+test-results/
+playwright-report/
+.playwright/
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.iml
+*.log
