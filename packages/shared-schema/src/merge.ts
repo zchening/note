@@ -744,6 +744,10 @@ function mergeReminders(
  * @param base 上次同步时的共同祖先
  * @param left 本地当前态
  * @param right 服务端下发的远端态
+ *
+ * 🔴🔴 返回值必须过一遍 normalize：合并结果里某个维度全空时不能留下 `[]`，
+ *   否则"内存态"与"字节态"就各说各话（老坑：调用方每处都得写 `?? []` 兜底，
+ *   漏一处就是运行时 TypeError —— 实测炸点 `doc.reminders.map` 读undefined → 整页白屏）。
  */
 export function mergeDocs(base: Doc, left: Doc, right: Doc): MergeResult {
   const conflicts: Conflict[] = [];
@@ -760,7 +764,11 @@ export function mergeDocs(base: Doc, left: Doc, right: Doc): MergeResult {
     right.reminders ?? [],
     conflicts,
   );
-  return { doc: { v: 1, blocks, reminders }, conflicts };
+  // 逐维度条件展开：与 canonical.ts 的 normalize 同一套规则
+  const doc: Doc = { v: 1 };
+  if (blocks.length > 0) doc.blocks = blocks;
+  if (reminders.length > 0) doc.reminders = reminders;
+  return { doc, conflicts };
 }
 
 /** 深拷贝一份规范化文档（不改动入参） */
