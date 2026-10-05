@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 
 /** 文件里一共几步。改文件就改这里，改忘了会红——这是故意的。 */
-const EXPECT_STEPS = 5;
+const EXPECT_STEPS = 6;
 /** 全绿时的时长下限（毫秒）。低于它几乎必然是"没真跑"（真跑约 25-30s）。 */
 const MIN_MS = 10000;
 
@@ -57,7 +57,7 @@ if (okSteps !== EXPECT_STEPS) {
 if (dur < MIN_MS) {
   fails.push('耗时 ' + dur + 'ms < ' + MIN_MS + 'ms（几乎必然是没真跑）');
 }
-// 父测试 + 五步子测试 = 6。# tests 少一个就说明有条被吃掉。
+// 父测试 + 六步子测试 = 7。# tests 少一个就说明有条被吃掉。
 if (tests !== EXPECT_STEPS + 1) {
   fails.push('# tests ' + tests + ' ≠ 期望 ' + (EXPECT_STEPS + 1) + '（有条用例没进汇总）');
 }

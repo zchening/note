@@ -50,12 +50,18 @@
  *   - 钩子**何时挂**必须先查 main.ts：`__NOTESYNC_DOC__` 只在 mountEditor 后存在，
  *     落地页/口令页上等它必然超时（这个错我犯过，症状看起来像"线上很慢"）
  *   - 判结构优先用 computedStyle / 实际尺寸 / 非白像素数
- *   - 跑完自查：必须看到 5 条 ok 且 duration > 10s。几百毫秒一定是没真跑。
+ *   - 跑完自查：必须看到 6 条 ok 且duration > 10s。几百毫秒一定是没真跑。
+ *
+ * 🔴 LIVE-06 与"网页部署"完全无关：它验的是服务器磁盘上那份 latest_app.json，
+ *   网页侧全绿不代表它被上传过。老项目 v10.1.8 就栽在这（详见 s06 的注释）。
  */
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+// 🔴 判据不许手写第二份实现：OTA 的解析逻辑直接从被测模块导入。
+//   LIVE-06 要判的是"真模块吃下真响应体后给出什么结论"，手写 JSON 检查只能证明"长得像"。
+import { parseLatest } from '../../src/update/ota.ts';
 
 const BASE = process.env.BJ_LIVE_BASE || 'https://bj.xuyinji.com.cn';
 /** 真机上只动自己这一篇，名字带时间戳避免与用户数据撞 */
@@ -331,7 +337,61 @@ async function s05() {
 }
 
 /**
- * 唯一的顶层用例：把五步**串行**跑完。
+ * LIVE-06：App 升级元数据端点（OTA 链路的唯一入口）
+ *
+ * 🔴🔴 这条为什么要单独判、且必须用真模块判：
+ *   App 只看 `GET /api/latest` 查新版。那份数据是**服务器磁盘上的一个文件**
+ *   （APP_DIR/deploy/latest_app.json），跟"网页部署 index.html"完全是两件事——
+ *   同一台机器、同一次部署动作，两者之间**没有任何因果关系**。
+ *   历史实锤：v10.1.8 网页侧全绿，App 永远查不到新版，因为那份 json 压根没人上传。
+ *   ⇒ 网页验收全绿**不能**代表 OTA 链路通。这条用例是唯一的独立判据。
+ *
+ * 🔴 为什么判据用真模块而不是手写 JSON 检查：
+ *   手写检查只能证明"JSON 长得像"，证明不了"客户端真能解析它"。
+ *   直接 import 被测的 parseLatest，判"真模块对这个真实响应体给出什么结论"——
+ *   这才是端到端。字段名/容错/失败分类的任何一侧改错，这里都会红。
+ *
+ * 🔴 分支判据：文件在 / 不在，两种状态都是合法部署态，但必须**各自判对**：
+ *   - 有文件：200 + 可被真模块解析 + 能挑出 .apk + no-store 头
+ *   - 无文件：404 + { error: 'no release metadata' }（App 据此显示"还没有可安装的新版本"）
+ *   最危险的中间态是 200 但内容坏（手改 json 写错字段）—— 那时 App 会显示"已是最新"，
+ *   而用户永远收不到更新。所以这里用真模块断言 ok:true，而不是只查字段存在。
+ */
+async function s06() {
+  const r = await fetch(BASE + '/api/latest');
+  const text = await r.text();
+
+  if (r.status === 404) {
+    // 🔴 404 是**合法**状态（还没出包），但必须带上 App 要用的那一句。
+    //   App 的 messageFor() 对 404 有单独文案，body 不对会让它掉进通用失败分支。
+    assert.ok(/no release metadata/.test(text),
+      '404 时 body 应为 { error: "no release metadata" }，实际：' + text.slice(0, 120));
+    return;
+  }
+
+  assert.equal(r.status, 200,
+    '/api/latest 应 200 或 404，实际 ' + r.status + '：' + text.slice(0, 120));
+  // no-store 是 OTA 语义的硬要求：一旦被缓存，用户会一直拿到旧 tag 并显示"已是最新"。
+  // 这个头只有打真域名才抓得到（本地内存服务器不发真实响应头）。
+  assert.equal(r.headers.get('cache-control'), 'no-store',
+    'App 升级元数据必须 Cache-Control: no-store（被缓存 = 永远拿不到新版）');
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+
+  // 🔴 判据走真模块：这才是"客户端真能吃下这份数据"。
+  //   0.0.1 是刻意给的老版本号：判据是"确实认得出有新版"，而不是"碰巧同版"。
+  const rel = parseLatest(text, '0.0.1');
+  assert.equal(rel.ok, true,
+    '真模块 parseLatest 解析不了线上响应，理由：' + rel.reason + '；body：' + text.slice(0, 200));
+  assert.ok(rel.rel.tag.length > 0, 'tag 不应为空');
+  assert.ok(rel.rel.url.endsWith('.apk'),
+    '应能挑出 .apk 资源，实际 url：' + rel.rel.url);
+  assert.ok(rel.rel.size > 0,
+    'APK size 应为正数（原生侧用 expectedBytes 判复用，0 会让截断包被当已下完），实际：' + rel.rel.size);
+  assert.equal(rel.rel.hasUpdate, true, '以 0.0.1 为本地版本时应判定有更新');
+}
+
+/**
+ * 唯一的顶层用例：把六步**串行**跑完。
  *
  * 🔴🔴 为什么必须是单父测试而不是五条顶层 test()（文件头"坑 3 / 坑 4"）：
  *   顶层 test() 在本文件里是并发的，`after()` 的 process.exit 会在
@@ -341,12 +401,13 @@ async function s05() {
  *   父测试不 resolve ⇒ after 不会触发 ⇒ 漏跑在结构上不再可能。
  *   `--test-concurrency=1` 挡不住这个：它只管文件间并发。
  */
-test('LIVE 线上真域名验收（bj.xuyinji.com.cn，5 步串行）', async (t) => {
+test('LIVE 线上真域名验收（bj.xuyinji.com.cn，6 步串行）', async (t) => {
   await t.test('LIVE-01 线上站点：TLS + 首页 + 静态资源 + CSP 头', s01);
   await t.test('LIVE-02 服务端契约：读不存在返回 200 空体（不是 404）', s02);
   await t.test('LIVE-03 端到端：解锁 → 写 → 落库 → 读回 → 服务端只见密文', s03);
   await t.test('LIVE-04 SSE 端点真的保持连接（不被 Caddy 缓冲）', s04);
   await t.test('LIVE-05 落地页：零包袱，有可点入口', s05);
+  await t.test('LIVE-06 App 升级元数据：真模块能解析（有文件 200 / 无文件 404）', s06);
 });
 
 after(() => {

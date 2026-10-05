@@ -46,6 +46,23 @@ jobs:
         # 任一红 → 本作业失败 → build 不执行 → 不出包
         run: npm test
 
+      - name: 时区无关性（本地绿 ≠ 到处绿）
+        # 🔴🔴 本项目第一条 CI 抓出来的红：F2 fmtRemTime。
+        #   断言写死了 `ISO(+08:00) → '10:00'`，而实现用的是 getHours 等**本地时区**
+        #   getter（这是对的设计：用户看到的提醒就该是用户所在时区的钟点）。
+        #   ⇒ 那条断言只在 GMT+8 成立 —— 开发者本机长期全绿，CI runner 是 UTC 就红。
+        #   本地永远抓不到这类问题（本机时区 = 写断言的人的时区），
+        #   所以这里显式在两个**非本机**时区下各跑一遍客户端单测。
+        #   断言时区无关是修法；把这件事钉进CI 才是防复发的部分。
+        run: |
+          for tz in UTC America/New_York Pacific/Auckland; do
+            echo "--- TZ=$tz ---"
+            # 🔴 直接调 runner 自带的 node，不走 npx：npx node 会去 registry 找
+            #   "node" 这个包（本地并没有这个依赖），装不上或行为不确定。
+            TZ=$tz node --test packages/client/test/*.test.mjs \
+              || { echo "🔴 客户端单测在 TZ=$tz 下失败 —— 存在写死时区的断言"; exit 1; }
+          done
+
       - name: 构建（顺带验证 esbuild 产物能出）
         run: npm run build
 
