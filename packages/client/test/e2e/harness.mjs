@@ -229,14 +229,49 @@ export function installHarness(test, { dir, onReady, api }) {
 export async function openEditor(browser, base, noteName = 'e2e', pass = '测试口令') {
   const page = await withTimeout(browser.newPage(), 30_000, 'newPage');
   const errors = [];
+  const consoleErrs = [];
   page.on('pageerror', (e) => errors.push(String(e.message)));
+  // 🔴 console.error 也要收：模块顶层抛错时 pageerror 未必触发，
+  //   而 boot() 里的 catch 会 console.error('[notesync] 启动失败' + 堆栈) ——
+  //   那是定位"整页白屏"最直接的线索。
+  page.on('console', (m) => {
+    if (m.type() === 'error') consoleErrs.push(m.text());
+  });
   await page.goto(base);
 
-  await withTimeout(page.waitForSelector('#li', { timeout: 20_000 }), 25_000, '等落地页');
+  /**
+   * 等一个选择器，超时就把页面自身的错误一并抛出。
+   *
+   * 🔴🔴 为什么值得单独抽出来：裸 `waitForSelector` 超时只说
+   *   "waiting for locator('#li') to be visible"，**不包含任何页面上下文**。
+   *   实测 10 条 e2e 一起 TimeoutError，我只能回头手工复现才知道是启动崩了。
+   *   把 pageerror + console.error + 启动失败横幅 + 错误行四路诊断
+   *   挂在超时点上，是一次性省掉整轮猜测的投入。
+   */
+  const waitOrExplain = async (selector, label) => {
+    try {
+      return await withTimeout(page.waitForSelector(selector, { timeout: 20_000 }), 25_000, label);
+    } catch (e) {
+      const fatal = await page.textContent('.ns-fatal').catch(() => null);
+      const errRow = await page.textContent('#err').catch(() => null);
+      const bodyLen = await page.evaluate(() => document.body?.innerHTML.length ?? -1).catch(() => -2);
+      throw new Error(
+        `${label} 超时（找 ${selector}）。` +
+        `bodyHTML长度=${bodyLen}；` +
+        `启动失败横幅=${fatal || '(无)'}；` +
+        `页面错误行=${errRow || '(空)'}；` +
+        `pageerror=${errors.join(' | ') || '(无)'}；` +
+        `console.error=${consoleErrs.join(' | ') || '(无)'}；` +
+        `原始=${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  };
+
+  await waitOrExplain('#li', '等落地页');
   await page.fill('#li', noteName);
   await page.click('#landingBtn');
 
-  await withTimeout(page.waitForSelector('#pw', { timeout: 20_000 }), 25_000, '等口令页');
+  await waitOrExplain('#pw', '等口令页');
   await page.fill('#pw', pass);
   await page.click('#ok');
 

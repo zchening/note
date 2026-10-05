@@ -200,15 +200,25 @@ export class FoldNode extends ElementNode {
     return this;
   }
 
+  /**
+   * 🔴🔴 开合状态走 `data-open` **属性**，不是 class。
+   *   ui/styles.css 里写的是 `.ns-fold[data-open="true"]` / `[data-open="false"]`，
+   *   我第一版在 createDOM 里只切 class（`ns-fold open`）——
+   *   症状是**折叠永远展不开**，而节点本身、序列化、点击逻辑全都正常，
+   *   单测与序列化测试全绿。只有真浏览器点一下才看得出来。
+   *   两处口径不一致的这类 bug 必须靠"CSS 选择器与节点输出一一对照"来抓，
+   *   所以下面把属性名写进注释，与 styles.css 那一行一一对应。
+   */
   override createDOM(): HTMLElement {
     const dom = document.createElement('div');
-    dom.className = this.__open ? 'ns-fold open' : 'ns-fold';
+    dom.className = 'ns-fold';
+    dom.dataset.open = this.__open ? 'true' : 'false';
     return dom;
   }
 
   override updateDOM(prev: FoldNode, dom: HTMLElement): boolean {
     if (prev.__open !== this.__open) {
-      dom.classList.toggle('open', this.__open);
+      dom.dataset.open = this.__open ? 'true' : 'false';
       return true;
     }
     return false;

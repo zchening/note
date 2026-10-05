@@ -77,6 +77,51 @@ export const COPY = {
   conflictKeepRemote: '保留云端的',
   conflictEmpty: '当前没有冲突',
 
+  /* 提醒：响铃卡片（老项目 remCard，页内主通道 —— 无论通知权限如何都弹） */
+  remCardTitle: '提醒',
+  remCardAck: '知道了',
+  /** 补弹时的迟到提示：`{m}` 已被填成「12分钟」或「3 小时」 */
+  remCardLate: (m: string): string => `已过 ${m}`,
+  remLateMin: (n: number): string => `${n} 分钟`,
+  remLateHour: (n: number): string => `${n} 小时`,
+  /** 通知正文：`来自笔记 · {id}` */
+  remNotifyBody: (id: string): string => `来自笔记 · ${id}`,
+  /** 通知标题：⏰ + 事项，事项为空时的兜底文案 */
+  remNotifyFallback: '该看笔记了',
+  /** 通知 tag，多条提醒共用一个以免刷屏 */
+  remNotifyTag: 'notesync-rem',
+
+  /* 提醒：时间 chip（光标落在时间串上浮出）。老项目 v7.8.0 起是三行小卡，不是单行胶囊 */
+  remChipAdd: '添加提醒',
+  remChipAdded: '✅ 提醒已添加',
+  /** 时间 chip 关闭按钮的 aria */
+  remChipClose: '关闭',
+  /** chip 上时间行：`{time}　{item}` */
+  remChipWhen: (time: string, item: string): string => (item ? `${time}　${item}` : time),
+
+  /* 提醒：面板（老项目 remPanel，时/分滚轮 + 事项 + 已设列表） */
+  remPanelTitle: '提醒',
+  remItemPlaceholder: '事项（最多20字）',
+  remItemAria: '提醒事项',
+  remDateAria: '提醒日期',
+  remAddBtn: '添加提醒',
+  remCancelOne: '取消这条提醒',
+  remCancelGlyph: '×',
+  remWheelHhAria: '小时',
+  remWheelMmAria: '分钟',
+  remIosTip: 'iOS 需先添加到主屏幕才能收到通知（仍可设置，下次打开会提示）',
+  remEmpty: '还没有设置提醒',
+  /** 面板回写正文的格式：`{time}　{item}` —— 全角空格是分隔符，解析层靠它划「事项区」 */
+  remInsertLine: (time: string, item: string): string => (item ? `${time}　${item}` : `${time}　`),
+  /** 已过时刻时的accent 提示（老项目只闪红框不弹文字，这里给一句可读的） */
+  remPastTip: '这个时间已经过去了，换一个吧',
+
+  /* 提醒：到期与权限 */
+  remPermTitle: '开启提醒通知',
+  remPermBody: '到点时用通知提醒你，不开启也能在下次打开时看到。',
+  remPermOk: '好',
+  remCatchupKicker: '上次没打开，以下提醒已过：',
+
   /* 顶栏 title（老项目原文，含全角括号） */
   titleStrike: '删除线',
   titleRemind: '提醒（到点通知或下次打开提示）',

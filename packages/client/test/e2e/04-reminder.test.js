@@ -1,0 +1,385 @@
+/**
+ * 提醒全链路 e2e（REM 系列）—— 真浏览器
+ *
+ * 🔴🔴 为什么提醒必须走 e2e 而不是单测：
+ *   提醒的一半价值在**交互**上 —— 光标落在时间串上 chip 才出现、点 CTA 才加提醒、
+ *   加完 chip 变确认卡、响铃卡在页内弹。这些都是 DOM 行为，jsdom 测不了
+ *   （本仓刻意不装 jsdom，守"零依赖"投毒防线）。
+ *
+ * 🔴🔴 为什么"没装 jsdom"这件事本身要写下来：
+ *   一旦有人顺手 `npm i -D jsdom` 装上，测试就会分成"一半 jsdom 一半 e2e"两套口径，
+ *   两套对"chip 何时显示"的判据很容易不一致 —— 于是出现"单测绿、真机不弹 chip"。
+ *
+ * 路径纪律：走真实用户路径（落地页 → 口令页 → 编辑器），不直接 goto。
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { installHarness, openEditor, withTimeout } from './harness.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// 🔴 必须用 resolve 拼绝对路径，不能用 new URL('../../../www/', import.meta.url).pathname
+//   —— Windows 下 pathname 带前导斜杠（/D:/Users/...），readFile 直接 ENOENT，
+//   症状是全部用例TimeoutError（我第一版就这么写的）。
+//
+// 🔴🔴 必须是 **4 级**（e2e → test → client → packages → 仓库根），不是 3 级。
+//   我照抄 03 头部时写成 '..','..','..'，得到 packages/www —— 那个目录不存在，
+//   于是 index.html 直接 404。症状极具欺骗性：bodyHTML 只剩 74 字符、
+//   '#li' 永远等不到、pageerror 与启动失败横幅全是空的（因为压根没有页面），
+//   只有 console 里一条 "Failed to load resource: 404"。
+//   我在这上面绕了很久去查 main.ts 和启动流程 —— 真凶是路径少一级。
+//   判据口诀：**bodyHTML 长度只有几十 = 没页面，别查 JS，先查 WWW 路径。**
+const WWW = resolve(HERE, '..', '..', '..', '..', 'www');
+
+const h = installHarness(test, { dir: WWW });
+
+/** 在编辑器里输入一段纯文本（走真键盘，触发真input 事件）。 */
+async function typeBody(page, text) {
+  await page.click('.ns-editor');
+  await page.keyboard.type(text);
+}
+
+/**
+ * 把光标移到全文第 offset 个字符处。
+ *
+ * 🔴🔴 Range.setStart 的签名是 `setStart(node, offset)` —— 第一个参数必须是
+ *   **节点**，第二个才是节点内偏移。我第一版写成 `r.setStart(left, left)`
+ *   （把偏移当节点传），报`parameter 1 is not of type 'Node'`，
+ *   9 条用例一起红，报错还落在 evaluate 内部，看着像页面坏了。
+ *
+ * 健壮性：offset 超界就钳到最后，且**必须自己派发 selectionchange** ——
+ *   programmatic改Range 在各内核不一定触发该事件，不补就静默不命中 chip。
+ */
+async function caretTo(page, offset) {
+  return page.evaluate((off) => {
+    const el = document.querySelector('.ns-editor');
+    if (!el) throw new Error('找不到 .ns-editor');
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let left = Math.max(0, off);
+    let node = walker.nextNode();
+    let last = null;
+    while (node) {
+      const len = (node.textContent || '').length;
+      if (left <= len) break;
+      left -= len;
+      last = node;
+      node = walker.nextNode();
+    }
+    if (!node) {
+      // 越界：钳到最后一个文本节点末尾
+      node = last;
+      left = node ? (node.textContent || '').length : 0;
+    }
+    if (!node) throw new Error('编辑器里没有文本节点，无法定位光标');
+    const r = document.createRange();
+    r.setStart(node, left);
+    r.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.dispatchEvent(new Event('selectionchange'));
+    return { node: node.textContent, offset: left };
+  }, offset);
+}
+
+test('REM-01 时间 chip：光标落在未过期时间串上浮出「添加提醒」', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem01', 'pw');
+  try {
+    // NOW 之前的时间会过期，chip 不出现；用明天的时刻
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `会议 ${tomorrow} 开始`);
+    // 光标放到时间串中间
+    const idx = 3 + 4;
+    await caretTo(page, idx);
+    const visible = await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 }).catch(() => null);
+    assert.ok(visible, 'chip 应出现');
+    const txt = await page.textContent('#timeChip');
+    assert.ok(txt.includes('添加提醒'), '实际=' + txt);
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-02 🔴 已过期的时间串不浮 chip（老项目零打扰铁律）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem02', 'pw');
+  try {
+    // 昨天的时刻：解析层会标 expired
+    const yesterday = await page.evaluate(() => {
+      const d = new Date(Date.now() - 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `会议 ${yesterday} 已经过去了`);
+    await caretTo(page, 3 + 4);
+    // 给一点时间让 selectionchange 处理完
+    await page.waitForTimeout(300);
+    const hidden = await page.evaluate(() => {
+      const el = document.querySelector('#timeChip');
+      return !el || el.classList.contains('hidden');
+    });
+    assert.ok(hidden, '已过期的时间串不该出 chip');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-03 点「添加提醒」后 chip 变确认卡，且真源里出现该提醒', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem03', 'pw');
+  try {
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `${tomorrow} 开会`);
+    await caretTo(page, 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    // chip 变确认卡
+    const chipTxt = await withTimeout(
+      page.waitForFunction(() => {
+        const el = document.querySelector('#timeChip');
+        return el && el.textContent.includes('提醒已添加') ? el.textContent : null;
+      }, { timeout: 5000 }),
+      6000, '等确认卡',
+    );
+    assert.ok(String(chipTxt).includes('提醒已添加'));
+    // 🔴 真源里必须真的有提醒
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal(doc.reminders.length, 1, '真源里应恰好一条提醒');
+    assert.ok(doc.reminders[0].at, '必须有 at');
+    // 事项应刷新为「 开会」附近的内容
+    assert.ok(doc.reminders[0].text.includes('开会') || doc.reminders[0].text === '',
+      '事项应含「开会」，实际=' + JSON.stringify(doc.reminders[0].text));
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-04 🔴 加了提醒后正文出现下划线（span带 rem 标记）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem04', 'pw');
+  try {
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `${tomorrow} 开会`);
+    await caretTo(page, 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    // 🔴 等对账把rem 标记挂回 span（对账在 update 监听里跑，是异步的）
+    //
+    // 🔴🔴 选择器是 **`u.rem-mark`**，不是 `.ns-rem` —— 我第一版写 `.ns-rem`，
+    //   而 ReminderMarkNode.createDOM() 建的是 `<u class="rem-mark" data-rem="...">`
+    //   （见 nodes.ts）。于是这个选择器**永远匹配不到**，用例 timeout，
+    //   而产品其实完全正常（探针实测下划线数 = 1）。
+    //   这是"测试判据手写了一份和实现不同的口径"的典型：两边都要改，且必须改对。
+    //   判据以**生产代码的类名**为准，不以自己想当然的命名为准。
+    await withTimeout(
+      page.waitForFunction(() => document.querySelectorAll('.ns-editor u.rem-mark').length > 0, { timeout: 5000 }),
+      6000, '等下划线出现',
+    );
+    const marked = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.ns-editor u.rem-mark')).map((e) => e.textContent));
+    assert.equal(marked.join(''), tomorrow, '下划线应正好盖住时间串，实际=' + JSON.stringify(marked));
+    // 🔴 事项不能被划上
+    const allText = await page.evaluate(() => document.querySelector('.ns-editor').textContent);
+    assert.ok(allText.includes('开会'), '正文文字必须完整');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-05 🔴 正文删掉时间串，提醒自动消失（联动）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem05', 'pw');
+  try {
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `${tomorrow} 开会`);
+    await caretTo(page, 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    // 全选删除
+    await page.click('.ns-editor');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.press('Delete');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 0, { timeout: 5000 }),
+      6000, '等提醒被判死',
+    );
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((doc.reminders || []).length, 0, '正文删了时间串，提醒必须消失');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-06 顶栏铃铛打开提醒面板，面板里有「添加提醒」', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem06', 'pw');
+  try {
+    await page.click('#remBtn');
+    const box = await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    assert.ok(box, '面板应显示');
+    const txt = await page.textContent('.ns-rembox');
+    assert.ok(txt.includes('添加提醒'), '实际=' + txt);
+    // 滚轮应存在（时/分各一）
+    const wheels = await page.evaluate(() => ({
+      hh: !!document.querySelector('.ns-rem-wheel-hh'),
+      mm: !!document.querySelector('.ns-rem-wheel-mm'),
+    }));
+    assert.ok(wheels.hh && wheels.mm, '时/分滚轮都应存在，实际=' + JSON.stringify(wheels));
+    // 默认时刻 = 当前 +5 分钟（老项目 v5.42）
+    const defaulted = await page.evaluate(() => {
+      const hh = document.querySelector('.ns-rem-wheel-hh');
+      const mm = document.querySelector('.ns-rem-wheel-mm');
+      return { hh: Number(hh.dataset.val), mm: Number(mm.dataset.val) };
+    });
+    const now = new Date(Date.now() + 5 * 60000);
+    assert.equal(defaulted.hh, now.getHours(), '小时轮默认值应为 +5 分钟处的小时');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-07 面板里加一条提醒，真源出现该提醒，面板自动收起', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem07', 'pw');
+  try {
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.fill('.ns-rem-input', '开会');
+    await page.click('.ns-rem-add');
+    // 面板收起
+    await withTimeout(
+      page.waitForSelector('.ns-rembox', { state: 'hidden', timeout: 5000 }),
+      6000, '等面板收起',
+    );
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((doc.reminders || []).length, 1, '应恰好一条提醒');
+    assert.equal(doc.reminders[0].text, '开会');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-08 面板里点 × 取消提醒，真源里消失', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem08', 'pw');
+  try {
+    // 先加一条
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.fill('.ns-rem-input', '开会');
+    await page.click('.ns-rem-add');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    // 再开面板点×
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.click('.ns-rem-off');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 0, { timeout: 5000 }),
+      6000, '等提醒被取消',
+    );
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((doc.reminders || []).length, 0);
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-09🔴 提醒要真推上服务器（不只是本地）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem09', 'pw');
+  try {
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `${tomorrow} 开会`);
+    await caretTo(page, 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    // 🔴🔴 等推送必须**轮询服务器 store**，不能等页面里的东西。
+    //   我第一版写的是 `waitForFunction(() => __NOTESYNC_DOC__().reminders.length === 1)`
+    //   —— 那是**本地**状态，在这条断言之前早就成立了，等于什么都没等；
+    //   然后立刻去读 h.api.notes，此时 debounce（700ms）还没走完，必然读不到。
+    //   症状：断言「服务器上应有这条笔记」失败，但产品其实完全正常。
+    //   判据纪律：**跨进程/跨边界（浏览器→服务器）的断言，等的是那一侧的状态**。
+    //   轮询上限给 8 秒：首推 + 编辑推 + 加密往返都留足余量。
+    const deadline = Date.now() + 8000;
+    let raw = null;
+    while (Date.now() < deadline) {
+      const v = h.api.notes.get('rem09');
+      if (v !== undefined && v !== null) {
+        raw = typeof v === 'string' ? v : JSON.stringify(v);
+        break;
+      }
+      await page.waitForTimeout(200);
+    }
+    assert.ok(raw !== null, '服务器上应有这条笔记（等了 8 秒仍没收到推送）');
+    // 密文不该含明文：提醒、事项、时间串全部加密，服务器只见信封
+    for (const secret of ['提醒', '开会', tomorrow, 'reminders']) {
+      assert.ok(!raw.includes(secret), `服务器密文里不该出现「${secret}」，实际=${raw.slice(0, 200)}`);
+    }
+    // 反向自证：信封本身该是合法 JSON 且含密文字段
+    //（证明上面不是"因为压根没内容"而过的）。
+    // 🔴 `v` 是**数字** 1（信封版本号），不是字符串 —— 我第一版断言 `typeof env.v === 'string'`，
+    //   于是一条本来完全正常的用例红了。信封形态见 shared-schema/src/crypto.ts。
+    const env = JSON.parse(raw);
+    assert.equal(env.v, 1, '信封版本应为数字 1，实际=' + JSON.stringify(env.v));
+    assert.equal(env.alg, 'AES-256-GCM', '算法应为 AES-256-GCM');
+    assert.equal(env.kdf?.name, 'PBKDF2-HMAC-SHA256', 'KDF 名称必须完整拼写');
+    assert.ok(typeof env.iv === 'string' && env.iv.length > 0, '信封必须有 iv');
+    assert.ok(typeof env.ct === 'string' && env.ct.length > 0, '信封必须有密文 ct');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-10 🔴 XSS：提醒事项含 HTML 时不得执行', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem10', 'pw');
+  try {
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    const payload = '<img src=x onerror="window.__pwned=1">';
+    await page.fill('.ns-rem-input', payload);
+    await page.click('.ns-rem-add');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    // 等 chip 消失（1.6秒后自动隐藏）
+    await page.waitForTimeout(2000);
+    const pwned = await page.evaluate(() => !!window.__pwned);
+    assert.ok(!pwned, 'XSS被执行了');
+    // 重新打开面板：列表里应显示为**纯文本**
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    const rowTxt = await page.textContent('.ns-rem-row');
+    assert.ok(rowTxt.includes('<img'), '应显示原始字符串作为文本，实际=' + rowTxt);
+    // 页面里不该有真的 img 元素
+    const imgCount = await page.evaluate(() => document.querySelectorAll('.ns-rembox img').length);
+    assert.equal(imgCount, 0, '不该把 payload 解析成真的img 元素');
+  } finally {
+    await page.close();
+  }
+});

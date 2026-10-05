@@ -21,7 +21,18 @@
  *   /<name> 且口令错/数据坏 → pass（**同一句错误文案**，见 ARCH 安全不变量）
  */
 
-import { createEditor, FORMAT_TEXT_COMMAND, type EditorState, type LexicalEditor } from 'lexical';
+import {
+  $createRangeSelection,
+  $getNodeByKey,
+  $getSelection,
+  $isRangeSelection,
+  $setSelection,
+  createEditor,
+  FORMAT_TEXT_COMMAND,
+  type EditorState,
+  type LexicalEditor,
+} from 'lexical';
+import { $createParagraphNode, $createTextNode, $getRoot } from 'lexical';
 
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
@@ -36,6 +47,8 @@ import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
 import { isEggRoute, sanitizeNoteName } from './ui/landing-logic.ts';
+import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
+import { ReminderUI } from './reminder/ui.ts';
 
 declare global {
   interface Window {
@@ -116,6 +129,106 @@ function noteNameFromPath(): string {
 
 /* ---------------- 路由 ---------------- */
 
+/* ---------------- 提醒：往正文插一行 ---------------- */
+
+/**
+ * 🔴 面板打开瞬间的正文选区（老项目 panelSavedSel）。
+ *
+ * 为什么必须存：面板里的输入框一获焦，编辑器就丢光标；等用户点「添加」时
+ * 已经无从知道该往哪插。老项目也是这么做的 —— 打开面板时 `saveSelection()`，
+ * 提交时 `restoreSelectionInBlock()` 再插。
+ *
+ * 用 Lexical 自己的 selection API（$getSelection/$setSelection）而不是 DOM Range：
+ * DOM Range 在 reconcile 后就失效了，存下来再 set 会抛 "Unable to find an active
+ * editor state"。存 Range 的**序列化形态**（anchor/focus 节点 key + offset）才活得下来。
+ */
+let panelSavedSel: {
+  anchorKey: string;
+  anchorOffset: number;
+  focusKey: string;
+  focusOffset: number;
+} | null = null;
+
+function saveEditorSelection(): void {
+  const ed = editor;
+  if (!ed) return;
+  ed.getEditorState().read(() => {
+    // 🔴 收窄成 RangeSelection：$getSelection() 的返回类型是 BaseSelection，
+    //   它没有 anchor/focus（只有 isCollapsed/getTextContent 等），
+    //   不收窄就 TS2339。NodeSelection / GridSelection 的锚点语义完全不同，
+    //   硬取 anchor 会拿到 undefined，插行时静默插到文档开头。
+    const sel = $getSelection();
+    if (!sel || !$isRangeSelection(sel)) {
+      panelSavedSel = null;
+      return;
+    }
+    panelSavedSel = {
+      anchorKey: String(sel.anchor.key),
+      anchorOffset: sel.anchor.offset,
+      focusKey: String(sel.focus.key),
+      focusOffset: sel.focus.offset,
+    };
+  });
+}
+
+/**
+ * 在正文里插入一行提醒文字，并把光标落到它**后面那个空行**的行首
+ * （老项目 v7.3.2：连续添加多个提醒时文字不会连在一起）。
+ *
+ * 🔴 用 `$insertText` 而不是自己拼 TextNode 再 append：
+ *   前者走 Lexical 自己的选区更新与撤销栈合并（Ctrl+Z 能一步撤掉整行），
+ *   后者要自己处理选区，容易出现"文字插进去了但光标还在原地"。
+ */
+function insertRemLineToEditor(text: string): void {
+  const ed = editor;
+  if (!ed) return;
+  ed.update(
+    () => {
+      // 1) 恢复面板打开时的选区。
+      //    🔴 用 $getNodeByKey 而不是 ed.getEditorState()._nodeMap：
+      //      后者是私有字段，bundled ESM 下改名/压缩即失效，且失败时报
+      //      "undefined is not a function" 这种完全指不到错的错。
+      if (panelSavedSel) {
+        const anchor = $getNodeByKey(panelSavedSel.anchorKey);
+        const focus = $getNodeByKey(panelSavedSel.focusKey);
+        if (anchor && focus) {
+          const sel = $createRangeSelection();
+          sel.anchor.set(anchor.getKey(), panelSavedSel.anchorOffset, 'text');
+          sel.focus.set(focus.getKey(), panelSavedSel.focusOffset, 'text');
+          $setSelection(sel);
+        }
+      }
+      // 2) 插提醒行文字
+      //    🔴🔴 用 **RangeSelection.insertText() 实例方法**，不用 $insertText：
+      //      实测 0.52 里 $insertText 定义在 lexical/dist/Lexical.dev.js 内，
+      //      但**没有从 lexical 的 .d.ts 导出**（typecheck 报 TS2305）；
+      //      而 @lexical/selection 只导出 $moveCharacter 之类，也没有它。
+      //      实例方法是**公开且有类型**的入口，语义相同（走 Lexical 自己的选区更新
+      //      与撤销栈合并，Ctrl+Z 能一步撤掉整行）。
+      const sel = $getSelection();
+      if (!sel || !$isRangeSelection(sel)) {
+        // 🔴🔴 无选区时**追加到文末**，不能直接 return。
+        //   探针实测：全新笔记（文档只有一个空段落）从未聚焦过时 $getSelection() 返回 null，
+        //   我第一版直接 return —— 于是「面板加的第一条提醒根本没进正文」，
+        //   紧接着对账按「正文里找不到时间串」判死，净结果是加了个寂寞。
+        //   老项目 insertNodeAtCaret 也是这个语义：无光标就落到末尾。
+        const root = $getRoot();
+        root.append($createParagraphNode().append($createTextNode(text)));
+        root.append($createParagraphNode());
+        return;
+      }
+      sel.insertText(text);
+      // 3) 换行 + 再补一个空行（老项目 v7.3.2：连续添加不连行）
+      //    🔴 用 insertNodes 而不是自己 append —— 后者不更新选区，
+      //      症状是「文字插进去了但光标还在原地」，连续加第二条会插到第一行中间。
+      sel.insertNodes([$createParagraphNode()]);
+      sel.insertNodes([$createParagraphNode()]);
+    },
+    { discrete: true },
+  );
+  panelSavedSel = null;
+}
+
 /* ---------------- 应用装配 ---------------- */
 
 const appEl = document.getElementById('app');
@@ -184,8 +297,8 @@ function onTopbar(act: TopbarAction): void {
       return;
     }
     case 'remind': {
-      // 提醒靠正文里的时间标记（S5 的自动识别），S4 只需说明这一机制
-      setFootStatus?.('synced', '在正文里写时间即可加提醒');
+      // 顶栏铃铛 = 打开提醒面板（老项目同一入口）
+      reminderRef?.togglePanel();
       return;
     }
     default:
@@ -201,7 +314,6 @@ function onTopbar(act: TopbarAction): void {
  *   稍后内容才闪进来"的中间态，而用户在这半秒内打字就会被打断。
  */
 function mountEditor(name: string, initialDoc?: Doc): void {
-  const initial: Doc = initialDoc ?? emptyDoc();
   currentNote = name;
 
   const shell = buildShell(app, {
@@ -311,30 +423,116 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
   registerBehaviors(ed);
 
-  let latest: Doc = initial;
+  /* ---- 提醒层接线 ---- */
+  // 🔴 对账必须发生在 docToLexical **之前**：对账会把提醒的 rem 标记挂到
+  //   正文的 span 上，而序列化是按 span.rem 渲染下划线的。
+  //   顺序反了 ⇒ 首屏正文没有下划线，要等下一次 update 才补上（闪一下）。
+  const reconciled = reconcileReminders(initialDoc ?? emptyDoc());
+  const initial = reconciled.doc;
+
+  reminderRef?.destroy();
+  reminderRef = new ReminderUI({
+    getDoc: () => latestDoc,
+    setDoc: (d) => {
+      // 🔴🔴🔴 只写 reminders，**绝不整体替换文档**。
+      //
+      //   探针实测（zz-probe）：面板加提醒后 `编辑器文本 = ""`、真源 `{"v":1}`。
+      //   根因是我原来写的 `docToLexical(d)` —— 它 `root.clear()` 后按 blocks 重建整棵树。
+      //   而面板流程是「先 insertLine 插正文行、再 setDoc 写 reminders」，
+      //   第二次调用把刚插进去的那一行**连同光标一起冲掉**，
+      //   于是正文空、时间串消失，紧接着对账按「正文里找不到时间串」把提醒判死。
+      //   净结果：面板正常收起、服务器确实收到了一次推送，**但什么都没存下来**，
+      //   界面上零报错。这是本项目最危险的一类故障（看起来成功、实际丢数据）。
+      //
+      //   reminders 是**真源字段**，而 Lexical 树里只有 span.rem 标记、没有提醒列表，
+      //   所以它天然是「树外」的数据：改它不需要动树。
+      //   正确做法：先把新 reminders 记进 latestDoc，再让**下划线标记**由对账写回树里。
+      latestDoc = d;
+      // 立刻把 rem 标记铺到正文（对账只改标记，不动用户输入）
+      const marked = reconcileReminders(d);
+      latestDoc = marked.doc;
+      editor?.update(
+        () => {
+          docToLexical(marked.doc);
+        },
+        { discrete: true },
+      );
+    },
+    onPanelToggle: () => reminderRef?.togglePanel(),
+    insertLine: (text) => insertRemLineToEditor(text),
+    saveSelection: () => saveEditorSelection(),
+  });
+
+  let latestDoc: Doc = initial;
 
   // 🔴 必须在 docToLexical 之前挂监听：initial 那一次 update 也要留下快照，
-  //   否则首次 commit 之前 latest 停在空文档，e2e 读到的是"从未提交过"的假象。
+  //   否则首次 commit 之前 latestDoc 停在空文档，e2e 读到的是"从未提交过"的假象。
   ed.registerUpdateListener(({ editorState }: { editorState: EditorState }) => {
     // 🔴 state.read() 回调外节点句柄失效 —— 整段导出必须在回调内部完成
-    const before = latest;
-    latest = normalize(lexicalToDoc(editorState, initial.reminders));
-    shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latest)).length);
+    const before = latestDoc;
+    // 🔴🔴🔴 导出基准的 reminders 必须来自 **latestDoc**（可能是刚被 setDoc 写进去的新值），
+    //   不能来自"上一次提交时的旧值"，也不能来自任何缓存副本。
+    //
+    //   reminders 是**真源字段**，而 Lexical 树里只有 span.rem 标记，没有"提醒列表"这个概念
+    //   —— 也就是说导出时必须由外部把这份列表喂进来。喂哪一份是这一行唯一的关键：
+    //
+    //   我第一版喂的是 `before`（= 上一次 update 结束时的 latestDoc），看着"稳"，实际：
+    //     用户在面板点添加 → setDoc(新 reminders) → docToLexical → 触发本监听
+    //     → 导出拿旧 reminders（空）→ 对账把新提醒判死 → latestDoc 回到空
+    //   症状：面板正常收起、UI 一切正常，**只有提醒列表永远是空的**，零报错。
+    //
+    //   正确口径：latestDoc 是唯一真源快照，setDoc 已同步更新过它，
+    //   所以直接用 latestDoc.reminders 即可。
+    //
+    // 🔴🔴 每次导出后**立刻对账**：用户改完正文，对账要马上算出提醒的增删，
+    //   并把下划线 / 删除线挂回 span。漏了这一步的症状是"改了时间，提醒列表不变"，
+    //   而界面上没有任何提示 —— 与"对账算错了"表现完全一样，极难自查。
+    const exported = normalize(lexicalToDoc(editorState, latestDoc.reminders ?? []));
+    const rec = reconcileReminders(exported);
+    latestDoc = rec.doc;
+    shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);
+
+    // 对账可能改了 rem 标记（正文没变但标记变了）→ 此时必须把结果写回编辑器，
+    //   否则下划线永远不显示。判据是 canonical 不等：写回自身不会引起无限循环，
+    //   因为第二次对账拿到已带标记的文档，算出的结果与自身相同。
+    if (canonicalize(rec.doc) !== canonicalize(exported)) {
+      const snapshot = latestDoc;
+      ed.update(() => {
+        docToLexical(snapshot);
+      }, { discrete: true });
+    }
+
+    // 对账报出的增删要通知 UI：新增的排进调度，删掉的从调度里消失
+    if (rec.added.length > 0 || rec.removed.length > 0) reminderRef?.schedule();
+
     // 🔴 只有内容真变了才推。
     //   少了这个判断：docToLexical 的首次 update、以及 merge 把远端内容写回来时，
     //   都会触发一次"编辑"，于是**刚拉下来的内容立刻被推回去** ——
     //   两台设备会互相回声，永不停歇，且服务端被打满。
-    if (canonicalize(latest) !== canonicalize(before)) syncRef?.noteEdit();
+    if (canonicalize(latestDoc) !== canonicalize(before)) syncRef?.noteEdit();
   });
 
   ed.update(() => docToLexical(initial), { discrete: true });
 
   // 暴露真源读取口。**这不是调试后门**：S5 的加密入口、S4 的自动保存、
   // 以及 e2e 的「输入是否真进了真源」判据都走它，是正式接口的一部分。
-  window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latest);
+  window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latestDoc);
   window.__NOTESYNC_EDITOR__ = ed;
   editor = ed;
   goto('editor');
+
+  /* ---- 提醒：补弹 + 起调度 ---- */
+  // 🔴🔴 补弹（catch-up）：老项目 v6.3 起"过期静默，无补弹"指的是**不重复响**，
+  //   但下次打开时必须提示已过的提醒 —— 顶栏 title 原文就写着
+  //   「提醒（到点通知或下次打开提示）」，这后半句就是指这个。
+  //   所以这里补弹，但**只弹卡、不响铃**（不响铃才叫"提示"而不是"惊吓"）。
+  //   判据用 dueReminders（未完成 + at <= now），已完成的永远不补弹。
+  const missed = dueReminders(initial).filter((r) => !r.done);
+  if (missed.length > 0) {
+    window.setTimeout(() => reminderRef?.showCard(missed, true), 500);
+  }
+  // 起调度。到点由 schedule() 自己算下一条并重排。
+  reminderRef?.schedule();
 
   // 🔴🔴 同步在首次 update **之后**才启动。
   //   顺序反了会怎样：start() 立刻 pull → setDoc(远端) → 触发 update → noteEdit()
@@ -345,6 +543,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
 /** 当前笔记的同步实例。切笔记时必须先 stop()，否则旧实例的 SSE 还在跑。 */
 let syncRef: SyncClient | undefined;
+
+/** 当前笔记的提醒 UI。切笔记时必须先 destroy()，否则旧 chip/卡片/面板留在页面上，
+ *  而它们的调度器还持有旧文档 ⇒ 上一篇笔记的提醒会在这一篇里炸出来。 */
+let reminderRef: ReminderUI | undefined;
 
 /**
  * 同步状态（9 态）→ 底栏（3 态）。

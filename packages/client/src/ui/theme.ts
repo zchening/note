@@ -88,6 +88,14 @@ export const OVERLAY = {
   paperNight:
     'repeating-linear-gradient(to bottom, rgba(210,200,170,.10) 0 1px, transparent 1px 26px),' +
     ' repeating-linear-gradient(to right, rgba(210,200,170,.07) 0 1px, transparent 1px 26px)',
+  /**
+   * 浮起卡片的投影（时间 chip、响铃卡）。两条而非一条 `0 0 0 0`：
+   * 老项目 chip 是 `0 14px 36px`、提醒卡是 `0 18px 48px`，两个尺寸都得留住。
+   * 🔴 写在 theme.ts 而不是 styles.css —— S4-T7 有机械扫描，CSS 里出现
+   *   rgba 字面量会直接判红。这条纪律的作用就是"颜色只允许有一个出处"。
+   */
+  shadowChip: '0 14px 36px rgba(0,0,0,.16)',
+  shadowCard: '0 18px 48px rgba(0,0,0,.2)',
 } as const;
 
 /** 复古皮肤三态（老项目叫"三态环"，靠连点 logo 7 次前进）。 */
@@ -162,6 +170,10 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--serif', FONTS.serif);
   s.setProperty('--mono', FONTS.mono);
   s.setProperty('--mask-bg', theme === 'dark' ? OVERLAY.maskDark : OVERLAY.maskLight);
+  // 🔴 浮层投影也走变量：CSS 里写 rgba 会被 S4-T7 判红（颜色只允许一个出处），
+  //   而投影本质是颜色，所以必须在这里注入而不是写在 styles.css。
+  s.setProperty('--shadow-chip', OVERLAY.shadowChip);
+  s.setProperty('--shadow-card', OVERLAY.shadowCard);
   el.classList.toggle('dark', theme === 'dark');
 }
 

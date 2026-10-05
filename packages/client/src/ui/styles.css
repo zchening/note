@@ -252,3 +252,83 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
 @media (prefers-color-scheme: dark) {
   html:not(.force-light) body { color-scheme: dark; }
 }
+
+/* ================= 提醒：时间 chip / 响铃卡 / 提醒面板 ================= */
+/* 🔴🔴 本段**零颜色字面量**，一律 var()。S4 的 ui-contract 测试有机械扫描，
+   加了字面量会红。皮肤覆膜层（#skinFx, z-index 60）在下面，提醒层要盖过它。 */
+
+/* ---- 时间 chip：老项目 v7.8.0 起是三行小卡（不是单行胶囊）----
+   旧单行胶囊 white-space:nowrap + max-width:92vw 在窄屏把尾部CTA 整颗挤出屏幕，
+   手机端看不见「添加提醒」（老项目用户实测）。现在 width:min(86vw,340px) 桌面手机同一套，
+   省略号截断只落在事项行 —— 截断代价归事项，CTA 恒完整可见可点。 */
+#timeChip { position: fixed; top: 54px; left: 50%; transform: translateX(-50%);
+  z-index: 56; width: min(86vw, 340px); max-width: 92vw; padding: 13px 15px 15px;
+  display: flex; flex-direction: column; gap: 9px; font-size: 14px; color: var(--fg);
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow-chip); cursor: pointer; user-select: none;
+  -webkit-user-select: none; touch-action: manipulation; animation: chipRise .28s cubic-bezier(.2,.7,.3,1) both; }
+@keyframes chipRise { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } }
+#timeChip .ns-chip-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+#timeChip .ns-chip-rel { flex: none; font-size: 12.5px; color: var(--muted); }
+#timeChip .ns-chip-clock { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#timeChip .ns-chip-item { font-size: 13.5px; color: var(--fg); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+#timeChip .ns-chip-cta { align-self: flex-start; padding: 7px 14px; border-radius: 9px;
+  font-size: 13px; font-weight: 600; color: var(--bg); background: var(--fg);
+  border: none; display: inline-block; }
+#timeChip .ns-chip-done { color: var(--accent); background: none; padding-left: 0; }
+
+/* ---- 响铃卡 remCard：页内主通道，无论通知权限如何都弹 ---- */
+.ns-remcard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  z-index: 58; width: min(90vw, 360px); padding: 20px 18px 16px; color: var(--fg);
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow-card); }
+.ns-remcard .box-x { position: absolute; top: 10px; right: 10px; }
+.ns-remcard-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+.ns-remcard-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px;
+  max-height: 46vh; overflow-y: auto; }
+.ns-rem-item { display: flex; flex-direction: column; gap: 3px; }
+.ns-rem-when { font-size: 14px; line-height: 1.55; overflow: hidden;
+  text-overflow: ellipsis; }
+.ns-rem-late { font-size: 11.5px; color: var(--muted); }
+.ns-remcard-ack { display: block; width: 100%; padding: 11px; text-align: center;
+  font-size: 14px; font-weight: 600; color: var(--bg); background: var(--fg);
+  border-radius: 11px; cursor: pointer; }
+
+/* ---- 提醒面板 remPanel：时/分滚轮 ---- */
+/* 🔴 滚轮值以 dataset.val 为唯一事实源，jsdom 无布局也能读写与测试。 */
+.ns-rembox { width: min(92vw, 380px); max-height: 86vh; overflow-y: auto; }
+.ns-rem-form { display: flex; flex-direction: column; gap: 11px; }
+.ns-rem-time-row { display: flex; align-items: center; gap: 8px; }
+.ns-rem-time-row input[type="date"] { flex: 1; min-width: 0; padding: 9px 10px;
+  font-size: 14px; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 10px; }
+.ns-rem-colon { font-size: 17px; color: var(--muted); }
+.ns-rem-wheel-wrap { position: relative; flex: none; }
+.ns-rem-wheel { width: 62px; height: 132px; overflow-y: auto; scroll-snap-type: y mandatory;
+  text-align: center; scrollbar-width: none; }
+.ns-rem-wheel::-webkit-scrollbar { display: none; }
+.ns-rem-wheel-pad { height: 41px; }
+.ns-rem-wheel-it { height: 50px; line-height: 50px; font-size: 16px; color: var(--muted);
+  scroll-snap-align: center; font-variant-numeric: tabular-nums; }
+.ns-rem-wheel-it.cur { color: var(--fg); font-weight: 600; }
+.ns-rem-wheel-mid { position: absolute; left: 0; right: 0; top: 50%; height: 50px;
+  transform: translateY(-50%); border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); pointer-events: none; }
+.ns-rem-input { width: 100%; padding: 10px 11px; font-size: 14px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
+.ns-rem-add { width: 100%; padding: 11px; font-size: 14px; font-weight: 600;
+  color: var(--bg); background: var(--fg); border: none; border-radius: 11px; cursor: pointer; }
+.ns-rem-tip { font-size: 12px; color: var(--accent); }
+.ns-bad { border-color: var(--accent) !important; }
+/* 老项目 v5.42：行内容用裸文本节点，span 元素盒被国产浏览器夜间模块吃字。
+   颜色由行容器锁定继承，布局用 grid(1fr auto)。 */
+.ns-rem-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.ns-rem-row { display: grid; grid-template-columns: 1fr auto; align-items: center;
+  gap: 10px; padding: 10px 11px; font-size: 13.5px; text-align: left; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 10px; background: var(--box-bg); }
+.ns-rem-off { flex: none; width: 26px; height: 26px; font-size: 16px; line-height: 1;
+  color: var(--muted); background: none; border: 1px solid var(--line);
+  border-radius: 8px; cursor: pointer; }
+.ns-rem-off:hover { color: var(--fg); background: var(--hover); }
+.ns-rem-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--muted); }
