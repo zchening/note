@@ -2,13 +2,18 @@
   "name": "@bj/mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP stdio 服务端：读写密文，全程不解密（与老项目同策略，独立进程独立数据目录）。",
+  "description": "MCP stdio 服务端：让 AI 直接读写 bj.xuyinji.com.cn 的加密笔记。零第三方依赖。",
   "type": "module",
-  "main": "./src/main.js",
+  "main": "./src/main.ts",
   "bin": {
-    "notesync-bj-mcp": "./src/main.js"
+    "notesync-bj-mcp": "./src/main.ts"
   },
   "scripts": {
-    "start": "node src/main.js"
+    "start": "node src/main.ts",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@bj/client": "0.1.0",
+    "@bj/shared-schema": "0.1.0"
   }
 }

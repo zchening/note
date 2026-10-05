@@ -18,7 +18,8 @@
     "test:schema": "npm run test --workspace @bj/shared-schema",
     "test:client": "npm run test --workspace @bj/client",
     "test:server": "npm run test --workspace @bj/server",
-    "test": "npm run test:schema && npm run test:client && npm run test:server",
+    "test:mcp": "npm run test --workspace @bj/mcp",
+    "test": "npm run test:schema && npm run test:client && npm run test:server && npm run test:mcp",
     "test:e2e": "npm run test:e2e --workspace @bj/client",
     "build": "npm run build --workspace @bj/client",
     "verify": "npm run typecheck && npm run test && npm run build"
