@@ -168,6 +168,18 @@ function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null 
       const n = $createFoldNode();
       n.setTitle(b.title ?? []);
       const kids: LexicalNode[] = [];
+      // 🔴🔴 **标题作为第一个子段落**（见 nodes.ts FoldNode.createDOM 的注释：
+      //   两层 DOM 壳那条路已被 ElementDOMSlot 不可导出堵死，这是唯一可用形态）。
+      //   于是 children[0] 是标题、children[1..] 是正文 ——
+      //   导出侧 nodeToBlock 必须严格对称地按同一切法还原，否则往返字节不等。
+      const title = b.title ?? [];
+      if (title.length > 0) {
+        const head = $createParagraphNode();
+        // 标题不承载行内格式：title 是 span 数组，但要的是"整行文字"这个概念，
+        //   拆成多段反而让「点第一下开合」难以判定边界。取纯文本拼一段。
+        head.append($createTextNode(title.map((x) => x.t).join('')));
+        kids.push(head);
+      }
       for (const c of b.children ?? []) {
         const cn = blockToNode(c, remIds);
         if (cn) kids.push(cn);
@@ -326,13 +338,35 @@ function nodeToBlock(n: LexicalNode): Block | null {
 
   if ($isFoldNode(n)) {
     const b: Block = { t: 'fold' };
-    const title = n.title.filter((s) => !isEmptySpan(s));
-    if (title.length > 0) b.title = title;
+    // 🔴 标题优先取 __titleJson（权威），没有才回退到 children[0] 的文字 ——
+    //   后者是给"用户在标题行直接打字"兜底的：那种情况下 __titleJson 还没更新，
+    //   但 children[0] 已经是新文字了。两个来源都取一遍，取并集里的非空者。
+    let title = n.title.filter((s) => !isEmptySpan(s));
     const kids: Block[] = [];
-    for (const c of n.getChildren()) {
+    // 🔴🔴 `firstIsHead` 必须以 **title 非空** 为前提，不能只看「第一个子节点是段落」。
+    //   S3-21 属性测试实测反例：
+    //     {"t":"fold","children":[{"t":"p","spans":[{"t":" "}]}]}   ← 无title
+    //   这个 fold 根本没有标题行，children[0] 是**正文**。
+    //   我第一版的判据是「children[0] 是段落 ⇒ 它是标题」，
+    //   于是把唯一的正文块提去当 title，导出成{"t":"fold"}（正文凭空消失），
+    //   往返字节不等 —— 而且这正是本文件第27~30 行那条「任何图省事少写一个字段的
+    //   改动都会立刻红」预言的故障，只是我图省事的地方在**导出侧**。
+    //   正确判据：**title 非空 时 children[0] 才是标题行**，否则 children 全是正文。
+    const firstIsHead = title.length > 0 && n.getChildrenSize() > 0 && isHeadParagraph(n.getFirstChild());
+    const list = n.getChildren();
+    for (let i = 0; i < list.length; i += 1) {
+      const c = list[i];
+      if (c === undefined) continue;
+      // 🔴 children[0] 是标题段落 → 提出来当 title，不进 children
+      if (i === 0 && firstIsHead) {
+        const txt = c.getTextContent().replace(/[\u200B\u200C\uFEFF\u2060]/g, '');
+        if (txt !== '' && title.length === 0) title = [{ t: txt }];
+        continue;
+      }
       const cb = nodeToBlock(c);
       if (cb) kids.push(cb);
     }
+    if (title.length > 0) b.title = title;
     if (kids.length > 0) b.children = kids;
     return b;
   }
@@ -387,6 +421,13 @@ function nodeToBlock(n: LexicalNode): Block | null {
     return withSpans({ t: 'p' }, spans);
   }
   return null;
+}
+
+/** 是不是标题行段落（缩进列表里可能带 ListItem 包装，用 getType 判）。 */
+function isHeadParagraph(node: LexicalNode | null): boolean {
+  if (!node) return false;
+  const t = node.getType();
+  return t === 'paragraph' || t === 'text';
 }
 
 function listItemToBlock(item: LexicalNode): Block | null {

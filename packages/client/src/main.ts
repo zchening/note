@@ -36,6 +36,7 @@ import { $createParagraphNode, $createTextNode, $getRoot } from 'lexical';
 
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
+import { insertFoldAtCaret, registerCommands } from './commands.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc } from './serialize.ts';
 import { canonicalize, emptyDoc, normalize, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
@@ -59,6 +60,43 @@ declare global {
     __NOTESYNC_DOC__?: () => Doc;
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
+    /**
+     * 在光标处插入折叠块。**正式接口**，不是调试后门：
+     * 折叠块是纯编辑器内结构，菜单/快捷键/未来的 MCP 都要走它，
+     * e2e 也用它造场景（造场景走生产代码，才不会测一份只有测试才有的路径）。
+     */
+    __NOTESYNC_INSERT_FOLD__?: () => void;
+    /**
+     * 真源的 canonical 字节。
+     *
+     * 🔴 为什么必须暴露它而不是让 e2e 自己 `JSON.stringify`：
+     *   canonical 有四条规则（schema 键序、默认值省略、无空格 UTF-8、数组序即文档序），
+     *   e2e 手写一份 JSON.stringify 等于**手写第二份实现**，
+     *   判出来的"往返无损"是假的（键序不同就判红、键序巧合就对）。
+     *   这与本项目"测试判据不许手写第二份实现"的纪律同源。
+     */
+    __NOTESYNC_CANON__?: (d: Doc) => string;
+    /**
+     * 用当前真源重建编辑器 —— 等价于"刷新后重新导入"。
+     * e2e 用它验往返无损（import → export → import 逐字节相等）。
+     */
+    __NOTESYNC_RELOAD_FROM_DOC__?: () => void;
+    /**
+     * 读 Lexical **自己眼里的**选区（不是 DOM 选区）。
+     *
+     * 🔴 为什么需要这个钩子：折叠收起护栏（$parkCaretOnFoldHead）改的是
+     *   **Lexical 选区**，而 e2e 从 `window.getSelection()` 读到的是 **DOM 选区**。
+     *   两者在 reconcile 之后可能不一致 —— 只看 DOM 会分不清
+     *   「护栏根本没执行」和「护栏执行了但被 Lexical 覆盖回去」。
+     *   这个钩子把两边都读出来对比，才能定性到底是哪一层的问题。
+     */
+    __NOTESYNC_SEL__?: () => {
+      lexKey: string | null;
+      lexOffset: number | null;
+      lexType: string | null;
+      collapsed: boolean | null;
+      nodeText: string | null;
+    } | null;
   }
 }
 
@@ -422,6 +460,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   // 🔴🔴 行为注册必须在 setRootElement 之后、任何 update 之前。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
   registerBehaviors(ed);
+  // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
+  //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，
+  //   与文件头behaviors.ts 记的 registerRichText 那条P0 是同一个形状。
+  registerCommands(ed);
 
   /* ---- 提醒层接线 ---- */
   // 🔴 对账必须发生在 docToLexical **之前**：对账会把提醒的 rem 标记挂到
@@ -518,6 +560,39 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   // 以及 e2e 的「输入是否真进了真源」判据都走它，是正式接口的一部分。
   window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latestDoc);
   window.__NOTESYNC_EDITOR__ = ed;
+  window.__NOTESYNC_INSERT_FOLD__ = () => {
+    if (ed) insertFoldAtCaret(ed);
+  };
+  // 🔴 复用生产代码那份 canonicalize，不给测试第二份实现
+  window.__NOTESYNC_CANON__ = (d: Doc): string => canonicalize(d);
+  window.__NOTESYNC_RELOAD_FROM_DOC__ = () => {
+    const snapshot = structuredClone(latestDoc);
+    ed.update(
+      () => {
+        docToLexical(snapshot);
+      },
+      { discrete: true },
+    );
+  };
+  // 🔴 只读探针：把 Lexical 侧选区读出来，供 e2e 与 DOM 选区对照。
+  //   必须在 editor.getEditorState().read(...) 里读 —— 选区是 editor state 的一部分，
+  //   在 update 之外直接 $getSelection() 拿不到（会抛或返回 null）。
+  window.__NOTESYNC_SEL__ = () => {
+    const state = ed.getEditorState();
+    let out: ReturnType<NonNullable<Window['__NOTESYNC_SEL__']>> = null;
+    state.read(() => {
+      const sel = $getSelection();
+      if (!$isRangeSelection(sel)) return;
+      out = {
+        lexKey: String(sel.anchor.key),
+        lexOffset: sel.anchor.offset,
+        lexType: sel.anchor.type,
+        collapsed: sel.isCollapsed(),
+        nodeText: sel.anchor.getNode().getTextContent(),
+      };
+    });
+    return out;
+  };
   editor = ed;
   goto('editor');
 

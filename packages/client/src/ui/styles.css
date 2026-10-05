@@ -174,13 +174,20 @@ header.ns-top {
 .ns-rem { text-decoration: none; border-bottom: 1.5px solid var(--accent);
           cursor: pointer; }
 .ns-rem-done { text-decoration: line-through; color: var(--muted); border-bottom-color: var(--line); }
-/* 折叠块：手风琴把手 + 折叠体。open 状态是 ephemeral UI 态，不进真源 */
-.ns-fold-head { display: flex; align-items: center; gap: 6px; cursor: pointer;
+/* 折叠块：手风琴把手 + 折叠体。open 状态是 ephemeral UI 态，不进真源。
+   🔴 结构是**单层**：标题 = children[0]（第一个子段落），其余children 是正文。
+     DOM 树是 .ns-fold > (标题段落 | 正文段落…)，没有额外的 head/body 壳
+     —— 原因见 nodes.ts FoldNode.createDOM 的注释（ElementDOMSlot 不可导出）。
+     下面的选择器与 behaviors.ts 的点击判据、serialize.ts 的导入导出切法
+     **三处必须一致**，改任一处都要同步另两处。 */
+.ns-fold > :first-child { display: flex; align-items: center; gap: 6px; cursor: pointer;
                 padding: 5px 0; color: var(--accent); }
-.ns-fold-head::before { content: "▸"; font-size: .8em; transition: transform .15s ease; }
-.ns-fold[data-open="true"] > .ns-fold-head::before { transform: rotate(90deg); }
-.ns-fold-body { padding-left: 14px; border-left: 1px solid var(--line); }
-.ns-fold[data-open="false"] > .ns-fold-body { display: none; }
+.ns-fold > :first-child::before { content: "▸"; font-size: .8em; transition: transform .15s ease; }
+.ns-fold[data-open="true"] > :first-child::before { transform: rotate(90deg); }
+/* 正文：往里缩进 + 左侧引导线（--line 令牌，非新色；老项目 v9.1.1 同款） */
+.ns-fold > :not(:first-child) { padding-left: 14px; border-left: 2px solid var(--line); margin-left: .5em; }
+/* 收起态：藏掉除标题外的全部子块。标题恒可见（老项目铁律：收起后仍要能看见并再展开） */
+.ns-fold[data-open="false"] > :not(:first-child) { display: none; }
 .ns-img { display: block; max-width: 100%; border-radius: 8px; margin: 6px 0; }
 
 footer.ns-foot {

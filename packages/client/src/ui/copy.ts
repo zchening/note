@@ -122,6 +122,14 @@ export const COPY = {
   remPermOk: '好',
   remCatchupKicker: '上次没打开，以下提醒已过：',
 
+  /* 折叠块 */
+  /** 标题行的 title 提示：告诉用户"这里能点" */
+  foldToggleTitle: '点这行展开或收起',
+  /** 新建折叠块时的默认标题 */
+  foldDefaultTitle: '折叠块',
+  /** 折叠块正文区的无障碍标签 */
+  foldBodyAria: '折叠块内容',
+
   /* 顶栏 title（老项目原文，含全角括号） */
   titleStrike: '删除线',
   titleRemind: '提醒（到点通知或下次打开提示）',

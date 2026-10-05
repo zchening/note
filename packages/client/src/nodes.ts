@@ -206,8 +206,20 @@ export class FoldNode extends ElementNode {
    *   我第一版在 createDOM 里只切 class（`ns-fold open`）——
    *   症状是**折叠永远展不开**，而节点本身、序列化、点击逻辑全都正常，
    *   单测与序列化测试全绿。只有真浏览器点一下才看得出来。
-   *   两处口径不一致的这类 bug 必须靠"CSS 选择器与节点输出一一对照"来抓，
-   *   所以下面把属性名写进注释，与 styles.css 那一行一一对应。
+   *   纪律：凡是「CSS 选择器与节点输出一一对照」的地方，改名必须两处同改。
+   *
+   * 🔴 DOM 是**单层**：标题不是额外的 DOM 壳，而是 children 的**第一个子节点**
+   *   （一个段落，导出时提出来当 title 字段、导入时塞回第一个位置）。
+   *
+   *   我第一版想在 createDOM 里造 `.ns-fold-head` + `.ns-fold-body` 两层壳、
+   *   靠 `getDOMSlot` 把 children 挂进 body。实测**此路不通（已放弃，别再试）**：
+   *     - ElementNode.getDOMSlot 的返回类型是 `ElementDOMSlot`（不是 DOMSlot），
+   *       而 `ElementDOMSlot` **没有从 'lexical' 导出**（只在内部 .d.ts 里），
+   *       拿不到构造函数 → TS2416「类型不兼容」+ TS1362「不能当值用」。
+   *     - 就算硬造，ElementDOMSlot 还要求 getManagedLineBreak /
+   *       getDecoratorBoundaryAnchor 等 8 个方法，纯装饰用途填它们纯属噪音。
+   *   结论：**"标题 = 第一个子段落"** 是这里唯一既能用 Lexical 原生机制、
+   *   又不污染真源模型的形态。CSS 的 `.ns-fold > :first-child` 承担标题行样式。
    */
   override createDOM(): HTMLElement {
     const dom = document.createElement('div');
@@ -217,11 +229,9 @@ export class FoldNode extends ElementNode {
   }
 
   override updateDOM(prev: FoldNode, dom: HTMLElement): boolean {
-    if (prev.__open !== this.__open) {
-      dom.dataset.open = this.__open ? 'true' : 'false';
-      return true;
-    }
-    return false;
+    if (prev.__open === this.__open) return false;
+    dom.dataset.open = this.__open ? 'true' : 'false';
+    return true;
   }
 
   /** 折叠块的文本 = 标题 + 正文（复制、导出、搜索都靠它） */
