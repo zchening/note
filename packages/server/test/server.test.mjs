@@ -28,16 +28,34 @@ const SERVER = path.join(__dirname, '..', 'src', 'server.js');
 let child = null;
 let base = '';
 let dataDir = '';
+let wwwDir = '';
 
-/** 起一个隔离实例（独立 DATA_DIR + 随机端口） */
+/** 起一个隔离实例（独立 DATA_DIR + 独立 WWW_DIR + 随机端口） */
 async function boot() {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bj-srv-'));
+  // 🔴🔴 WWW 目录必须由本测试自建，**不能**依赖仓库根的 www/。
+  //   踩过：CI 的步骤序是「npm test → npm run build」，而 `www/` 是构建产物、
+  //   在 .gitignore 里 —— runner 上 checkout 完根本不存在。
+  //   于是"SPA 回落到 index.html"那条拿到 404，CI 红。
+  //   而本地永远是绿的（开发者跑过 build，www/ 躺在那里），所以本机复现不出来。
+  //   这类"测试依赖了别人的产物"的坑，唯一可靠的自愈是**自己造齐前置条件**：
+  //   测什么就放什么进去，不借生产构建物。
+  wwwDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bj-www-'));
+  fs.writeFileSync(
+    path.join(wwwDir, 'index.html'),
+    '<!doctype html><html><body><div id="app"></div></body></html>',
+    'utf8',
+  );
+  // 一份带扩展名的静态资源，用来判"有扩展名走真文件、无扩展名走回落"这条分界
+  fs.writeFileSync(path.join(wwwDir, 'probe.txt'), 'probe', 'utf8');
+
   const port = 20000 + Math.floor(Math.random() * 20000);
   child = spawn(process.execPath, [SERVER], {
     env: {
       ...process.env,
       NS_BJ_PORT: String(port),
       NOTESYNC_BJ_DATA_DIR: dataDir,
+      NOTESYNC_BJ_WWW: wwwDir,
       NS_BJ_VERSION: '9.9.9-test',
       NS_BJ_BUILD_DATE: '2026-10-05',
     },
@@ -239,7 +257,8 @@ test('静态资源：路径穿越被挡（403），不泄露文件系统', async
 });
 
 test('静态资源：无扩展名路径回落 index.html（前端路由由客户端解析）', async () => {
-  // 本隔离实例的 WWW 指向仓库 www/，构建后 index.html 必然存在 → 必须 200 HTML。
+  // WWW 目录由 boot() 自建（见那里"为什么不能依赖仓库根 www/"），
+  // 所以这条在 CI 与本机是**同一个前置条件**，不再取决于谁跑没跑过 build。
   // 🔴 判据不能写"200 或 404 都可以"：那种宽松断言等于没断言，
   //   真出问题时（比如回落被误删）它照样绿。
   const r = await fetch(`${base}/some/spa/route`);
@@ -247,4 +266,15 @@ test('静态资源：无扩展名路径回落 index.html（前端路由由客户
   assert.match(r.headers.get('content-type') ?? '', /text\/html/);
   const html = await r.text();
   assert.match(html, /<div id="app">/, '回落内容不是应用外壳');
+});
+
+test('静态资源：有扩展名路径读真文件（不许回落成 HTML）', async () => {
+  // 🔴 这条与上一条成对：单测"会回落"抓不到"回落过头"——
+  //   若 serveStatic 把所有路径都当 SPA 路由，上一条照样绿，
+  //   而用户的 js/app.js 会拿到一份 HTML，报错长得像"代码坏了"。
+  const r = await fetch(`${base}/probe.txt`);
+  assert.equal(r.status, 200, '真实静态文件应 200，实际 ' + r.status);
+  assert.equal(await r.text(), 'probe');
+  assert.ok(!/text\/html/.test(r.headers.get('content-type') ?? ''),
+    '有扩展名的资源不该被回落成 HTML（会让浏览器把 JS 当页面解析）');
 });
