@@ -48,10 +48,13 @@ import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { COPY } from './ui/copy.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
-import { isEggRoute, sanitizeNoteName } from './ui/landing-logic.ts';
+import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
 import { ReminderUI } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
+import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/favs.ts';
+import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
+import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 
 declare global {
   interface Window {
@@ -99,6 +102,16 @@ declare global {
       collapsed: boolean | null;
       nodeText: string | null;
     } | null;
+    /**
+     * 打开某个彩蛋门牌（正式接口）。
+     * e2e 用它走真实路径进游戏 —— 造场景走生产代码，
+     * 才不会测一份只有测试才有的路径。
+     */
+    __NOTESYNC_EGG_OPEN__?: (id: string) => boolean;
+    /** 彩蛋图鉴是否开着（e2e 判图鉴渲染）。 */
+    __NOTESYNC_EGG_CODEX__?: () => boolean;
+    /** 主动打开图鉴（与 `?eggs` 同一条生产路径）。 */
+    __NOTESYNC_EGG_CODEX_OPEN__?: () => void;
   }
 }
 
@@ -432,12 +445,88 @@ function writePref(k: string, v: string): void {
 }
 
 const menuState: MenuState = {
+  // 🔴 进编辑器时就要算好"这篇是否已收藏"：菜单是打开时才渲染的，
+  //   而收藏项是互斥双文案 —— 状态没喂进去的话，用户会看到「收藏笔记」
+  //   点一下却变成「取消收藏」，第一次点像是没用。
   faved: false,
   night: false,
   linkInApp: readPref('linkInApp', '1') === '1',
   favList: [],
   histList: [],
   conflicts: [],
+};
+
+/** 收藏的localStorage 口。老项目是纯本机键（notesync_favs），本项目独立前缀。 */
+const favStore = browserStore();
+
+/** 彩蛋层。懒建于第一次需要时（门牌/图鉴/触发点），不进编辑器就不建。 */
+let eggLayer: EggLayer | undefined;
+
+/**
+ * 懒建彩蛋层。
+ *
+ * 🔴 为什么懒建：彩蛋层会往 body 上挂粒子 canvas 与徽章。
+ *   用户只是打开一篇笔记去写字，不该为此付出一次 DOM 构建。
+ */
+function ensureEggLayer(): EggLayer | undefined {
+  if (eggLayer) return eggLayer;
+  try {
+    eggLayer = buildEggLayer(app, eggBrowserStore(), {
+      bodyText: () => {
+        // 🔴 只给**纯文本**：游戏只是抽词当素材，不该看到真源结构。
+        const st = editor?.getEditorState();
+        let out = '';
+        st?.read(() => {
+          out = $getRoot().getTextContent();
+        });
+        return out;
+      },
+      favs: () => readFavs(favStore),
+      curNote: () => currentNote,
+      refocus: () => {
+        // 图鉴/游戏关闭后把焦点还给编辑器（老项目红线10：桌面失焦光标不绘制）
+        try {
+          editor?.focus();
+        } catch {
+          /* 归还焦点失败不影响使用 */
+        }
+      },
+      onGameClosed: () => {
+        // 🔴 门牌路径（/snake）进游戏时落地页从未渲染过，退出后不重画就是空白页。
+        //   currentPage==='egg' 正是"这局是靠门牌开的"的唯一可靠证据 ——
+        //   菜单里开桌宠时 currentPage 是 'editor'，那里什么都不用做。
+        if (currentPage !== 'egg') return;
+        // 🔴 顺手把地址栏拉回 '/'：门牌路径的外壳是"同址 pushState"，
+        //   close() 判定 pathname 没变就不还原 —— 于是留在 /snake 上，
+        //   用户一刷新又被弹回游戏。回落地页却留着游戏URL，是最难查的一类"幽灵状态"。
+        try {
+          history.replaceState({}, '', '/');
+        } catch {
+          /* file:// 等极端环境没有 history，落地页照常显示 */
+        }
+        showLanding();
+        goto('landing');
+      },
+    });
+    eggLayer.bindTriggers();
+    return eggLayer;
+  } catch (e) {
+    // 🔴 彩蛋层坏掉绝不能连带笔记不可用：它是娱乐层，不是数据层
+    console.warn('[notesync] 彩蛋层初始化失败（不影响笔记）', e);
+    eggLayer = undefined;
+    return undefined;
+  }
+}
+
+// 🔴🔴 正式 e2e 钩子：**在模块作用域注册**，不挂在 ensureEggLayer 里面。
+//   挂在里面的话，钩子只在那次懒建之后才存在 —— 于是"编辑器里直接调
+//   __NOTESYNC_EGG_OPEN__('snake')"拿到 undefined，而调用方看到的是
+//   "is not a function"，完全指不到真正的原因（层还没建）。
+//   钩子本身就是懒的：被调时才 ensureEggLayer，语义不变但始终可调。
+window.__NOTESYNC_EGG_OPEN__ = (id: string): boolean => ensureEggLayer()?.openByRoute(id) ?? false;
+window.__NOTESYNC_EGG_CODEX__ = (): boolean => eggLayer?.codexOpen() ?? false;
+window.__NOTESYNC_EGG_CODEX_OPEN__ = (): void => {
+  ensureEggLayer()?.openCodex();
 };
 
 let menuRef: ReturnType<typeof buildMenu> | undefined;
@@ -491,10 +580,20 @@ function onTopbar(act: TopbarAction): void {
  */
 function mountEditor(name: string, initialDoc?: Doc): void {
   currentNote = name;
+  // 🔴 收藏态与收藏夹列表必须在**挂菜单之前**算好：菜单是打开时读这两个值的，
+  //   留到 onMenu 回调里算就晚了（那时 innerHTML 已经渲染完，用户会先看到
+  //   「收藏笔记」点一下才变「取消收藏」）。
+  menuState.faved = readFavs(favStore).indexOf(name) >= 0;
+  menuState.favList = favListOf(favStore);
 
   const shell = buildShell(app, {
     onTopbar: (act) => void onTopbar(act),
-    onMenu: () => menuRef?.open(),
+    onMenu: () => {
+      // 打开前重算一次：可能在别的笔记里加过收藏（换设备/开两个标签）
+      menuState.faved = readFavs(favStore).indexOf(name) >= 0;
+      menuState.favList = favListOf(favStore);
+      menuRef?.open();
+    },
     onRefresh: () => location.reload(),
     onSkin: (skin) => {
       currentSkin = skin;
@@ -514,7 +613,17 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       route();
     },
     onToggleFav: () => {
-      menuState.faved = !menuState.faved;
+      // 🔴 收藏是**本机键**（不进真源、不同步）—— 老项目 v5.55 拍板。
+      //   收藏表达"这台设备上我常看哪几篇"，塞进真源会让两台设备互相覆盖。
+      const r = toggleFav(favStore, name);
+      menuState.faved = r.faved;
+      //🔴 收藏夹列表必须同刻重算：老项目 toggle 后立刻 writeFavs，
+      //   而收藏夹视图若还读旧缓存，进去会看到刚才取消的那条还在。
+      menuState.favList = favListOf(favStore);
+      // 超上限时如实告知挤掉了谁 —— 不说的话用户查不到自己刚收藏的
+      if (r.evicted !== null) {
+        setFootStatus?.('synced', COPY.favFull(FAVS_MAX));
+      }
     },
     onOpenFav: (n) => {
       location.href = '/' + encodeURIComponent(n);
@@ -537,7 +646,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       location.href = '/backup';
     },
     onPet: () => {
-      location.href = '/pet';
+      // 🔴 桌宠是**彩蛋门牌**（老项目：菜单「桌宠」直接进 /pet），
+      //   不跳路由：走 openByRoute 才能复用游戏外壳与音效。
+      ensureEggLayer()?.openByRoute('pet');
     },
     onToggleTheme: () => {
       // 🔴 手动切换是**内存态，刻意不写 localStorage**（老项目行为）：
@@ -685,6 +796,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     // 对账报出的增删要通知 UI：新增的排进调度，删掉的从调度里消失
     if (rec.added.length > 0 || rec.removed.length > 0) reminderRef?.schedule();
 
+    // 🔴 彩蛋条件触发（数字梗 / notesync 烟花）。
+    //   判据跑在**已提交的真源文本**上，不是按键事件上 ——
+    //   按键时输入法还在组字，拿到的是半截文本，会漏判也会误判。
+    if (eggLayer) scanEggTriggers(eggLayer, latestDocText());
+
     // 🔴 只有内容真变了才推。
     //   少了这个判断：docToLexical 的首次 update、以及 merge 把远端内容写回来时，
     //   都会触发一次"编辑"，于是**刚拉下来的内容立刻被推回去** ——
@@ -829,6 +945,30 @@ async function startSyncFor(name: string): Promise<void> {
 /** 本次解锁是否为首建（需要首推）。 */
 let pendingFresh = false;
 
+/**
+ * 真源的纯文本（给彩蛋层抽词用）。
+ *
+ * 🔴 只给**纯文本**，绝不给真源结构：游戏只是拿词当素材
+ *   （砖面字/ 蛇身 / 基地名），把 reminders、rem 标记这些喂进去
+ *   没有意义，且会让"游戏能改真源"这个不该有的可能性看起来存在。
+ */
+function latestDocText(): string {
+  const d = window.__NOTESYNC_DOC__?.();
+  if (!d) return '';
+  const parts: string[] = [];
+  const walk = (bs: Doc['blocks']): void => {
+    for (const b of bs ?? []) {
+      for (const s of b.spans ?? []) parts.push(s.t);
+      if (b.title) for (const s of b.title) parts.push(s.t);
+      if (b.text) parts.push(b.text);
+      if (b.children) walk(b.children);
+      parts.push('\n');
+    }
+  };
+  walk(d.blocks);
+  return parts.join('');
+}
+
 async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
   const rec = await resolveKey(name);
   if (!rec) return undefined;
@@ -933,7 +1073,25 @@ function route(): void {
     return;
   }
   if (isEggRoute(name)) {
-    // 彩蛋门牌：S8 接管。现在落到首页提示页，至少不是白屏。
+    // 🔴 彩蛋门牌：**不进编辑器**（老项目口径 —— 门牌是保留字，不新建笔记）。
+    //   伪路由（about/help/api…）不是门牌，回首页提示页而不是进游戏。
+    //   未实现的门牌由 openByRoute 自己给可见提示并回落地页，绝不静默白屏。
+    //🔴🔴 必须**先 ensureEggLayer 再问 doorOfPath**：
+    //   直接访问 /snake（分享链接、收藏书签、APK 冷启）时彩蛋层还没懒建，
+    //   `eggLayer?.doorOfPath()` 返回 undefined ≠ 'snake'，于是掉进 showHome ——
+    //   症状是"门牌链接打不开游戏，只看到一个首页提示"，而首页提示不会报错。
+    //   （本条由 e2e EGG-E02 抓到：门牌直达是首屏路径，不是边角情况。）
+    if (eggLayer === undefined) ensureEggLayer();
+    if (eggLayer?.doorOfPath() === name.toLowerCase()) {
+      ensureEggLayer();
+      if (eggLayer && !eggLayer.openByRoute(name)) {
+        // 门牌存在但没映射出实现 —— 回落地页，别停在一个什么都不做的编辑器
+        showLanding();
+      }
+      goto('egg');
+      return;
+    }
+    // 非门牌的保留字：至少不是白屏
     showHome();
     return;
   }
@@ -958,7 +1116,18 @@ function boot(): void {
   ensureUploadInput();
   route();
   // 口令页关闭回落地页用的是 pushState，所以要监听 popstate
-  window.addEventListener('popstate', () => route());
+  window.addEventListener('popstate', () => {
+    // 🔴 游戏外壳自己 push 了历史（进游戏时压一条，退出时 back回去）。
+    //   不在这里重跑 route()，否则 popstate 会把用户又送回游戏页 ——
+    //   症状是"退出游戏后又弹回游戏，循环往复且关不掉"。
+    if (eggLayer?.shell.isOpen()) return;
+    route();
+  });
+  //🔴 ?eggs 直开图鉴（老项目同款：与 ?diag 同一套路）。
+  //   必须在 route 之后：门牌路径下 route 会进游戏，此时不该再叠图鉴。
+  if (location.search.indexOf('eggs') >= 0 && !eggLayer?.shell.isOpen()) {
+    ensureEggLayer()?.openCodex();
+  }
   document.getElementById('boot')?.remove();
 }
 

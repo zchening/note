@@ -155,6 +155,11 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
   };
 
   const renderFav = (): string => {
+    // 🔴 计数行只在**有收藏**时出现（老项目同款：`if (favs.length) kick.textContent = ...`）。
+    //   空列表时挂一句「收藏 · 0 篇」是给一个空页面加噪音。
+    const kick = st.favList.length
+      ? `<div class="list-kicker">${COPY.favKicker(st.favList.length)}</div>`
+      : '';
     const rows = st.favList.length
       ? st.favList
           .map(
@@ -164,7 +169,7 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
           )
           .join('')
       : `<div class="empty">${COPY.favEmpty}</div>`;
-    return `${head(COPY.menuFavEntry)}<div class="menu-view">${rows}</div>`;
+    return `${head(COPY.menuFavEntry)}${kick}<div class="menu-view">${rows}</div>`;
   };
 
   const renderHist = (): string => {

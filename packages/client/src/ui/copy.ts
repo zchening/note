@@ -63,6 +63,10 @@ export const COPY = {
   /* 菜单：二级视图 */
   back: '返回',
   favEmpty: '暂无收藏',
+  /** 收藏夹列表上方的计数行：`{n}` 是篇数 */
+  favKicker: (n: number): string => `收藏 · ${n} 篇`,
+  /** 收藏超过上限时的提示：`{n}` 是上限 */
+  favFull: (n: number): string => `收藏最多 ${n} 篇，已把最旧的一篇挤出去`,
   histEmpty: '暂无历史版本',
   histSave: '新增历史版本',
   linkKicker: '链接打开方式',
@@ -129,6 +133,44 @@ export const COPY = {
   foldDefaultTitle: '折叠块',
   /** 折叠块正文区的无障碍标签 */
   foldBodyAria: '折叠块内容',
+
+  /* 彩蛋层 */
+  /** 彩蛋图鉴标题 */
+  eggBookTitle: '彩蛋图鉴',
+  /** 图鉴副标题 */
+  eggBookSub: '点已发现的彩蛋可立刻再玩一次；带??? 的还没被你撞见。',
+  /** 图鉴底部按钮 */
+  eggBookClose: '关 闭',
+  /** 图鉴计数：`{got} / {total} FOUND` */
+  eggCount: (got: number, total: number): string => `${got} / ${total} FOUND`,
+  /** 未发现彩蛋的名字占位 */
+  eggLockedName: '???',
+  /** 未发现彩蛋的提示 */
+  eggLockedHint: '还没被发现',
+  /** 路由到某个门牌但没注册对应实现时的提示（不静默白屏） */
+  eggMissing: (id: string): string => `${id} 这个彩蛋正在赶来的路上`,
+
+  /* 彩蛋游戏外壳（老项目 ns-hud / ns-over 原文） */
+  /** HUD 退出键 */
+  gameExit: '退出',
+  /** 暂停时显示在 HUD 中间那格 */
+  gamePaused: '已暂停',
+  /** 结算卡：回到笔记 */
+  gameBack: '回到笔记',
+  /** 结算卡：再来一局 */
+  gameAgain: '再来一局',
+  /** 结算卡默认标题 */
+  gameOver: '这一局结束了',
+  /** 结算卡行：得分 */
+  gameRowScore: '得分',
+  /** 结算卡行：最高 */
+  gameRowBest: '最高',
+  /** 结算卡行：长度/关卡等 */
+  gameRowExtra: '这一局',
+  /** 结算卡行：存活秒数 */
+  gameRowSurvived: '撑了',
+  /** 结算卡行：秒 */
+  gameUnitSec: '秒',
 
   /* 顶栏 title（老项目原文，含全角括号） */
   titleStrike: '删除线',

@@ -351,3 +351,102 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   border-radius: 8px; cursor: pointer; }
 .ns-rem-off:hover { color: var(--fg); background: var(--hover); }
 .ns-rem-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* ══════════════════════════════════════════════════════════════════
+   彩蛋层：图鉴 / 游戏外壳 / 粒子 / 徽章
+   🔴 全部只吃主题令牌，零新色字面量（老项目 v9.2.0 立的口径）。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── 图鉴 ── */
+.egg-row { display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  margin-bottom: 6px; min-height: 42px; font-size: 14px; color: var(--fg);
+  cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  transition: border-color .2s; }
+.egg-row:active { background: var(--hover); }
+.egg-row.locked { color: var(--muted); border-style: dashed; cursor: default; }
+.egg-name { width: 96px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egg-hint { flex: 1; min-width: 0; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egg-go { width: 14px; height: 14px; flex: none; color: var(--accent); }
+.egg-row.locked .egg-go { display: none; }
+#eggList { max-height: 52vh; overflow-y: auto; }
+.egg-count { font-family: var(--mono); font-size: 10.5px; line-height: 1;
+  letter-spacing: .14em; color: var(--muted); text-align: right; padding: 2px 4px 10px; }
+/* 🔴 z90 高于菜单（菜单 z60）：图鉴是从菜单里点开的，必须压住它 */
+#eggMask { z-index: 90; }
+
+/* ── 游戏外壳 ── */
+.ns-game { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column;
+  background: var(--bg); }
+/* 🔴 dom 型（镜像/桌宠）必须透明底：它不占满屏，而是让 .ns-pet-stage
+   自己居中。不透明的话 .ns-game 整屏铺满，实测表现为"桌宠看不见、只剩一条黑边"。
+   老项目的 dom 型就是直接铺 body，所以这里显式写 transparent。 */
+.ns-game.ns-dom { background: transparent; }
+.ns-hud { flex: none; display: flex; align-items: center; gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 8px) 12px 8px; font-size: 12.5px;
+  color: var(--muted); border-bottom: 1px solid var(--line);
+  /* 🔴 必须 relative + z-index：dom 型的舞台是 fixed inset:0，
+     在同一个层叠上下文里会盖住没有定位的 HUD ——
+     症状是"退出键看得见、点不动"（Playwright 的 hit-test 明确报
+     .ns-pet-stage intercepts pointer events，真机表现是按着没反应）。 */
+  position: relative; z-index: 2; }
+.ns-x { display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  color: var(--muted); }
+.ns-x svg { width: 18px; height: 18px; }
+.ns-x b { font-weight: 500; }
+.ns-gate { font-family: var(--mono); color: var(--fg); }
+.ns-lv { color: var(--accent); }
+.ns-sp { flex: 1; }
+.ns-sc { font-family: var(--mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+.ns-mute { cursor: pointer; display: inline-flex; }
+.ns-mute svg { width: 18px; height: 18px; }
+.ns-mute.off { color: var(--line); }
+.ns-stage { flex: 1; position: relative; min-height: 0; display: flex;
+  align-items: center; justify-content: center; overflow: hidden; }
+.ns-stage canvas { display: block; touch-action: none; }
+.ns-tip { flex: none; padding: 8px 12px calc(env(safe-area-inset-bottom) + 8px);
+  font-size: 12px; color: var(--muted); text-align: center; }
+/* 结算卡：点背景 = 重开（老项目 v9.3.3：不再误触退回笔记） */
+.ns-over { position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; background: var(--mask-bg); padding: 20px; }
+.ns-card { width: 100%; max-width: 320px; padding: 20px; text-align: center;
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow-card); }
+.ns-card h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; color: var(--fg); }
+.ns-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ns-rows > div { display: flex; justify-content: space-between; font-size: 13px;
+  color: var(--muted); }
+.ns-rows b { font-family: var(--mono); color: var(--fg); font-weight: 500; }
+.ns-btns { display: flex; gap: 8px; }
+.ns-btns button { flex: 1; padding: 10px; font-size: 13.5px; border-radius: 10px;
+  cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--fg); }
+.ns-again { background: var(--fg) !important; color: var(--bg) !important;
+  border-color: var(--fg) !important; }
+
+/* ── 非 canvas 型（镜像 / 桌宠）── */
+/* 🔴 z-index 是**层叠上下文内部**的比较，不是全局比较：
+   .ns-game 自身是 fixed z80 且带 background，形成层叠上下文；
+   里面的 HUD(z2) 与舞台(z1) 只在这内部比。所以舞台给 z1 就够，
+   给 z70 反而会盖住 HUD（退出键看得见点不动）。 */
+.ns-pet-stage, .ns-mirror-stage { position: fixed; inset: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: center; background: transparent; }
+.ns-pet { font-size: 64px; cursor: pointer; user-select: none;
+  transition: transform .2s; }
+.ns-pet.jump { transform: translateY(-22px); }
+.ns-mirror-box { max-width: min(90vw, 560px); max-height: 70vh; overflow: auto;
+  padding: 18px; background: var(--box-bg); border: 1px solid var(--line);
+  border-radius: 14px; box-shadow: var(--shadow-card); }
+.ns-mirror-title { margin-bottom: 10px; font-size: 15px; font-weight: 600; color: var(--fg); }
+.ns-mirror-pre { margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono); font-size: 15px; line-height: 1.6; color: var(--fg);
+  transform-origin: center center; cursor: zoom-in; }
+
+/* ── 粒子层与徽章 ── */
+/* 🔴 pointer-events:none 是硬要求：粒子飘过编辑器时吃掉点击，
+   症状是「打字的某一刻按什么都没反应」，极难自查。 */
+#nsFx { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
+.ns-badge { position: fixed; top: calc(env(safe-area-inset-top) + 8px); right: 12px;
+  z-index: 45; padding: 4px 10px; font-size: 11.5px; color: var(--accent);
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: var(--shadow-chip); pointer-events: none; }
