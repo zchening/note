@@ -58,10 +58,13 @@
 
 import type { LexicalEditor } from 'lexical';
 import {
+  $createParagraphNode,
   $createPoint,
   $createRangeSelection,
+  $createTextNode,
   $getNearestNodeFromDOMNode,
   $getSelection,
+  $insertNodes,
   $isElementNode,
   $isRangeSelection,
   $isTextNode,
@@ -75,7 +78,8 @@ import { registerAutoLink } from '@lexical/link';
 import { registerList } from '@lexical/list';
 import { registerRichText } from '@lexical/rich-text';
 
-import { $isFoldNode, type FoldNode } from './nodes.ts';
+import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
+import type { Span } from '@bj/shared-schema';
 
 /**
  * 注册全部编辑行为。
@@ -103,6 +107,10 @@ export function registerBehaviors(editor: LexicalEditor): () => void {
   //   折叠的点击处理若排在 richText 之后，会被 richText 的兜底抢走。
   const unregisterFold = registerFoldBehavior(editor);
 
+  // 🔴 行首 `[折叠]` /`[/折叠]` 自动转成FoldNode（老项目 applyFolds 的等价物）。
+  //   缺它= 折叠功能对真实用户完全不可达（只有 e2e 钩子能造）。
+  const unregisterFoldAuto = registerFoldAutoCreate(editor);
+
   // 🔴 富文本兜底（含**打字能力本身**）—— 必须最后。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（见文件头）。
   const unregisterRichText = registerRichText(editor);
@@ -110,6 +118,7 @@ export function registerBehaviors(editor: LexicalEditor): () => void {
   return () => {
     // 逆序注销，与注册顺序严格相反
     unregisterRichText();
+    unregisterFoldAuto();
     unregisterFold();
     unregisterList();
     unregisterAutoLink();
@@ -169,6 +178,185 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
 
   return () => {
     onClick();
+  };
+}
+
+/** 行首折叠标记的文本。老项目 `index.html:4204 applyFolds` 用的就是这两个串。 */
+const FOLD_OPEN_MARK = '[折叠]';
+const FOLD_CLOSE_MARK = '[/折叠]';
+
+/**
+ * 自动建组的标题序号。**与 `commands.ts` 的 `foldSeq` 是两套计数器**，
+ * 各自只给自己那条路径用 —— 共享一个会让"菜单插入"和"手打自动建"
+ * 互相污染序号（用户在菜单插了第3 个，手打建出来的会跳到 5）。
+ * 用户看到的是"折叠块 1 / 2 / 3"，两套计数器各自连续即可。
+ */
+let foldAutoSeq = 0;
+
+/**
+ * 🔴🔴🔴 行首 `[折叠]` → FoldNode 的自动识别（老项目 `applyFolds` 的 Lexical 等价物）。
+ *
+ * **为什么必须补这个**：老项目用户键入 `[折叠]` 就变成折叠块（`index.html:3977`
+ * 在输入链末尾调`applyFolds()`，`foldSeedArmed` 只在 `insertText` 时置位）。
+ * 新项目**这条路径完全不存在** —— `$createFoldNode` 只有两个调用点：
+ *   - `commands.ts:49`（仅挂在 `__NOTESYNC_INSERT_FOLD__` 测试钩子上）
+ *   - `serialize.ts:168`（从模型 JSON 还原，即**已有**文档里的折叠块）
+ * ⇒ 用户手动键入 `[折叠]` 只是一行普通文本，**折叠功能对真实用户完全不可达**，
+ *   而 e2e 全绿（它用钩子造场景）。这是典型的"测试通过但功能不可达"。
+ *
+ * **判据为什么只看「段首精确等于标记」**：
+ *   - 老项目是「行首 `[折叠]`」触发，**不是**全文搜索 —— 否则正文里
+ *     提到"[折叠]"三个字也会被吞掉变成结构，内容丢失。
+ *   - 精确相等（`text === '[折叠]'`）而非 `startsWith`：因为用户紧接着
+ *     要在**同一段**打标题。`[折叠]我的标题`这种要支持，所以判据是
+ *     「以标记开头 + 标记后无内容或仅有空白」。
+ *   - 已在FoldNode 内部的段落一律不处理（`$getParentFold` 命中就return），
+ *     否则用户给折叠块改名时会被二次吞掉。
+ *
+ * **只在这一帧跑**：注册在 `editor.registerUpdateListener` 上，但靠
+ * `dirty` 判定跳过非本帧输入，避免每次远端合并都重扫全文（O(n) 扫描
+ * 挂在每次 update 上会在大文档上明显卡顿）。
+ */
+function $promoteFoldMarks(editor: LexicalEditor): void {
+  const DBG = (window as unknown as { __FOLD_DBG__?: string[] }).__FOLD_DBG__;
+  const dbg = (s: string): void => {
+    if (DBG) DBG.push(s);
+  };
+  dbg('enter');
+  const sel = $getSelection();
+  if (!$isRangeSelection(sel) || !sel.isCollapsed()) {
+    dbg('no-collapsed-range-selection');
+    return;
+  }
+  const anchor = sel.anchor.getNode();
+  dbg('anchorType=' + anchor.getType());
+  if (!$isTextNode(anchor)) {
+    dbg('anchor-not-textnode');
+    return;
+  }
+  // 🔴 判据用 `.is()`，不用 `===`：Lexical 节点是不可变快照对象，
+  //   不同 editor state 下引用不同（behaviors.ts:207 已记过这条铁证）。
+  if ($getParentFold(anchor) !== null) {
+    dbg('inside-fold-skip');
+    return;
+  }
+
+  const raw = anchor.getTextContent();
+  dbg('raw=' + JSON.stringify(raw));
+  if (!raw.includes(FOLD_OPEN_MARK)) {
+    dbg('no-mark');
+    return;
+  }
+
+  const startsFold = raw.startsWith(FOLD_OPEN_MARK);
+  const startsClose = raw.startsWith(FOLD_CLOSE_MARK);
+  if (!startsFold && !startsClose) {
+    dbg('not-at-start');
+    return;
+  }
+
+  // 标记后面必须只剩空白（用户还没打标题）—— 打了就说明标题已在，
+  // 这时**不**自动建组，让用户能自由编辑标题（老项目同款：先打完再识别）。
+  const rest = startsClose ? raw.slice(FOLD_CLOSE_MARK.length) : raw.slice(FOLD_OPEN_MARK.length);
+  if (rest.trim() !== '') {
+    dbg('rest-not-blank=' + JSON.stringify(rest));
+    return;
+  }
+
+  const para = anchor.getParent();
+  if (para === null || !$isElementNode(para)) {
+    dbg('parent-not-element');
+    return;
+  }
+  // 🔴 只处理**段落的第一个孩子**是标记的情况。若标记在段落中间
+  //   （用户先打了别的字再打标记），结构上不成立，不动。
+  const first = para.getFirstChild();
+  dbg('firstKey=' + (first ? first.getKey() : 'null') + ' anchorKey=' + anchor.getKey());
+  if (first?.getKey() !== anchor.getKey()) {
+    dbg('not-first-child');
+    return;
+  }
+
+  // 标题 = 标记之后到段末的可见文字（当前恒为空，标题随后由用户接着打）
+  const title = rest;
+  // 🔴🔴🔴 标题 span **不能是空串**。FoldNode.getTextContent() 走
+  //   `title.map(s => s.t).join('')`，空标题会让折叠块文本为空 ——
+  //   而序列化/复制/搜索都读它。更要紧的是：老项目新建的折叠块，
+  //   标题占位就是"折叠块 N"（`commands.ts:47` 同款），不是空。
+  //   这里用同样的占位，保证用户点开就看到可辨认的把手。
+  const placeholder = `折叠块${String(++foldAutoSeq)}`;
+  const titleSpans: Span[] = [{ t: title === '' ? placeholder : title }];
+  const headText: string = titleSpans[0]?.t ?? placeholder;
+
+  const head = $createParagraphNode();
+  head.append($createTextNode(headText));
+  const body = $createParagraphNode();
+  const fold = $createFoldNode(JSON.stringify(titleSpans), true);
+  fold.append(head, body);
+
+  // 🔴🔴🔴 判据：`para.getFirstChild()?.getKey() === anchor.getKey()` 之后
+  //   **不能**直接 para.replace(fold)。实测（探针记录）：
+  //     enter → anchorType=text → raw="[折叠]" → firstKey=2 anchorKey=2 → REPLACED-OK
+  //   探针说替换成功，但**真源与 DOM 一字未变**。
+  //   原因：fold / head / body 三个节点都是**游离**的（从未append 进 root），
+  //   `Node.replace()` 在 Lexical 里是 "replace this node with that node"，
+  //   对未挂载的目标节点走的是 `removeNode` +一次 no-op 插入，
+  //   **不抛错、不告警** —— 又是静默降级。
+  //   正确姿势：走 `$insertNodes`（由 Lexical 负责挂载 + 选区落到新节点），
+  //   再把原段落删掉。顺序不能反：先插后删，光标才不会被弹到文档开头。
+  $insertNodes([fold]);
+  if (para.isAttached()) para.remove();
+  dbg('INSERTED-OK');
+}
+
+/**
+ * 把「本帧有纯文本插入」当作折叠识别的触发条件。
+ *
+ * 🔴 为什么不能挂在**每次** update 上：$promoteFoldMarks 里是段首精确匹配，
+ *   挂在远端合并 / 撤销 /格式化这些 update 上会做无意义的全文扫描，
+ *   大文档（几百段）下每次按键都多扫一遍 = 可感知的卡顿。
+ *   老项目用 `foldSeedArmed` 标志位做同一件事（`index.html:5033`：
+ *   `if (realType && (it === 'insertText' || it.indexOf('insertComposition') === 0))`），
+ *   这里照搬这个思路 —— 判据放在**DOM beforeinput** 上，编辑器 update
+ *   时读标志位，读完立刻清（老项目 `index.html:4208` 同样"取完即清"，
+ *   注释写明"异常路径也不留下 armed，否则下一轮撤销/开合会被误判成新建组再切一刀"）。
+ */
+function registerFoldAutoCreate(editor: LexicalEditor): () => void {
+  let armed = false;
+
+  const onBeforeInput = (ev: Event): void => {
+    const e = ev as InputEvent;
+    // 合成输入（中文/日文 IME 打字）也要 arm：老项目判据含
+    // `insertComposition` 前缀，理由是 IME 上屏那一下才真正落下文字。
+    const t = e.inputType ?? '';
+    armed = t === 'insertText' || t.startsWith('insertComposition');
+  };
+
+  const root = editor.getRootElement();
+  root?.addEventListener('beforeinput', onBeforeInput);
+
+  const unregisterUpdate = editor.registerUpdateListener(({ editorState, dirtyElements }) => {
+    if (!armed) return;
+    // 🔴🔴🔴 取完即清，且**必须清在前面**（老项目 index.html:4208 同款纪律：
+    //   "异常路径也不留下 armed，否则下一轮撤销/开合会被误判成新建组再切一刀"）。
+    armed = false;
+    if (dirtyElements.size === 0 && editorState.isEmpty()) return;
+    // 🔴🔴🔴 这里**不能**直接 editor.update()：registerUpdateListener 的回调
+    //   是在 Lexical **自己的 update 事务提交过程中**被调用的，此时发起嵌套
+    //   editor.update() 会被 Lexical 判为"嵌套更新"并**静默丢弃**
+    //   （不抛错、不生效 —— 又是静默降级）。
+    //   老项目是命令式 DOM 操作（applyFolds 直接改innerHTML），不存在这个问题；
+    //   Lexical 下必须**推迟到下一个宏任务**，让它成为一次独立的事务。
+    //   判据记忆口诀：listener 里只"读+记"，改写一律 setTimeout 出去。
+    setTimeout(() => {
+      if (editor.isEditable() === false) return;
+      editor.update(() => $promoteFoldMarks(editor), { discrete: true });
+    }, 0);
+  });
+
+  return () => {
+    unregisterUpdate();
+    root?.removeEventListener('beforeinput', onBeforeInput);
   };
 }
 
