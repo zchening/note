@@ -103,11 +103,55 @@ export const ICON_X = (): string => svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11
 /** 返回（二级视图左上角左箭头）。与 ICON_X 分开：语义不同，形状也必须不同。 */
 export const ICON_BACK = (): string => svg('<path d="M14.5 5.5 8 12l6.5 6.5"/>');
 
-/** 落地页 logo：双弧环+ 衬线 N（48 viewBox） */
+/**
+ * 产品 Logo —— **1:1 复刻老项目「品牌 3A 全细节版」**（老项目 `index.html:620-629`）。
+ *
+ * 🔴🔴🔴 这里原先是一套**另画的** logo（一个整圆 + 两段同心弧 + `<text>` 渲染的 N），
+ *   看着"差不多"，实际与老项目**完全不是同一个标志**：
+ *     - 老项目：两段**对称圆弧**（开口对角）+ 两段**直角尖**装饰 + 衬线 N 用 **path 描边字形**
+ *     - 原新项目：一个 **circle 整圆**（老项目根本没有闭合圆）+ 弧线参数完全不同
+ *                 + N 用 `<text>` 元素（依赖系统 Georgia 字体，**跨平台字形不一致**）
+ *   用户天天看的品牌标，换了就是"这不是我那个 NoteSync"。
+ *
+ * 🔴 为什么 N 必须是 `<path>` 而不能用 `<text>`：
+ *   `<text>` 的实际字形由**运行环境字体**决定。Windows / iOS / Android 上
+ *   Georgia（或回退 serif）的 N 字形**宽窄与衬线角度都不同**，
+ *   同一个 logo 在不同设备上会长得不一样。path 是固定坐标，永远一致。
+ *   （这也是老项目当年特意把 N 描成 path 的原因。）
+ *
+ * 🔴 `stroke-width` 分两档：弧环 2.3、直角尖 2.3，与老项目**逐字相同**。
+ *   原新项目用了 1.4 / 1.6，细了近一半 —— 在 17px 顶栏尺寸下几乎看不见弧环。
+ */
 export const LOGO = (): string =>
-  '<svg class="ns-logo" viewBox="0 0 48 48" width="48" height="48" fill="none" aria-hidden="true">' +
-  '<circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="1.4" opacity=".35"/>' +
-  '<path d="M8.5 27.5a15.5 15.5 0 0 1 31 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
-  '<path d="M14 31.5a10 10 0 0 1 20 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".55"/>' +
-  '<text x="24" y="27" text-anchor="middle" font-family="Georgia,serif" font-size="17" fill="currentColor">N</text>' +
+  '<svg class="ns-logo" viewBox="0 0 48 48" fill="none" aria-hidden="true">' +
+  // 双弧环：两段对称圆弧，开口对角
+  '<g stroke="currentColor" stroke-width="2.3" stroke-linecap="round">' +
+  '<path d="M40.5 14.5A19 19 0 0 1 14.5 40.5"/>' +
+  '<path d="M7.5 33.5A19 19 0 0 1 33.5 7.5"/>' +
+  '</g>' +
+  // 直角尖：左上 / 右下两处装饰角
+  '<g stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M14.5 35.5v5h-5"/>' +
+  '<path d="M33.5 12.5v-5h5"/>' +
+  '</g>' +
+  // 衬线 N：path 字形，非 <text>
+  '<path d="M18.72 16.96h2.2l6.16 11V16.96h2.2v14.08h-2.2l-6.16-11V31.04h-2.2Z" fill="currentColor"/>' +
+  '</svg>';
+
+/**
+ * 顶栏 / 菜单里用的**小号** logo（老项目 `index.html:650` 同一枚 path，只是尺寸更小）。
+ *
+ * 🔴🔴 尺寸被老项目用 CSS **按视口 clamp** 到 17–27px；原新项目写死 `width="48"`，
+ *   而顶栏格只有 17px 高 —— 一个 48px 的 SVG 塞进 17px 格子里，
+ *   实际渲染成一团糊的色块，还会把顶栏行高撑开。
+ *   ⇒ 这里**不写死 width/height**，尺寸交给 CSS 的 clamp（见 styles.css 的 `.ns-mark svg`），
+ *   与老项目「用 CSS 缩放 SVG、HTML 里不写尺寸」的做法一致。
+ */
+export const LOGO_SM = (): string =>
+  '<svg class="ns-logo-sm" viewBox="0 0 48 48" fill="none" aria-hidden="true">' +
+  '<g stroke="currentColor" stroke-width="3.6" stroke-linecap="round">' +
+  '<path d="M40.5 14.5A19 19 0 0 1 14.5 40.5"/>' +
+  '<path d="M7.5 33.5A19 19 0 0 1 33.5 7.5"/>' +
+  '</g>' +
+  '<path d="M18.72 16.96h2.2l6.16 11V16.96h2.2v14.08h-2.2l-6.16-11V31.04h-2.2Z" fill="currentColor"/>' +
   '</svg>';

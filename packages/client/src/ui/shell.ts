@@ -28,6 +28,7 @@ import {
   ICON_REMIND,
   ICON_UPLOAD,
   LOGO,
+  LOGO_SM,
 } from './icons.ts';
 import { bodyClassFor, nextSkin, SKIN_LABELS, SKIN_WORDS, skinOverlayStyle, type SkinName } from './theme.ts';
 
@@ -86,7 +87,7 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
 <div class="shell" id="shell">
   <header class="ns-top">
     <span class="ns-brand" id="brand" role="button" tabindex="0" aria-label="${COPY.brandName}" title="${COPY.brandName}">
-      <span class="ns-mark" id="brandMark">${LOGO()}</span>
+      <span class="ns-mark" id="brandMark">${LOGO_SM()}</span>
       <b id="brandWord">${SKIN_WORDS.default}</b>
     </span>
     <span class="sp"></span>

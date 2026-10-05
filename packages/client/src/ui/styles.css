@@ -27,9 +27,23 @@ html, body {
 button, input { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; padding: 0; }
 svg.ic { display: block; }
-/* 次级描边：老项目用它做双层线条的分层 */
-.dark .ic .g { opacity: .45; }
-.ic .g { opacity: .6; }
+
+/* 🔴🔴🔴 图标次级描边必须复刻老项目的**金色高亮语义**（老项目 index.html:588-589）：
+ *     svg .g  { stroke: var(--accent) }
+ *     svg .gf { fill: var(--accent); stroke: none }
+ *
+ *   原新项目写的是 `.ic .g { opacity: .6 }` —— 把"金色"换成了"半透明灰"。
+ *   后果是**全站 20+ 图标的强调层一起变色**：老项目里星标的实心尖、
+ *   菜单项的高亮笔画、锁的锁梁，全是金色 accent；改成opacity 之后
+ *   它们变成"同色但发灰"，整屏图标一起降级 —— 而这类改动**单看任一个图标
+ *   都不算错**，只有并排对比才刺眼，所以极难自查。
+ *
+ *   `.g` / `.gf` 是 SVG 内部的**类名**（写在 path 上），不限定 `.ic`：
+ *   老项目顶栏 logo、落地页 logo、菜单里的裸 svg 也带这两个类，
+ *   所以选择器不能收窄到 `.ic`，否则那些图标的高亮层会掉回默认色。
+ */
+svg .g { stroke: var(--accent); }
+svg .gf { fill: var(--accent); stroke: none; }
 
 /* ---------- 启动占位 ---------- */
 #boot { min-height: 100%; display: flex; align-items: center; justify-content: center;
@@ -66,6 +80,25 @@ svg.ic { display: block; }
            padding: 24px 20px 32px; }
 .landing-in { width: 100%; max-width: 380px; text-align: center; }
 .ns-logo { color: var(--accent); margin: 0 auto 6px; display: block; }
+
+/* 🔴🔴 落地页 logo 必须**写死 48px**（老项目 index.html:621 的 viewBox 就是 48，
+ *   且老项目 .logo 的 CSS 同样是固定 48）。SVG 不写width/height 时默认
+ *   会撑成 300×150 的替换元素尺寸，把整个落地页顶开。
+ *   —— 顶栏那枚走下面的 .ns-logo-sm，两者不能混。 */
+.ns-logo { width: 48px; height: 48px; }
+
+/* 🔴🔴🔴 顶栏 logo 的尺寸必须按视口 clamp（老项目 index.html:156）：
+ *     width: clamp(17px, 4.4vw, 27px); height: 同值
+ *   原新项目**写死 width="48" height="48"**，而顶栏格只有 17px 高 ——
+ *   48px 的 SVG 塞进 17px 格子里，实际渲染成一团糊色块，还会撑开顶栏行高。
+ *   老项目「HTML 里不写尺寸、用 CSS 缩放 SVG」的做法必须照搬：
+ *   尺寸是**表现层**的事，不该烧进 markup（皮肤三态切换时还要复写它）。
+ */
+.ns-logo-sm {
+  display: block;
+  width: clamp(17px, 4.4vw, 27px);
+  height: clamp(17px, 4.4vw, 27px);
+}
 .landing h1 { font-family: var(--serif); font-size: 26px; font-weight: 600;
               margin: 4px 0 2px; letter-spacing: .2px; }
 .landing .sub { margin: 0 0 22px; font-size: 13px; color: var(--muted); letter-spacing: 2px; }
