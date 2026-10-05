@@ -77,20 +77,55 @@ import {
 import { registerAutoLink } from '@lexical/link';
 import { registerList } from '@lexical/list';
 import { registerRichText } from '@lexical/rich-text';
+// 🔴 只取 `signal` 这一个纯函数，**从深路径 `@lexical/extension/signals.js` 引**。
+//   从 `@lexical/extension` 主入口引会把整个 Extension 包（AutoFocus / History /
+//   Builder …）拖进产物 —— 而文件头已经论证过本项目**不引 React、没有 Extension 激活运行时**，
+//   那些扩展一个都用不上，纯属白进几十 KB。
+//   深路径的 `./signals.js` 在 package.json 的 exports 里是显式条目，esbuild 能解析。
+//   且它与 `@lexical/rich-text` 内部用的是**同一份** signals-core 实例（同一 resolved 文件），
+//   所以 signal 的语义与 richText 内部一致，不会出现"两份响应式系统"。
+import { signal } from '@lexical/extension/signals.js';
 
 import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
 import type { Span } from '@bj/shared-schema';
+
+/**拖拽高亮用的 class。与 styles.css `.ns-editor.dragover` 一一对应（改一处必须改两处）。 */
+const DRAGOVER_CLASS = 'dragover';
+
+/**
+ * 行为层所需的外部能力（由 main.ts 注入）。
+ *
+ * 🔴 为什么**注入函数**而不是让 behaviors.ts 直接 import `handleImageUpload`：
+ *   上传需要 `noteId` / `origin` / 三个提示回调，全在 main.ts 的模块作用域里
+ *   （`currentNote`、`showUploadNote`、`dismissKeyboardForTouch`）。
+ *   若behaviors.ts 自己 import upload.ts 再自己拼这些依赖，就是**第二份上传接线**——
+ *   改提示文案/加错误态要改两处，漏一处就出现"选图有提示、拖拽没提示"，
+ *   症状是用户以为拖拽坏了（与文件头那些静默降级同形状）。
+ *   注入后**上传入口只有 main.ts 那一个函数**，三处触发点共用它。
+ */
+export interface BehaviorDeps {
+  /**
+   * 上传一个图片文件（压缩 → 取签名 → 直传 → 插图）。
+   * 必须是 `handleImageUpload` 的包装：类型/大小校验与失败文案都在那里面，
+   * 这里**不另立标准**。
+   */
+  uploadImage: (file: File) => void;
+}
 
 /**
  * 注册全部编辑行为。
  *
  * 🔴 必须在 `editor.setRootElement(...)` **之后**、任何 `editor.update(...)` 之前调用：
- *   setRootElement 会触发一次 reconcile 与 `$commitPendingUpdates`，
- *   在它之前注册则行为插件看不到稳定态的 root 绑定。
+ *   setRootElement会触发一次 reconcile 与 `$commitPendingUpdates`，
+ *   在它之前注册则行为插件看不到稳定态的root 绑定。
+ *
+ * @param deps 外部能力注入（当前只有图片上传）。**刻意做成必填**：
+ *   做成可选等于给"忘了传uploadImage"留一个静默降级的口子——
+ *   表现是"编辑器能打字但图片拖进来没反应"，零报错，正是本文件要消灭的那类故障。
  *
  * @returns 注销函数（逆序执行）。S4 热重载与测试隔离会用到。
  */
-export function registerBehaviors(editor: LexicalEditor): () => void {
+export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): () => void {
   // 自动链接：输入 URL / 邮箱并敲空格或标点时自动转链接。
   // 🔴 用 `registerAutoLink` 而不是 `registerLink`：后者的签名是
   //   `registerLink(editor, stores: NamedSignalsOutput<LinkConfig>)`，
@@ -111,17 +146,150 @@ export function registerBehaviors(editor: LexicalEditor): () => void {
   //   缺它= 折叠功能对真实用户完全不可达（只有 e2e 钩子能造）。
   const unregisterFoldAuto = registerFoldAutoCreate(editor);
 
+  // 🔴🔴 图片的两个入口：拖拽进编辑器、粘贴图片。
+  //   缺它= 这两条路对真实用户**完全不存在**，而 e2e 全绿
+  //   （`06-image.test.js` 只覆盖了 file input 那一条）。
+  const unregisterImageInput = registerImageFileInput(editor, deps.uploadImage);
+
   // 🔴 富文本兜底（含**打字能力本身**）—— 必须最后。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（见文件头）。
-  const unregisterRichText = registerRichText(editor);
+  //
+  // 🔴🔴 第三个参数 `signal(() => true)` = `shouldHandlePasteAsFiles`。
+  //   0.52 里它已经不是裸 boolean 而是 `ReadonlySignal<(files, hasTextContent) => boolean>`
+  //   （见 node_modules/@lexical/rich-text/src/index.ts:1285），默认值是
+  //   `files.length > 0 && !hasTextContent` —— 即"有文件且没有文本"才走文件通道。
+  //   那正是**从网页/聊天软件复制一张图**的形态吗？不是：那种剪贴板里
+  //   `text/html` 与`image/png` **同时存在**（浏览器会把`<img src>` 一并写进 html），
+  //   于是 `hasTextContent === true`，默认值返回 false，
+  //   图片被当成 HTML 文本插进编辑器（用户看到的是一段残缺标记或什么都没发生）。
+  //   老项目 `index.html:2650` 判`items` 里有没有 `image/` 项，与此同解：
+  //   **只要剪贴板里有图片，就走图片通道**，文本让位。
+  const unregisterRichText = registerRichText(editor, undefined, signal(() => true));
 
   return () => {
     // 逆序注销，与注册顺序严格相反
     unregisterRichText();
+    unregisterImageInput();
     unregisterFoldAuto();
     unregisterFold();
     unregisterList();
     unregisterAutoLink();
+  };
+}
+
+/**
+ * 拖拽 / 粘贴图片的 DOM 行为（老项目 `index.html:2735-2742` + `2645-2675` 的 Lexical 等价物）。
+ *
+ * 🔴🔴 为什么这两个入口必须**自己监听 DOM**，而不能只靠 Lexical 的命令：
+ *   - **拖拽高亮**：`.ns-editor.dragover` 是纯 CSS 状态，Lexical 没有任何
+ *     "拖拽悬停态"的概念，只能自己加class。
+ *   - **上传动作**：Lexical 内建的文件通道（`DRAG_DROP_PASTE` / `shouldHandlePasteAsFiles`）
+ *     只负责把文件**交给节点工厂**（如 `$createNodesFromAttachments`），
+ *     而本项目的图片**必须先压缩再签名直传 Cloudinary**（upload.ts），
+ *     这条链路 Lexical 不可能知道。所以上传只能由我们自己发起。
+ *
+ * 🔴🔴 三条判据纪律（每条都对应一类"看起来能跑、实际没生效"）：
+ *
+ *   1. **只认`types.includes('Files')` 的拖拽**，纯文本拖拽一律放行。
+ *      无条件 `preventDefault()` 会吞掉编辑器内的文字拖放（移动选中文字），
+ *      症状是"选中一段话拖不动位置"，且没有任何提示。
+ *      老项目是无条件 preventDefault（它没有 Lexical 的内部拖放语义），
+ *      新项目必须区分 —— 这是与老项目**故意不同**的地方。
+ *
+ *   2. **`dragenter`/`dragover` 只负责"宣告可以放"**，不上传。
+ *      浏览器要求 dragover 被 preventDefault 才会派发 drop；
+ *      在 dragover 里就上传会让"鼠标扫过编辑器"触发压缩与上传。
+ *
+ *   3. **`dragleave` 移除高亮**，但必须判 `relatedTarget` 是否仍在编辑器内：
+ *      鼠标从编辑器**内部**的元素之间移动会连续触发 dragleave（每个子段落一次），
+ *      无条件移除会让高亮**闪一下就消失**，用户根本看不到。
+ */
+function registerImageFileInput(editor: LexicalEditor, uploadImage: (file: File) => void): () => void {
+  const root = editor.getRootElement();
+  // 🔴 与 `registerFoldAutoCreate` 同款：root 取不到就只解绑自己。
+  //   上层 `registerBehaviors` 的契约要求在 setRootElement 之后调用，
+  //   这里不需要再抛一次（重复抛会掩盖真正的调用顺序错误）。
+  if (!root) return () => {};
+
+  /** 只在"确实带着文件"时接管拖拽；纯文本拖拽放行给编辑器。 */
+  const carriesFiles = (e: DragEvent): boolean => {
+    const types = e.dataTransfer?.types;
+    return !!types && types.includes('Files');
+  };
+
+  const onDragEnter = (e: DragEvent): void => {
+    if (!carriesFiles(e)) return;
+    e.preventDefault();
+    root.classList.add(DRAGOVER_CLASS);
+  };
+
+  const onDragOver = (e: DragEvent): void => {
+    if (!carriesFiles(e)) return;
+    // 🔴 这一行是 drop 事件能被派发的前提（见上方纪律 2）。
+    //   不写它，drop 永远不触发，且**不报错**。
+    e.preventDefault();
+    root.classList.add(DRAGOVER_CLASS);
+  };
+
+  const onDragLeave = (e: DragEvent): void => {
+    // 🔴 只在"真的离开编辑器"时才移除高亮（见上方纪律 3）。
+    //   relatedTarget 为 null 表示离开了窗口，同样要清。
+    const to = e.relatedTarget;
+    if (to instanceof Node && root.contains(to)) return;
+    root.classList.remove(DRAGOVER_CLASS);
+  };
+
+  const onDrop = (e: DragEvent): void => {
+    root.classList.remove(DRAGOVER_CLASS);
+    if (!carriesFiles(e)) return;
+    // 🔴 必须 preventDefault：否则浏览器把文件**当页面导航打开**，
+    //   单页应用被整个替换掉，用户的笔记看起来"丢了"（现场最难解释的一类）。
+    e.preventDefault();
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    // 🔴 只取第一张。`handleImageUpload` 自带类型/大小校验与失败文案，
+    //   非图片文件走它会给出「不是图片文件，图片未插入，请重试」——
+    //   与用户从文件管理器误拖一个 txt 进来的真实情形对齐，且**不另立标准**。
+    const first = files[0];
+    if (first) uploadImage(first);
+  };
+
+  const onPaste = (e: ClipboardEvent): void => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    // 🔴 判据是「items 里有 type 以 image/ 开头的项」，而不是
+    //   `e.clipboardData.files[0]`：后者在部分浏览器/场景下为空
+    //   （如从聊天软件复制图片时只有 blob item 而 files 未暴露）。
+    //   老项目 index.html:2650 用的正是 items 判据，同款。
+    let image: File | null = null;
+    for (const item of items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        image = item.getAsFile();
+        if (image) break;
+      }
+    }
+    if (!image) return;
+    // 🔴 有图就吞掉这次粘贴：否则 Lexical 的 richText 会把同一份剪贴板里的
+    //   `text/html`（`<img src=...>`）也插进编辑器，
+    //   结果是"图片上传了一张 + 编辑器里还多出一段图片标记"。
+    //   没有图片时**不 preventDefault**，让 Lexical 的 richText 正常处理纯文本粘贴。
+    e.preventDefault();
+    uploadImage(image);
+  };
+
+  root.addEventListener('dragenter', onDragEnter);
+  root.addEventListener('dragover', onDragOver);
+  root.addEventListener('dragleave', onDragLeave);
+  root.addEventListener('drop', onDrop);
+  root.addEventListener('paste', onPaste);
+
+  return () => {
+    root.removeEventListener('dragenter', onDragEnter);
+    root.removeEventListener('dragover', onDragOver);
+    root.removeEventListener('dragleave', onDragLeave);
+    root.removeEventListener('drop', onDrop);
+    root.removeEventListener('paste', onPaste);
+    root.classList.remove(DRAGOVER_CLASS);
   };
 }
 

@@ -382,7 +382,32 @@ function hideUploadNote(): void {
 }
 
 /**
- * 隐藏的 file input —— 图片选择的唯一入口。
+ * 🔴🔴 **全站唯一的图片上传入口** —— 选图、拖拽、粘贴三条路都走它。
+ *
+ * 之前这段 deps 是内联在 `ensureUploadInput` 的 change 里的，
+ * 于是 behaviors 想接拖拽/粘贴就得**再抄一份**同样的 deps：
+ * 改一次提示文案要动两处，漏一处就出现"点上传有提示、拖进来没提示"——
+ * 用户看到的是"拖拽功能坏了"，而代码零报错。抽出来即从结构上消除这个可能。
+ */
+function uploadImageFromFile(f: File): void {
+  const ed = editor;
+  if (!ed) return;
+  void handleImageUpload(f, ed, {
+    noteId: currentNote,
+    base: location.origin,
+    onStatus: (m) => showUploadNote('doing', m, 0),
+    onOk: () => showUploadNote('ok', COPY.uploadOk, COPY.uploadOkMs),
+    onError: (m) => showUploadNote('bad', m, COPY.uploadFailMs),
+  }).then((ok) => {
+    // 🔴 成功才收键盘：失败时图片没插进去，编辑器还该留着继续用。
+    //   判据用 handleImageUpload 的**返回值**，不是"看提示条是什么态"——
+    //   后者在两个提示同屏、或提示条已被收起计时器删掉时就不成立了。
+    if (ok) dismissKeyboardForTouch();
+  });
+}
+
+/**
+ * 隐藏的 file input —— 「点顶栏按钮选图」的入口。
  *
  * 🔴 为什么藏在 DOM 里而不是 `input.click()` 临时造一个：
  *   iOS Safari 对**用户手势链外**的 input.click() 会直接忽略，
@@ -416,20 +441,7 @@ function ensureUploadInput(): HTMLInputElement {
     // 🔴 必须清空 value：同一个文件连选两次，第二次不触发 change
     //   （value 没变），用户会以为"点了没反应"。
     el.value = '';
-    const ed = editor;
-    if (!f || !ed) return;
-    void handleImageUpload(f, ed, {
-      noteId: currentNote,
-      base: location.origin,
-      onStatus: (m) => showUploadNote('doing', m, 0),
-      onOk: () => showUploadNote('ok', COPY.uploadOk, COPY.uploadOkMs),
-      onError: (m) => showUploadNote('bad', m, COPY.uploadFailMs),
-    }).then((ok) => {
-      // 🔴 成功才收键盘：失败时图片没插进去，编辑器还该留着继续用。
-      //   判据用 handleImageUpload 的**返回值**，不是"看提示条是什么态"——
-      //   后者在两个提示同屏、或提示条已被收起计时器删掉时就不成立了。
-      if (ok) dismissKeyboardForTouch();
-    });
+    if (f) uploadImageFromFile(f);
   });
   document.body.appendChild(el);
   uploadInput = el;
@@ -887,7 +899,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   ed.setRootElement(editorHost);
   // 🔴🔴 行为注册必须在 setRootElement 之后、任何 update 之前。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
-  registerBehaviors(ed);
+  //   deps.uploadImage 指向 main.ts 里那**唯一**的上传入口，
+  //   于是「选图 / 拖拽 / 粘贴」三条路共用同一份校验与提示。
+  registerBehaviors(ed, { uploadImage: uploadImageFromFile });
   // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
   //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，
   //   与文件头behaviors.ts 记的 registerRichText 那条P0 是同一个形状。
