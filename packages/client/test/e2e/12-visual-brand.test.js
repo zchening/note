@@ -93,7 +93,7 @@ test('VIS-02 🔴🔴 图标 .g 高亮层必须是金色 accent（被改成 opac
   }
 });
 
-test('VIS-03 🔴 落地页 logo 是固定 48px 且有双弧环+直角尖+path 描边 N', async () => {
+test('VIS-03 🔴 落地页 logo 是固定 56px 且有双弧环+直角尖+path 描边 N', async () => {
   // 落地页是**未解锁**状态，要单独走一遍（openEditor 会跳编辑器）
   const page = await h.browser().newPage();
   try {
@@ -114,8 +114,329 @@ test('VIS-03 🔴 落地页 logo 是固定 48px 且有双弧环+直角尖+path �
     assert.equal(info.hasCircle, false, '老项目 logo 没有闭合 circle，多出来的整圆是另画的');
     // 双弧环 2 + 直角尖 2 + N 1 = 5 条 path
     assert.equal(info.pathCount, 5, `logo 应有 5 条 path（双弧2+直角尖2+N1），实际 ${info.pathCount}`);
-    assert.ok(Math.abs(info.w - 48) < 1, `落地页 logo 应为 48px，实际 ${info.w}px`);
-    assert.ok(Math.abs(info.h - 48) < 1, `落地页 logo 应为 48px，实际 ${info.h}px`);
+    assert.ok(Math.abs(info.w - 56) < 1, `落地页 logo 应为 56px（老项目 .logo），实际 ${info.w}px`);
+    assert.ok(Math.abs(info.h - 56) < 1, `落地页 logo 应为 56px，实际 ${info.h}px`);
+  } finally {
+    await page.close();
+  }
+});
+
+/* ========================================================================
+ * 第二批：布局 / 几何 / 描边档位回归闸。
+ *
+ * 🔴🔴🔴 这批全部来自一次真实审计（P0，已修复）。它们的共性是：
+ *   **单看任一处都不算错，并排对比才刺眼**，所以 typecheck 与纯逻辑单测完全无感。
+ *   典型形态：
+ *     · 编辑器丢了 `max-width:720px; margin:0 auto` → 正文顶满整屏宽（老项目是居中一条）
+ *     · 字号 17→16、行高 1.9→1.85、内边距 40/28/120→16/18/40 → 正文密度整个变了
+ *     · 描边宽度从五档（1.7/1.8/1.9/2）塌成 1.6 单一值 → 菜单整组"变细"
+ *     · 底栏触控区 44→30px、状态点中性灰→金色、字距 .14em 丢 → 状态条气质全变
+ *     · 菜单盒 300→460px、遮罩模糊 10→2px → 浮层从"轻"变"重"
+ *
+ * 判据一律量**真实计算样式**，不 grep 源码 —— grep 源码会被注释命中，
+ * 且看不出"写了但被后面的规则覆盖"这类真实失效。
+ * ======================================================================== */
+
+/** 把 CSS 长度值里的 px 剥掉，'17px' → 17 */
+const px = (v) => parseFloat(String(v));
+
+test('VIS-04 🔴🔴 编辑器必须居中限宽 720px / 字号 17 / 行高 1.9（丢了就是正文顶满整屏）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'v04', 'pw');
+  try {
+    const m = await page.evaluate(() => {
+      const el = document.querySelector('.ns-editor');
+      if (!el) return null;
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const parent = el.parentElement.getBoundingClientRect();
+      return {
+        maxWidth: cs.maxWidth,
+        fontSize: pxOf(cs.fontSize),
+        lineHeight: parseFloat(cs.lineHeight),
+        padT: pxOf(cs.paddingTop),
+        padL: pxOf(cs.paddingLeft),
+        padB: pxOf(cs.paddingBottom),
+        // 居中判据：左右外边距近似相等（差 ≤2px 算居中）
+        marginL: pxOf(cs.marginLeft),
+        marginR: pxOf(cs.marginRight),
+        boxW: r.width,
+        parentW: parent.width,
+      };
+      function pxOf(v) { return parseFloat(String(v)); }
+    });
+    assert.ok(m, '应有 .ns-editor');
+    assert.equal(m.maxWidth, '720px', `编辑器应限宽 720px，实际 ${m.maxWidth} —— 正文会顶满整屏`);
+    assert.equal(m.fontSize, 17, `正文字号应17px，实际 ${m.fontSize}px`);
+    // 行高是计算值：17 × 1.9 = 32.3
+    assert.ok(
+      Math.abs(m.lineHeight - 17 * 1.9) < 0.6,
+      `正文行高应≈32.3px（17×1.9），实际 ${m.lineHeight}px`,
+    );
+    assert.equal(m.padT, 40, `正文上内边距应 40px，实际 ${m.padT}px`);
+    assert.equal(m.padL, 28, `正文左内边距应 28px，实际 ${m.padL}px`);
+    assert.equal(m.padB, 120, `正文下内边距应 120px（底部留白给软键盘/提示），实际 ${m.padB}px`);
+    assert.ok(
+      Math.abs(m.marginL - m.marginR) <= 2 && (m.marginL > 0 || m.boxW < m.parentW),
+      `编辑器应水平居中（margin 0auto），实测左 ${m.marginL} 右 ${m.marginR}`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VIS-05 🔴 描边宽度必须分档：顶栏 1.7 / 菜单 1.9 / 关闭 2（塌成 1.6 菜单整组变细）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'v05', 'pw');
+  try {
+    // 顶栏键
+    const topW = await page.evaluate(() => {
+      const s = document.querySelector('.ns-top button.ns-ic svg');
+      return s ? parseFloat(getComputedStyle(s).strokeWidth) : -1;
+    });
+    assert.ok(
+      Math.abs(topW - 1.7) < 0.01,
+      `顶栏图标描边应 1.7，实际 ${topW} —— 老项目分五档，统一成 1.6 会让整组变细`,
+    );
+
+    // 菜单项：打开菜单后量
+    await page.click('#menuBtn');
+    await page.waitForSelector('.menu-box .menu-item svg', { timeout: 10_000 });
+    const menuW = await page.evaluate(() => {
+      const s = document.querySelector('.menu-box .menu-item svg');
+      return s ? parseFloat(getComputedStyle(s).strokeWidth) : -1;
+    });
+    assert.ok(
+      Math.abs(menuW - 1.9) < 0.01,
+      `菜单图标描边应 1.9（比顶栏粗一号），实际 ${menuW}`,
+    );
+
+    // 关闭 ×：描边 2
+    const xW = await page.evaluate(() => {
+      const s = document.querySelector('#menuClose svg');
+      return s ? parseFloat(getComputedStyle(s).strokeWidth) : -1;
+    });
+    assert.ok(Math.abs(xW - 2) < 0.01, `关闭图标描边应 2，实际 ${xW}`);
+
+    // 菜单盒宽度：老项目 width:min(86vw,300px)
+    const boxW = await page.evaluate(() => {
+      const b = document.querySelector('.menu-box');
+      return b ? b.getBoundingClientRect().width : -1;
+    });
+    assert.ok(
+      boxW > 250 && boxW <= 302,
+      `菜单盒宽应 ≈300px（min(86vw,300px)），实际 ${boxW}px —— 460px 会让整组浮层变重`,
+    );
+
+    // 遮罩模糊：老项目 blur(10px)，被改成 2px 后浮层"变轻"到看不出层次
+    const blur = await page.evaluate(() => {
+      const b = document.querySelector('.box')?.parentElement;
+      if (!b) return null;
+      const v = getComputedStyle(b).backdropFilter || getComputedStyle(b).webkitBackdropFilter;
+      const m = /blur\(([\d.]+)px\)/.exec(v);
+      return m ? parseFloat(m[1]) : -1;
+    });
+    assert.ok(
+      blur === -1 || Math.abs(blur - 10) < 0.01,
+      `遮罩模糊应 10px，实际 ${blur}px —— 2px 看不出浮层层次`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VIS-06 🔴 底栏：触控区 ≥44px / 状态点中性灰 / 字距 .14em', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'v06', 'pw');
+  try {
+    const m = await page.evaluate(() => {
+      const btn = document.querySelector('#menuBtn');
+      const dot = document.querySelector('.ns-foot .dot');
+      const foot = document.querySelector('footer.ns-foot');
+      if (!btn || !dot || !foot) return null;
+      const cs = getComputedStyle(foot);
+      // 🔴 状态点颜色**必须与当前主题的令牌比**，不能写死 rgb。
+      //   harness 默认落在夜间主题，写死日间值（#ECEAE2）会恒红——
+      //   这是"判据自己写错"的典型：颜色对了却报红。
+      //   要断的是"它吃的是中性灰令牌，不是金色 accent"，所以与令牌比最准。
+      const root = getComputedStyle(document.documentElement);
+      const toRgb = (c) => {
+        const m2 = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m2) return String(c).trim();
+        const n = parseInt(m2[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      return {
+        btnH: btn.getBoundingClientRect().height,
+        btnW: btn.getBoundingClientRect().width,
+        footLetter: cs.letterSpacing,
+        footFont: parseFloat(cs.fontSize),
+        dotBg: getComputedStyle(dot).backgroundColor,
+        lineToken: toRgb(root.getPropertyValue('--line')),
+        accentToken: toRgb(root.getPropertyValue('--accent')),
+      };
+    });
+    assert.ok(m, '底栏三件套应齐全');
+    assert.ok(
+      m.btnH >= 44 && m.btnW >= 44,
+      `菜单键触控区应≥44×44px（手指够得着），实际 ${m.btnW}×${m.btnH}`,
+    );
+    assert.equal(
+      m.dotBg,
+      m.lineToken,
+      `状态点应吃中性灰令牌 --line（${m.lineToken}），实际 ${m.dotBg} —— 改成金色会与 accent 语义打架`,
+    );
+    assert.notEqual(
+      m.dotBg,
+      m.accentToken,
+      `状态点不应是金色 accent（${m.accentToken}）`,
+    );
+    assert.ok(
+      parseFloat(m.footLetter) > 1.5,
+      `底栏字距应 .14em（≈1.68px），实际 ${m.footLetter}`,
+    );
+    assert.equal(m.footFont, 12, `底栏字号应 12px，实际 ${m.footFont}px`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('VIS-07 🔴 折叠三角必须是 CSS 几何形（用 ▸ 字形会小一圈且两态占宽不等）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'v07', 'pw');
+  try {
+    // 直接注入一个折叠块，量三角 ::before 的边框几何
+    // （不点顶栏任何键：那是上一版留下的无用残留，会把编辑器状态搅乱）
+    const geo = await page.evaluate(() => {
+      const ed = document.querySelector('.ns-editor');
+      const fold = document.createElement('div');
+      fold.className = 'ns-fold';
+      fold.setAttribute('data-open', 'false');
+      const head = document.createElement('div');
+      head.textContent = '折叠标题';
+      const body = document.createElement('div');
+      body.textContent = '折叠正文';
+      fold.append(head, body);
+      ed.append(fold);
+      const cs = getComputedStyle(head, '::before');
+      // 🔴🔴 必须**先取快照再删节点**。getComputedStyle 返回的是**活的**声明对象，
+      //   节点从文档里remove 之后再读 borderLeftWidth 会得到空串 → parseFloat → NaN。
+      //   （我第一版就是先 remove 后读，判据恒红，差点以为 CSS 又坏了。）
+      const closedSnap = {
+        w: parseFloat(cs.width),
+        h: parseFloat(cs.borderLeftWidth),
+        top: parseFloat(cs.borderTopWidth),
+      };
+      const openCs = (() => {
+        fold.setAttribute('data-open', 'true');
+        const c = getComputedStyle(head, '::before');
+        return {
+          w: parseFloat(c.width),
+          h: parseFloat(c.borderTopWidth),
+          left: parseFloat(c.borderLeftWidth),
+          right: parseFloat(c.borderRightWidth),
+        };
+      })();
+      fold.remove();
+      return { closed: closedSnap, open: openCs };
+    });
+    assert.ok(geo, '应能造出折叠块量三角');
+    // 🔴 判据用**边框几何**而不是 content 字符串。
+    //   content 在不同 Chromium 版本里序列化不一致（实测同一份代码一次是 `""`、
+    //   一次被 test runner 的 diff 转义成 `\\"\\"`），拿它当判据会变成"判据在骗你"。
+    //   而"几何三角 vs ▸ 字形"的真正区别是**有没有实边框**：
+    //   字形方案下 border-left恒为 0，只有 content 里放了个字符。边框值是稳定的。
+    assert.ok(
+      Math.abs(geo.closed.h - 8) < 0.01,
+      `收起态三角应为 8×8 的几何形（border-left 8px），实际 border-left ${geo.closed.h}px —— 为 0说明退回了 ▸ 字形`,
+    );
+    assert.ok(
+      Math.abs(geo.closed.top - 4) < 0.01,
+      `收起态上下透明边应各 4px，实际 ${geo.closed.top}px`,
+    );
+    // 展开态：border-top 8px 实、左右各 4px 透明 → 同样是 8×8（两态必须同盒，否则跳行）
+    assert.ok(
+      Math.abs(geo.open.h - 8) < 0.01,
+      `展开态三角应为 8×8（border-top 8px），实际 ${geo.open.h}px —— 与收起态不同盒会让换行点跳`,
+    );
+    assert.ok(
+      Math.abs(geo.open.left - 4) < 0.01,
+      `展开态左右透明边应各 4px，实际 ${geo.open.left}px`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VIS-08 🔴 落地页 trust 三列必须各有图标（只剩纯文字会变"一行小字"）', async () => {
+  const page = await h.browser().newPage();
+  try {
+    await page.goto(h.baseUrl());
+    await page.waitForSelector('.trust', { timeout: 15_000 });
+    const m = await page.evaluate(() => {
+      const spans = Array.from(document.querySelectorAll('.trust > span'));
+      const svgW = spans.map((s) => {
+        const v = s.querySelector('svg');
+        return v ? v.getBoundingClientRect().width : -1;
+      });
+      const trust = document.querySelector('.trust');
+      const cs = getComputedStyle(trust);
+      return {
+        n: spans.length,
+        svgW,
+        position: cs.position,
+        bottom: cs.bottom,
+        letter: cs.letterSpacing,
+      };
+    });
+    assert.equal(m.n, 3, `trust 应有 3 列，实际 ${m.n}`);
+    for (let i = 0; i < m.svgW.length; i += 1) {
+      assert.ok(
+        Math.abs(m.svgW[i] - 17) < 1,
+        `trust 第 ${i + 1} 列图标应17px，实际 ${m.svgW[i]}px —— 缺图标会退化成纯文字行`,
+      );
+    }
+    assert.equal(m.position, 'absolute', `trust 行应贴底（absolute），实际 ${m.position}`);
+    assert.ok(
+      m.position === 'absolute' || parseFloat(m.bottom) > 0,
+      'trust 行应贴底而不是跟着内容流',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VIS-09 🔴 落地页：h1 34px/500 + 扫码胶囊 44px 触控区 + logo 56px', async () => {
+  const page = await h.browser().newPage();
+  try {
+    await page.goto(h.baseUrl());
+    await page.waitForSelector('.landing h1', { timeout: 15_000 });
+    const m = await page.evaluate(() => {
+      const h1 = document.querySelector('.landing h1');
+      const scan = document.querySelector('.lscan');
+      const hs = getComputedStyle(h1);
+      const ss = getComputedStyle(scan);
+      const r = scan.getBoundingClientRect();
+      return {
+        h1Size: parseFloat(hs.fontSize),
+        h1Weight: parseInt(hs.fontWeight, 10),
+        scanH: r.height,
+        scanRadius: ss.borderRadius,
+        scanSvg: (() => {
+          const v = scan.querySelector('svg');
+          return v ? v.getBoundingClientRect().width : -1;
+        })(),
+        subLetter: getComputedStyle(document.querySelector('.landing .sub')).letterSpacing,
+      };
+    });
+    assert.equal(m.h1Size, 34, `落地页 h1 应 34px，实际 ${m.h1Size}px`);
+    assert.equal(m.h1Weight, 500, `落地页 h1 字重应 500，实际 ${m.h1Weight}`);
+    assert.ok(m.scanH >= 44, `扫码入口触控区应 ≥44px，实际 ${m.scanH}px`);
+    assert.ok(
+      parseFloat(m.scanRadius) > 100,
+      `扫码入口应是 999px 胶囊（老项目 ghost 胶囊），实际 radius ${m.scanRadius}`,
+    );
+    assert.ok(Math.abs(m.scanSvg - 16) < 1, `扫码入口图标应 16px，实际 ${m.scanSvg}px`);
+    assert.ok(
+      parseFloat(m.subLetter) > 2,
+      `副标题字距应 .32em（≈4.2px），实际 ${m.subLetter} —— 丢字距会挤成一团`,
+    );
   } finally {
     await page.close();
   }

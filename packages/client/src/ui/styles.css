@@ -17,7 +17,9 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font-family: -apple-system, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "PingFang SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.6;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
@@ -56,36 +58,41 @@ svg .gf { fill: var(--accent); stroke: none; }
   background: var(--mask-bg);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
-  -webkit-backdrop-filter: blur(2px);
-  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 .mask.hidden { display: none; }
 .box {
-  width: 100%; max-width: 420px;
+  width: 100%; max-width: min(90vw, 380px);
   background: var(--box-bg);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 20px;
+  border-radius: 18px;
+  padding: 34px 30px 28px;
   box-shadow: 0 10px 40px var(--ring);
   max-height: 86vh; overflow-y: auto;
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.modal-head h1 { font-size: 17px; font-weight: 600; margin: 0; }
+.modal-head h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: .02em; }
 .box-x { width: 32px; height: 32px; display: grid; place-items: center;
          border-radius: 8px; color: var(--muted); }
 .box-x:hover { background: var(--hover); color: var(--fg); }
 
 /* ---------- 落地页 ---------- */
-.landing { min-height: 100%; display: flex; align-items: center; justify-content: center;
-           padding: 24px 20px 32px; }
+.landing {
+  position: fixed; inset: 0; z-index: 30;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 24px; text-align: center;
+  /* 落地页底：中心偏上的暖金晕 + 页面底色（老项目 index.html:548 同款） */
+  background:
+    radial-gradient(ellipse 720px 480px at 50% 30%, var(--accent-soft), transparent),
+    var(--bg);
+}
 .landing-in { width: 100%; max-width: 380px; text-align: center; }
 .ns-logo { color: var(--accent); margin: 0 auto 6px; display: block; }
 
-/* 🔴🔴 落地页 logo 必须**写死 48px**（老项目 index.html:621 的 viewBox 就是 48，
- *   且老项目 .logo 的 CSS 同样是固定 48）。SVG 不写width/height 时默认
- *   会撑成 300×150 的替换元素尺寸，把整个落地页顶开。
- *   —— 顶栏那枚走下面的 .ns-logo-sm，两者不能混。 */
-.ns-logo { width: 48px; height: 48px; }
+/* 🔴🔴 落地页 logo 56px（老项目 index.html:557 `.logo{width:56px;height:56px;margin:0 0 22px}`）。
+   原先写 48px —— 那是 viewBox 的尺寸，不是显示尺寸；56px 是老项目实际的视觉大小。 */
+.ns-logo { width: 56px; height: 56px; margin: 0 0 22px; color: var(--accent); }
 
 /* 🔴🔴🔴 顶栏 logo 的尺寸必须按视口 clamp（老项目 index.html:156）：
  *     width: clamp(17px, 4.4vw, 27px); height: 同值
@@ -99,9 +106,10 @@ svg .gf { fill: var(--accent); stroke: none; }
   width: clamp(17px, 4.4vw, 27px);
   height: clamp(17px, 4.4vw, 27px);
 }
-.landing h1 { font-family: var(--serif); font-size: 26px; font-weight: 600;
-              margin: 4px 0 2px; letter-spacing: .2px; }
-.landing .sub { margin: 0 0 22px; font-size: 13px; color: var(--muted); letter-spacing: 2px; }
+.landing h1 { font-family: var(--serif); font-size: 34px; font-weight: 500;
+              margin: 0 0 10px; letter-spacing: .05em; }
+.landing .sub { margin: 0 0 44px; font-size: 13px; color: var(--muted);
+               letter-spacing: .32em; padding-left: .32em; }
 .lrow { display: flex; gap: 8px; }
 .lrow input {
   flex: 1; min-width: 0;
@@ -125,12 +133,32 @@ svg .gf { fill: var(--accent); stroke: none; }
 .lurl { margin-top: 10px; font-size: 12px; color: var(--muted);
         font-family: var(--mono); word-break: break-all; min-height: 1em; }
 .legghint { margin-top: 4px; font-size: 12px; color: var(--accent); min-height: 1em; }
-.lscan { margin-top: 20px; font-size: 13px; color: var(--accent); cursor: pointer;
-         display: inline-block; padding: 6px 10px; border-radius: 8px; }
-.lscan:hover { background: var(--accent-soft); }
-.trust { margin-top: 26px; display: flex; justify-content: center; gap: 14px;
-         font-size: 11px; color: var(--muted); transition: opacity .2s ease; }
-/* 🔴 聚焦输入时信任行淡出：给软键盘留出视觉空间（老项目 .trust-away） */
+.lscan {
+  display: inline-flex; align-items: center; gap: 8px;
+  color: var(--muted); font-size: 13px; letter-spacing: .1em;
+  padding: 11px 20px; border: 1px solid var(--line); border-radius: 999px;
+  cursor: pointer; min-height: 44px;
+  transition: border-color .2s ease, color .2s ease;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.lscan:hover { border-color: var(--accent); color: var(--accent); }
+.lscan:active { opacity: .6; }
+.lscan svg { width: 16px; height: 16px; display: block; }
+.trust {
+  position: absolute; left: 0; right: 0;
+  bottom: calc(44px + env(safe-area-inset-bottom));
+  display: flex; justify-content: center;
+  color: var(--muted); font-size: 11.5px; letter-spacing: .05em;
+  transition: opacity .25s ease;
+  /* 🔴 fill-mode 必须 backwards：入场动画的 to 帧 opacity:1 若被both 永久锁死，
+     聚焦输入时的淡出就被压过了（同位浮层动画覆盖动画的老事故）。 */
+  animation-fill-mode: backwards;
+}
+/* 老项目不用 flex gap 于 .trust 本身（老内核丢 gap 会让三图标粘连），margin 兜底 */
+.trust > span { display: flex; flex-direction: column; align-items: center;
+                gap: 7px; margin: 0 13px; }
+.trust svg { width: 17px; height: 17px; color: var(--muted); display: block; }
+/* 聚焦输入时信任行淡出：给软键盘留出视觉空间（老项目 .trust-away） */
 .landing.trust-away .trust { opacity: 0; }
 
 /* ---------- 口令页 / 首页 ---------- */
@@ -160,21 +188,35 @@ svg .gf { fill: var(--accent); stroke: none; }
 header.ns-top {
   display: flex; align-items: center; gap: 10px;
   font-size: 12px;
-  padding: 10px 14px;
+  color: var(--muted);
+  letter-spacing: .04em;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 20;
   background: var(--bg);
 }
 .ns-brand { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .ns-brand .ns-mark { color: var(--accent); flex: none; }
-.ns-brand b { font-family: var(--serif); font-weight: 600; font-size: 13px; letter-spacing: .3px; }
+.ns-brand b { font-family: var(--serif); font-weight: 500; font-size: 13.5px;
+              letter-spacing: .06em; }
+/* App 端品牌位常驻当前笔记名（App 没地址栏，看不见笔记名）。
+   用独立 span 不用 b：窄屏媒体查询会隐藏 b，用 span 则显示不依赖视口宽度。 */
+.ns-brand #brandNote {
+  font-family: var(--serif); font-weight: 500; font-size: 13.5px;
+  letter-spacing: .06em;
+  max-width: 42vw; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ns-top .sp { flex: 1; }
 .ns-top button.ns-ic {
-  width: 34px; height: 34px; border-radius: 9px;
-  display: grid; place-items: center; color: var(--fg);
-  transition: background-color .14s ease;
+  flex: none;
+  width: 31px; height: 31px; border-radius: 8px;
+  display: grid; place-items: center; color: var(--muted);
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  transition: color .2s ease, background-color .2s ease;
 }
-.ns-top button.ns-ic:hover { background: var(--hover); }
+.ns-top button.ns-ic svg { width: 17px; height: 17px; pointer-events: none; }
+.ns-top button.ns-ic:hover { color: var(--fg); background: var(--hover); }
 .ns-top button.ns-ic:active { background: var(--accent-soft); }
 /* 🔴 老项目把 themeBtn / lock 用 display:none 永久隐藏（功能已迁入菜单）。
    这里照实复刻：不是 disabled、不是 visibility，是真的不占位。 */
@@ -182,13 +224,29 @@ header.ns-top {
 
 .ns-main { flex: 1; min-height: 0; display: flex; }
 .ns-editor {
-  flex: 1; min-width: 0;
-  padding: 16px 18px 40px;
+  flex: 1; width: 100%; max-width: 720px; margin: 0 auto; min-width: 0;
+  padding: 40px 28px 120px;
   outline: none;
-  font-size: 16px; line-height: 1.85;
+  font-size: 17px; line-height: 1.9;
+  overflow-x: hidden;
   overflow-y: auto; -webkit-overflow-scrolling: touch;
+  /* 恒留滚动条槽：否则滚动条出现/消失会让可用宽度跳 8px，
+     折叠展开即整篇重排换行（换行点从第一行掉第二行）。 */
+  scrollbar-gutter: stable;
+  word-wrap: break-word; overflow-wrap: anywhere; word-break: break-all;
+  white-space: pre-wrap;
+  -webkit-user-select: text; user-select: text;
 }
 .ns-editor:focus { outline: none; }
+.ns-editor.dragover {
+  background: var(--accent-soft);
+  outline: 1.5px dashed var(--accent); outline-offset: -8px;
+}
+.ns-editor::-webkit-scrollbar { width: 8px; }
+.ns-editor::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+@media (max-width: 560px) {
+  .ns-editor { padding: 24px 18px 100px; font-size: 16px; }
+}
 .ns-p { margin: 0; min-height: 1.85em; }
 .ns-h1, .ns-h2, .ns-h3 { font-family: var(--serif); font-weight: 600; margin: 1em 0 .4em; }
 .ns-h1 { font-size: 1.5em; } .ns-h2 { font-size: 1.28em; } .ns-h3 { font-size: 1.1em; }
@@ -213,10 +271,28 @@ header.ns-top {
      —— 原因见 nodes.ts FoldNode.createDOM 的注释（ElementDOMSlot 不可导出）。
      下面的选择器与 behaviors.ts 的点击判据、serialize.ts 的导入导出切法
      **三处必须一致**，改任一处都要同步另两处。 */
-.ns-fold > :first-child { display: flex; align-items: center; gap: 6px; cursor: pointer;
-                padding: 5px 0; color: var(--accent); }
-.ns-fold > :first-child::before { content: "▸"; font-size: .8em; transition: transform .15s ease; }
-.ns-fold[data-open="true"] > :first-child::before { transform: rotate(90deg); }
+.ns-fold > :first-child {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 5px 0; color: var(--accent);
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+/* 三角用边框画，不用"▸"字形：字形比汉字小一圈，行高加再大也追不上图标。
+   两态必须同盒全等（收起 8w×8h/展开 8w×8h），否则两态行盒占宽不同会跳行。 */
+.ns-fold > :first-child::before {
+  content: ""; display: inline-block; flex: none;
+  width: 0; height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 8px solid currentColor;
+  vertical-align: middle; position: relative; top: -6px;
+}
+.ns-fold[data-open="true"] > :first-child::before {
+  border-top: 8px solid currentColor;
+  border-bottom: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  top: -8px;
+}
 /* 正文：往里缩进 + 左侧引导线（--line 令牌，非新色；老项目 v9.1.1 同款） */
 .ns-fold > :not(:first-child) { padding-left: 14px; border-left: 2px solid var(--line); margin-left: .5em; }
 /* 收起态：藏掉除标题外的全部子块。标题恒可见（老项目铁律：收起后仍要能看见并再展开） */
@@ -224,21 +300,38 @@ header.ns-top {
 .ns-img { display: block; max-width: 100%; border-radius: 8px; margin: 6px 0; }
 
 footer.ns-foot {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px; font-size: 11.5px; color: var(--muted);
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 14px 18px; font-size: 12px; color: var(--muted);
+  letter-spacing: .14em;
   border-top: 1px solid var(--line);
-  position: relative; min-height: 40px;
+  position: relative; min-height: 46px;
 }
-footer.ns-foot #menuBtn { position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
-                          width: 30px; height: 30px; display: grid; place-items: center;
-                          border-radius: 8px; }
+/* 触控区 44px：图标 19px 靠 padding 撑到手指够得着的尺寸 */
+footer.ns-foot #menuBtn {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center;
+  padding: 10px 14px; min-height: 44px; min-width: 44px;
+  justify-content: center; border-radius: 8px;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  letter-spacing: 0;
+}
+footer.ns-foot #menuBtn svg { width: 19px; height: 19px; display: block; }
+footer.ns-foot #menuBtn:active { opacity: .6; }
 footer.ns-foot #menuBtn:hover { background: var(--hover); }
-footer.ns-foot .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
-                      margin-left: 38px; flex: none; }
+footer.ns-foot .dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--line);
+  margin-left: 42px; flex: none; transition: background-color .3s ease;
+}
 footer.ns-foot .dot.on { background: var(--accent); }
 footer.ns-foot .dot.off { background: var(--danger); }
-#refreshBtn { margin-left: auto; width: 30px; height: 30px; display: grid; place-items: center;
-              border-radius: 8px; }
+#refreshBtn {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; display: grid; place-items: center;
+  border-radius: 8px; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#refreshBtn svg { width: 19px; height: 19px; display: block; }
+#refreshBtn:active { opacity: .6; }
 #refreshBtn:hover { background: var(--hover); }
 .offlinebar { color: var(--muted); }
 
@@ -246,18 +339,33 @@ footer.ns-foot .dot.off { background: var(--danger); }
 #menuMainView, .menu-view { display: flex; flex-direction: column; gap: 8px; }
 #menuMainView { max-height: min(72vh, 560px); overflow-y: auto; }
 /* 菜单盒比普通弹层宽一点：菜单项有一列 112px 标签 + 26px 图标，420px 会挤 */
-.menu-box { max-width: 460px; position: relative; padding-top: 46px; }
-/* 关闭键浮在盒内右上角（老项目同此：菜单是从底栏升起的浮层，不是居中模态） */
-.menu-box > #menuClose { position: absolute; right: 12px; top: 12px; }
+.menu-box {
+  max-width: none; width: min(86vw, 300px);
+  text-align: left; padding: 14px 16px;
+}
+/* 关闭键浮在盒内右上角（菜单是从底栏升起的浮层，不是居中模态） */
+.menu-box > #menuClose {
+  position: absolute; right: 12px; top: 12px;
+  width: 32px; height: 32px; display: grid; place-items: center;
+  border-radius: 8px; color: var(--muted);
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.menu-box > #menuClose:hover { background: var(--hover); color: var(--fg); }
+.menu-box > #menuClose svg { width: 17px; height: 17px; display: block; }
 .menu-item {
   display: flex; align-items: center; gap: 12px;
-  min-height: 42px; padding: 0 12px;
+  width: 100%; box-sizing: border-box;
+  padding: 9px 12px; margin-bottom: 5px;
+  min-height: 42px; line-height: 1.4;
   border: 1px solid var(--line); border-radius: 10px;
-  cursor: pointer; background: var(--box-bg);
-  transition: background-color .14s ease;
+  cursor: pointer; color: var(--fg); font-size: 15px;
+  background: var(--box-bg);
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  transition: border-color .2s ease, background-color .2s ease;
 }
-.menu-item:hover { background: var(--hover); }
-.menu-item .ic { width: 26px; height: 26px; flex: none; color: var(--fg); }
+.menu-item:hover { border-color: var(--accent); }
+.menu-item:active { background: var(--hover); }
+.menu-item .ic { width: 20px; height: 20px; flex: none; color: var(--fg); }
 /* 🔴 标签列定宽 112px —— 老项目 CSS 的原值，别"顺手改成自适应" */
 .menu-item .mi-l, #menuThemeLabel { width: 112px; text-align: left; font-size: 14px; }
 .menu-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
