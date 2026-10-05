@@ -30,6 +30,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OLD_ROOT = 'D:/Users/zchen/Documents/TraeProject/notesync/android';
 const NEW_ROOT = join(ROOT, 'android');
+/** --check-only：只跑结构自检、不搬文件。定义在此处供 copyOne 短路用。 */
+const CHECK_ONLY = process.argv.includes('--check-only');
 
 /** 老项目包名 → 新项目包名 */
 const PKG_OLD = 'cn.xuyinji.notesync';
@@ -165,6 +167,9 @@ function mapRel(rel) {
  * @param {boolean} force 是否覆盖已存在的目标
  */
 function copyOne(dstRel, srcRel, force) {
+  // 🔴 --check-only 的短路点放在这里而不是三个搬文件段各判一次：
+  //   放一处就没有"新增搬文件段忘了加判断"这种漏。
+  if (CHECK_ONLY) return;
   const src = join(OLD_ROOT, srcRel);
   const dst = join(NEW_ROOT, dstRel);
   if (!existsSync(src)) {
@@ -199,7 +204,18 @@ function copyOne(dstRel, srcRel, force) {
 /* ---------- 0. 重跑闸 ---------- */
 // 🔴 必须在任何 copyOne 之前。见checkHandEdited 的注释：
 //   一次重跑就把 app_name 冲回 "NoteSync"，而全程无任何报错。
-checkHandEdited();
+//
+// 🔴 --check-only：只跑结构自检、**不搬任何文件**。
+//   为什么需要它：新加的两条自检（Kotlin 声明 / import-依赖）恰恰是在
+//   「文件已移植完、已被手工改过」的状态下才有意义，而那个状态会被重跑闸拦住 ——
+//   于是"验证自检本身"需要一条只读旁路。没有它就只能靠真删文件来试，
+//   而那正是上面这个洞的成因。
+//   用法：node tools/port-android.mjs --check-only
+if (!CHECK_ONLY) {
+  checkHandEdited();
+} else {
+  console.log('[check-only] 只跑结构自检，不搬文件、不过重跑闸');
+}
 
 /* ---------- 1. Kotlin / Java 源 ---------- */
 const JAVA_SRC = 'app/src/main/java/cn/xuyinji/notesync';
@@ -256,7 +272,13 @@ for (const sub of ['drawable', 'drawable-land-hdpi', 'drawable-land-mdpi', 'draw
 }
 
 /* ---------- 汇总 ---------- */
-log('✅ 已移植 ' + copied + ' 个文件，文本替换生效于 ' + replaced + ' 个文件');
+// 🔴 --check-only 下这行会打印「已移植 0 个文件」—— 那是"什么都没搬"，
+//   配上下面的 ✅ 极易读成"移植成功但 0 个文件"。两种模式必须用不同的措辞。
+if (CHECK_ONLY) {
+  log('[check-only] 未搬任何文件（只读自检模式）');
+} else {
+  log('✅ 已移植 ' + copied + ' 个文件，文本替换生效于 ' + replaced + ' 个文件');
+}
 if (skipped.length) {
   log('\n有意识跳过 ' + skipped.length + ' 项：');
   for (const s of skipped) log('   - ' + s);
@@ -292,10 +314,55 @@ if (existsSync(staleDir)) {
   problems.push('老包名目录仍在（会与新包并存）：' + staleDir + '（直接删掉整个目录）');
 }
 // 全树扫一遍：还有哪里漏了替换
+// 🔴🔴 判据只认**代码里**的老包名，不认注释里的。
+//   踩过：MainActivity 顶部那段「本文件从老项目 cn.xuyinji.notesync 移植而来」的
+//   溯源注释被整树扫判成"仍含老包名"，红得莫名其妙。
+//   而判据不能简单放宽成"含就行"—— 放宽之后真正的漏（import/package 行）
+//   会被注释里的合法提及淹没，那才是这条自检存在的理由。
+//   ⇒ 判据：剥掉注释后再扫。剥离用逐行状态机而不是正则，
+//     正则要处理块注释跨行、行注释、字符串里的 "//"（URL！）三种情况，
+//     写错的代价是"扫不准"或"误报"，两种都会让这条自检变成噪音而被忽略。
+function stripComments(text) {
+  const out = [];
+  let inBlock = false;
+  for (const line of text.split(/\r?\n/)) {
+    let s = line;
+    let res = '';
+    let i = 0;
+    while (i < s.length) {
+      if (inBlock) {
+        const end = s.indexOf('*/', i);
+        if (end === -1) { i = s.length; break; }
+        inBlock = false;
+        i = end + 2;
+        continue;
+      }
+      if (s.startsWith('//', i)) break; // 行注释到行尾（URL 里的 // 不会被误判成注释：前面是 http:）
+      if (s.startsWith('/*', i)) { inBlock = true; i += 2; continue; }
+      // 引号内的内容原样保留（字符串里可能含 // 或 /*）
+      const ch = s[i];
+      res += ch;
+      if (ch === '"' || ch === "'") {
+        const q = ch;
+        i++;
+        while (i < s.length) {
+          res += s[i];
+          if (s[i] === '\\') { res += s[i + 1] ?? ''; i += 2; continue; }
+          if (s[i] === q) { i++; break; }
+          i++;
+        }
+        continue;
+      }
+      i++;
+    }
+    out.push(res);
+  }
+  return out.join('\n');
+}
 for (const f of walk(join(NEW_ROOT, 'app/src/main'))) {
   if (!/\.(kt|java|xml)$/.test(f)) continue;
-  const t = readFileSync(f, 'utf8');
-  if (t.includes(PKG_OLD)) problems.push('仍含老包名：' + f.slice(NEW_ROOT.length + 1));
+  const t = stripComments(readFileSync(f, 'utf8'));
+  if (t.includes(PKG_OLD)) problems.push('仍含老包名（代码里）：' + f.slice(NEW_ROOT.length + 1));
   if (/note\.xuyinji|biji\.xuyinji/.test(t)) problems.push('仍含老项目域名：' + f.slice(NEW_ROOT.length + 1));
 }
 // 🔴🔴 有一条自检是这次 CI 才抓出来的，必须固化在脚本里：
@@ -321,6 +388,43 @@ if (hasKt) {
   if (!/kotlin-stdlib/.test(appGradle)) {
     problems.push('有 .kt 源但 app/build.gradle 缺 kotlin-stdlib 依赖'
       + '（编译能过，真机某个分支炸 NoClassDefFoundError）');
+  }
+}
+
+// 🔴🔴 与上面同源的第二个洞：**代码用了某个库，但依赖没声明**。
+//   踩过：MainActivity 调 `androidx.webkit.WebSettingsCompat` 关 WebView 强制深色，
+//   而 app/build.gradle 没声明 `androidx.webkit:webkit` —— 编译报
+//   `cannot find symbol: class WebSettingsCompat`（MainActivity 198/200 行）。
+//   特别误导的是那两行包在 try/catch(Throwable) 里，设计意图正是"缺类时静默降级"，
+//   于是缺陷被伪装成"运行时降级"，实际是**编译期就过不去**。
+//
+//   ⇒ 判据：源码里出现的第三方包名前缀 ⇒ app/build.gradle 必须声明对应依赖。
+//     只查"源码 import 了什么"，不查"编译时classpath 上有什么" —— 后者要真编一次才知道。
+//     这里用一张显式映射表：宁可漏一条让人来加，也不写正则去猜 artifactId
+//     （artifactId 命名不统一，猜出来的映射表会产生"看着在管其实抓不到"的假安全感）。
+const IMPORT_DEPS = [
+  // [源码里出现的标识, app/build.gradle 必须含的依赖片段, 为什么需要它]
+  ['androidx.webkit.', 'androidx.webkit:webkit',
+    'MainActivity 用 WebSettingsCompat 关 WebView 强制/算法深色（国产 ROM 浅色检测型反色会把查看器浅色按钮单独翻色）'],
+  ['org.jetbrains.kotlin.', 'kotlin-stdlib',
+    '4 个 .kt 插件与 Java 侧互相调用（集合/字符串扩展）'],
+  ['androidx.appcompat.', 'androidx.appcompat:appcompat',
+    '离线兜底页 activity_offline.xml 用 AppCompat 主题与控件'],
+  ['androidx.core.splashscreen', 'androidx.core:core-splashscreen',
+    '启动幕布 SplashScreen API'],
+];
+if (existsSync(join(NEW_ROOT, 'app/build.gradle'))) {
+  const appGradle = readFileSync(join(NEW_ROOT, 'app/build.gradle'), 'utf8');
+  const allSrc = EXPECT_SRC
+    .map((rel) => join(NEW_ROOT, rel))
+    .filter((p) => existsSync(p))
+    .map((p) => readFileSync(p, 'utf8'))
+    .join('\n');
+  for (const [token, dep, why] of IMPORT_DEPS) {
+    if (allSrc.includes(token) && !appGradle.includes(dep)) {
+      problems.push('源码用了 ' + token + ' 但 app/build.gradle 未声明 ' + dep
+        + '（编译报 cannot find symbol；' + why + '）');
+    }
   }
 }
 

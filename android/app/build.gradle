@@ -41,6 +41,19 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    // 🔴 WebSettingsCompat 关 WebView 强制/算法深色。
+    //   缺它编译就报 `cannot find symbol: class WebSettingsCompat`（MainActivity 198/200 行），
+    //   而那两行包在 try/catch(Throwable) 里——设计意图正是"缺类时静默降级"，
+    //   于是这个缺陷被伪装成"运行时降级"，实际是**编译期就过不去**。
+    //   功能本身不能删：国产 ROM「浅色检测型反色」会把图片查看器里的浅色按钮单独翻色，
+    //   导致浅底配浅字/黑底配黑字看不清。
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
+    // 🔴 WebSettingsCompat 关 WebView 强制/算法深色。
+    //   缺它编译就报 `cannot find symbol: class WebSettingsCompat`（MainActivity 198/200 行），
+    //   而那两行包在 try/catch(Throwable) 里——设计意图正是"缺类时静默降级"，
+    //   于是这个缺陷被伪装成"运行时降级"，实际是**编译期就过不去**。
+    //   功能本身不能删：国产 ROM「浅色检测型反色」会把图片查看器里的浅色按钮单独翻色，
+    //   导致浅底配浅字/黑底配黑字看不清。
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
