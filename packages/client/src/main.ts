@@ -56,6 +56,10 @@ import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/fa
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
+import { buildPairPanel } from './scan/panel.ts';
+import { buildScanLayer } from './scan/layer.ts';
+import { parsePairLink } from './scan/pair-link.ts';
+import type { ScanDiag } from './scan/engine.ts';
 
 declare global {
   interface Window {
@@ -113,6 +117,23 @@ declare global {
     __NOTESYNC_EGG_CODEX__?: () => boolean;
     /** 主动打开图鉴（与 `?eggs` 同一条生产路径）。 */
     __NOTESYNC_EGG_CODEX_OPEN__?: () => void;
+    /**
+     * 最近一次扫码自检（引擎/帧数/错误摘要）。正式接口。
+     * 🔴 只含元信息，**不含扫码内容** —— 码里带着口令。
+     */
+    __NOTESYNC_SCAN_DIAG__?: () => { engine: string; frames: number; errs: number; result: string } | null;
+    /**
+     * 解析一个配对链接（生产解析器本体）。正式接口。
+     *
+     * 🔴🔴 为什么必须暴露它：判"出码能扫通"若在测试里手写一份 URL 解析，
+     *   判出来的往返无损是**假的**（URL 的 origin 归一、fragment 边界、
+     *   base64url padding 三处最容易分叉，而分叉只在真机上偶发）。
+     *   这与 __NOTESYNC_CANON__ 同源：判据不许手写第二份实现。
+     *
+     * 🔴 只回显判定的**结构**（笔记名 + 口令长度），
+     *   不回显口令本身 —— 免得这个钩子变成一个"把口令打印到控制台"的入口。
+     */
+    __NOTESYNC_PARSE_PAIR__?: (raw: string) => { ok: boolean; noteId?: string; passLen?: number; reason?: string };
     /**
      * Capacitor 全局（App 壳注入）。
      *
@@ -462,6 +483,30 @@ async function nativeCopyImage(base64: string, mime: string): Promise<boolean> {
 
 let currentPage = 'boot';
 let currentNote = '';
+
+/**
+ * 本次会话用过的口令（**只在内存里**，不落盘、不进 localStorage）。
+ *
+ * 🔴🔴 为什么需要它：新项目的 CryptoKey 是 extractable:false，**物理上导不出**，
+ *   所以出配对码时拿不到"另一台设备需要的那件东西"。那件东西就是口令本身
+ *   （见 scan/pair-link.ts 的架构分叉说明）。
+ *
+ * 🔴🔴 为什么放内存而不是 localStorage：
+ *   老项目把 raw key 写进 localStorage，XSS 一次就能拿走并离线解开全部历史密文，
+ *   改口令也救不回来（历史密文已被解开）。新项目不能为了"出码方便"再开后门。
+ *   内存副本的暴露窗口 = 本次页面会话，且不跨刷新；XSS 当场能读，
+ *   但要长期窃取必须每次会话都注入 —— 与"密钥永不可导出"的口径一致。
+ *
+ * 🔴 锁定时必须清（见 menuLock 分支）。不清的话"退出锁定"就是假的，
+ *   用户以为清干净了，实际上点配对码还是能出。
+ */
+let sessionPass = '';
+
+/** 供配对码用；锁定后为 ''。 */
+function passForPair(): string | null {
+  return sessionPass === '' ? null : sessionPass;
+}
+
 /** 收藏态与链接打开方式是**本机偏好**（老项目：仅对本机生效），存 localStorage。 */
 const prefKey = (k: string): string => `notesync_bj_pref_${k}`;
 function readPref(k: string, dflt: string): string {
@@ -626,6 +671,39 @@ function onTopbar(act: TopbarAction): void {
       });
       return;
     }
+    case 'scan': {
+      // 🔴 收键盘：光标在笔记内点扫一扫不弹软键盘（老项目 v7.5.1 口径）。
+      dismissKeyboardForTouch();
+      openScanner();
+      return;
+    }
+    case 'qr': {
+      dismissKeyboardForTouch();
+      // 🔴 顶栏在编辑器卸载后仍留在 DOM 里，出码必须判当前笔记在不在 ——
+      //   否则 buildPairLink 会出指向空篇名的码，扫过去是「打不开」。
+      if (!currentNote || currentPage !== 'editor') {
+        setFootStatus?.('offline', COPY.pairNoKey);
+        return;
+      }
+      buildPairPanel({
+        passphrase: passForPair(),
+        noteId: currentNote,
+        origin: location.origin,
+        onClosed: () => {
+          // 🔴 关闭必须归还焦点（老项目红线）：否则用户关掉弹窗后
+          //   光标停在 body 上，接着敲键盘什么都不会发生。
+          const host = document.getElementById('editor-host');
+          if (host) {
+            try {
+              host.focus();
+            } catch {
+              /* 极端环境无 focus */
+            }
+          }
+        },
+      });
+      return;
+    }
     default:
       setFootStatus?.('connecting');
       return;
@@ -724,6 +802,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     },
     onLock: () => {
       // 锁定 = 只清本机密钥与缓存，云端数据不动（老项目行为）。
+      // 🔴🔴 必须先清会话口令。锁定的语义是"这台设备不再持有任何凭据"，
+      //   而口令留在内存里的话，配对码还能照出 —— 用户以为锁了，
+      //   实际上任何能操作这台机器的人扫一下屏幕就能拿走口令。
+      sessionPass = '';
       void lockNote(name).then(() => location.reload());
     },
     onAbout: () => {
@@ -1035,6 +1117,172 @@ async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
   return { key: rec.key, saltB64: rec.salt, iter: rec.iter };
 }
 
+/**
+ * 扫码结果落地 —— 不管从哪一级引擎扫出来的，都只走这一个入口判定。
+ *
+ * 🔴🔴 落地方式刻意**不**用 `location.assign(dest)`（老项目做法）：
+ *   那是把口令塞进 URL 后整页重载 —— 口令一旦进地址栏，就会进浏览器历史、
+ *   进"最近访问"、可能被同步到别的设备。这里改成**原地 unlock()**：
+ *   口令只经过内存，落地后 URL 保持干净。
+ *   代价是要走完整的解锁链路（派生 + 解密远端），与手输口令完全同一条 ——
+ *   这正是要的：一条路径，一种失败语义。
+ */
+async function handleScanRaw(raw: string): Promise<void> {
+  // 🔴 解析**只经由** resolveScan 一处，落地路径与 e2e 钩子共用它。
+  //   两处各写一遍判定的话，改了一边就会表现为
+  //   "钩子说能解、实际扫进去说口令不对" —— 极难自查。
+  const { parsed, shape } = resolveScan(raw);
+  if (!parsed.ok || !shape.ok || !parsed.link || !shape.noteId) {
+    scanFeedback(COPY.scanNotPair, COPY.scanOkMs);
+    return;
+  }
+  const { noteId, passphrase } = parsed.link;
+  showUploadNote('doing', COPY.pairLanded, 0);
+  const r = await unlock({ noteId, passphrase });
+  if (!r.ok) {
+    // 🔴🔴 与手输口令**同一句文案**（ARCH 安全不变量）：
+    //   这里绝不能因为"是从二维码来的"就换成更具体的原因 ——
+    //   那等于给暴力破解一个 oracle。
+    showUploadNote('bad', r.message, COPY.uploadFailMs);
+    scanFeedback(r.message, COPY.scanOkMs);
+    return;
+  }
+  sessionPass = passphrase;
+  pendingFresh = r.fresh;
+  // 🔴 落地后把地址栏拉正：扫码时用户可能停在任意页（落地页/别的笔记），
+  //   挂载编辑器却不改 URL，刷新一下会回到原来那页 —— 看着像"内容自己跑了"。
+  history.replaceState({}, '', '/' + encodeURIComponent(noteId));
+  mountEditor(noteId, r.doc);
+}
+
+/**
+ * 最近一次扫码自检。
+ * 🔴 挂到 window 是**正式接口**，不是调试后门：e2e 要靠它判"走了哪条引擎、
+ *   试了几帧、有没有报错"（"点了没反应"是这类问题唯一的症状），
+ *   诊断页也要读它 —— 用户不该为了知道自己机器上出了什么事而去看控制台。
+ * 🔴 只落元信息（引擎/帧数/错误摘要），**绝不落扫码内容**：码里带着口令。
+ */
+let scanDiag: ScanDiag | null = null;
+window.__NOTESYNC_SCAN_DIAG__ = (): ScanDiag | null => (scanDiag ? { ...scanDiag } : null);
+window.__NOTESYNC_PARSE_PAIR__ = (raw: string) => resolveScan(raw).shape;
+
+/** 扫码结果的形状：能不能解得开 + 笔记名 + 口令长度。
+ *
+ * 🔴🔴 为什么只回显 passLen 而不回显口令：
+ *   钩子挂在 window 上，任何页面脚本都能调。若把口令放进 shape，
+ *   它就从一个"测试钩子"变成"任何人可读的口令出口" ——
+ *   而口令正是这个功能要保护的东西。有 passLen 已经足够让 e2e 判往返。
+ */
+interface PairShape {
+  ok: boolean;
+  noteId?: string;
+  passLen?: number;
+  reason?: string;
+}
+
+/**
+ * `parsePairLink` 的**唯一调用点** —— 落地路径与 e2e 钩子都从这里过。
+ * 🔴 判定口径只写一遍：分叉的根源从来不是"忘了改"，而是"改了一处"。
+ */
+function resolveScan(raw: string): { parsed: ReturnType<typeof parsePairLink>; shape: PairShape } {
+  const parsed = parsePairLink(raw, location.origin);
+  if (parsed.ok) {
+    return {
+      parsed,
+      shape: { ok: true, noteId: parsed.link.noteId, passLen: parsed.link.passphrase.length },
+    };
+  }
+  return { parsed, shape: { ok: false, reason: parsed.reason } };
+}
+
+/**
+ * 打开取景层。
+ * 🔴 重入锁用**带过期的时间戳**而不是布尔（老项目闸 R2 实锤）：
+ *   布尔锁在"权限框永不返回"时会把扫一扫**永久**锁死，而它本要防的
+ *   只是"探测那几秒连点两下叠两层取景框"。过期后放行并说明，
+ *   比让按钮永久失灵好。
+ */
+let scanBusyAt = 0;
+const SCAN_BUSY_MS = 90_000;
+
+/**
+ * 扫码反馈统一口（老项目 v7.7.0 同款分流）。
+ *
+ * 🔴🔴 为什么不直接 setFootStatus：底栏 `#foot` 属于编辑器外壳，
+ *   在落地页**根本不存在** —— setFootStatus?.() 里的 `?.` 会静默跳过，
+ *   于是"点扫码 → 相机起不来 → 提示写在不存在的地方"= 用户什么都没看到，
+ *   只觉得按钮坏了。这正是 SCAN-E06 实锤的那一类。
+ *
+ * 🔴 自动收回带「文案仍是它才清」守卫（老项目红线 15）：
+ *   无守卫时，先来的短提示会被后来的定时器清掉，
+ *   症状是"错误信息闪一下就没了"，用户根本来不及读。
+ */
+let scanMsgTimer: number | null = null;
+function scanFeedback(msg: string, autoHideMs = 0): void {
+  if (scanMsgTimer !== null) {
+    clearTimeout(scanMsgTimer);
+    scanMsgTimer = null;
+  }
+  if (currentPage === 'editor') {
+    // 底栏那一行是同步状态的位置，借它显示会让用户以为同步坏了
+    setFootStatus?.('offline', msg);
+    if (autoHideMs > 0) {
+      scanMsgTimer = window.setTimeout(() => {
+        scanMsgTimer = null;
+        setFootStatus?.('synced');
+      }, autoHideMs);
+    }
+    return;
+  }
+  const w = document.getElementById('landingScanMsg');
+  if (!w) return;
+  w.textContent = msg;
+  w.classList.remove('hidden');
+  if (autoHideMs > 0) {
+    scanMsgTimer = window.setTimeout(() => {
+      scanMsgTimer = null;
+      // 🔴 守卫：只有当前显示的仍是这条消息时才收。
+      if (w.textContent === msg) w.classList.add('hidden');
+    }, autoHideMs);
+  }
+}
+
+function openScanner(): void {
+  const now = Date.now();
+  if (scanBusyAt && now - scanBusyAt < SCAN_BUSY_MS) {
+    scanFeedback(COPY.scanBusy);
+    return;
+  }
+  scanBusyAt = now;
+  try {
+    buildScanLayer({
+      onResult: (raw) => {
+        // 🔴 命中什么（含空串 = 用户取消）都要放锁，
+        //   否则取消一次后 90 秒内点不动扫一扫。
+        scanBusyAt = 0;
+        if (raw === '') return;
+        void handleScanRaw(raw);
+      },
+      onHint: (text) => {
+        // 🔴 取景期的"为什么扫不出"是**常驻状态行**，浮层自己会显示。
+        //   这里也写一份是为了浮层收场后（相机失败那条路）原因不丢 ——
+        //   浮层一拆，那行字就没了，用户只剩一个"点了没反应"的印象。
+        scanFeedback(text);
+      },
+      onDiag: (d) => {
+        scanDiag = d;
+      },
+      onClosed: () => {
+        scanBusyAt = 0;
+      },
+    });
+  } catch (e) {
+    scanBusyAt = 0;
+    scanFeedback(COPY.scanStartFail);
+    console.error('[scan] 取景层构建失败', e);
+  }
+}
+
 /** 冲突提示。裁决入口在菜单里，这里只把冲突条目显示出来。 */
 function showConflictHint(): void {
   const c = syncRef;
@@ -1065,8 +1313,9 @@ function showLanding(): void {
       location.href = '/' + encodeURIComponent(name);
     },
     onScan: () => {
-      // 扫一扫是 S6 的能力（需后端签发配对票据）。现在给明确反馈而不是静默无响应。
-      location.href = '/' + encodeURIComponent(location.pathname.slice(1) || 'scan');
+      // 🔴 落地页的「扫码打开笔记」与顶栏 scanBtn 走**同一个** openScanner，
+      //   判定与降级逻辑不许分叉（分叉迟早出一处认不出另一处的码）。
+      openScanner();
     },
   });
   goto('landing');
@@ -1085,6 +1334,8 @@ function showPass(name: string): void {
       //   重写一遍推上去，把另一台设备上的正文覆盖掉 —— 静默的数据丢失。
       const r = await unlock({ noteId: name, passphrase: pass });
       if (!r.ok) return r.message;
+      // 🔴 会话口令在**解锁成功之后**才记：失败的尝试不该把口令留在内存里。
+      sessionPass = pass;
       pendingFresh = r.fresh;
       mountEditor(name, r.doc);
       return null;
@@ -1115,6 +1366,9 @@ async function doChangePassphrase(): Promise<void> {
     setFootStatus?.('offline', r.message);
     return;
   }
+  // 🔴 会话口令必须同步换成新的。忘了这一步的话，配对码里还是**旧口令**，
+  //   另一台设备扫了必然解不开 —— 而本机一切正常，症状是"配对功能坏了"。
+  sessionPass = next;
   setFootStatus?.('synced', '口令已改，下次用新口令');
   // 换完密钥必须重建同步实例：它持有的是旧密钥
   await startSyncFor(currentNote);

@@ -39,6 +39,11 @@ export function buildLanding(host: HTMLElement, cb: LandingCallbacks): void {
     <div class="legghint" id="landingEggTip"></div>
     <div class="lscan" id="landingScan" role="button" tabindex="0"
          aria-label="${COPY.landingScan}">${COPY.landingScan}</div>
+    <!-- 🔴 扫码反馈专用位。必须与 #landingWarn 分开：
+         landingWarn 归输入校验管（净化时亮），拿它显示"相机起不来"的话，
+         用户下一次敲键盘就会被净化逻辑清掉 —— 症状是"错误信息闪一下就没了"。
+         这个位只由 scanFeedback 写，且带「文案仍是它才清」守卫。 -->
+    <div class="warn hidden" id="landingScanMsg"></div>
     <div class="trust" aria-hidden="true">
       <span>${COPY.trustCipher}</span>
       <span>${COPY.trustNoAccount}</span>

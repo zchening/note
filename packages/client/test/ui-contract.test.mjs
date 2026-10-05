@@ -264,8 +264,18 @@ test('S4-T7 颜色字面量只允许出现在 theme.ts（纪律闸）', () => {
   const cssNoComment = css.replace(/\/\*[\s\S]*?\*\//g, '');
   const hex = cssNoComment.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
   assert.deepEqual(hex, [], `styles.css 出现颜色字面量${JSON.stringify(hex)}，应改用 var(--*)`);
-  const rgba = cssNoComment.match(/rgba?\(/g) ?? [];
-  assert.deepEqual(rgba, [], `styles.css 出现 rgba 字面量 ${rgba.length} 处，应提到 ui/theme.ts 的 OVERLAY`);
+  // 🔴🔴 颜色函数要一次查全：只查 rgba( 时 rgb(/hsl(/hwb()/color() 会从缝里漏出去。
+  //   本闸第一版就漏了 rgba(255,255,255,.04) 这种"内描边"，因为它藏在
+  //   box-shadow 里而不是看起来像颜色的属性上 —— 判据不能靠"看起来像颜色"。
+  const rgba = cssNoComment.match(/(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/g) ?? [];
+  assert.deepEqual(rgba, [], `styles.css 出现颜色函数 ${rgba.length} 处，应提到 ui/theme.ts 的 OVERLAY`);
+
+  // 🔴 反向也钉一下：新增的固定色必须真的在色板里，不能是"顺手加了变量名但没人注入"
+  //   （症状 = 扫码时那块变成透明/继承色，比直接写死还难查）。
+  const theme = readFileSync(new URL('../src/ui/theme.ts', import.meta.url), 'utf8');
+  for (const v of ['--qr-paper', '--scan-stage-a', '--scan-stage-b', '--scan-stage-edge', '--scan-stage-text']) {
+    assert.ok(theme.includes(v.slice(2)), `色板里应有${v}的定义`);
+  }
 
   // 渲染模块（除 theme.ts 自身）同样不许带颜色
   for (const f of ['copy.ts', 'icons.ts', 'pages.ts', 'landing-logic.ts']) {

@@ -55,6 +55,29 @@ async function ensureDirs() {
 }
 
 /**
+ * 静态资源**必需清单** —— 与 copyFile 的"物化全部"是两条独立的职责。
+ *
+ * 🔴🔴 为什么要这份清单：物化用 readdir（新增文件自动跟上），
+ *   但**漏掉**某个必需文件时 readdir 不会报错 —— 缺 jsQR.js 的话
+ *   扫码在所有桌面浏览器上直接不可用，而构建日志一切正常，
+ *   失败文案只有一句「扫码组件加载失败」，用户完全无从判断是网络还是缺文件。
+ *   所以必需的那几个逐个点名，缺了就 exitCode=1。
+ *
+ * 每项都写清「缺了会怎样」，避免有人后来"觉得这个不重要"就删掉。
+ */
+const STATIC_REQUIRED = [
+  // ServiceWorker。缺 ⇒ APK 壳里注册静默失败，离线能力消失。
+  'sw.js',
+  // 导出长图渲染器。缺 ⇒ 导出整体不可用。
+  'html2canvas.min.js',
+  // 二维码解码。缺 ⇒ 桌面 Chrome/Edge 与 iOS Safari 全部扫不了码
+  //（BarcodeDetector 形状检测 API 只有安卓/macOS Chrome 有，老项目 v6.0 实锤）。
+  'jsQR.js',
+  // 二维码生成。缺 ⇒「二维码配对」弹窗一片空白。
+  'qrcode-generator.js',
+];
+
+/**
  * 把 packages/client/static/ 下的文件物化到 www/。
  *
  * 🔴🔴 **必须在 build 里做，且必须报出每个文件**：
@@ -71,7 +94,9 @@ async function materializeStatic() {
   } catch {
     //🔴 目录不存在是**硬错误**：它意味着静态资源没入库（见 STATIC_SRC 注释）。
     //   静默跳过等于把缺口直接推到线上，必须在这里就炸。
-    throw new Error(`静态资源目录不存在：${STATIC_SRC}（sw.js / html2canvas.min.js 不会进 CI 产物）`);
+    throw new Error(
+      `静态资源目录不存在：${STATIC_SRC}（${STATIC_REQUIRED.join(' / ')} 不会进 CI 产物）`,
+    );
   }
   const files = names.filter((n) => !n.startsWith('.'));
   for (const n of files) {
@@ -171,9 +196,9 @@ async function run() {
   console.log(`[build] index.html 就绪（CSS inline ${kb(css.length)}）  版本 v${version}  ${date}`);
   console.log(`[build] 静态资源已物化：${statics.join(', ') || '(空)'}`);
   // 🔴 逐个点名：缺文件时这里要能一眼看出来，而不是"构建成功"然后线上 404
-  for (const must of ['sw.js', 'html2canvas.min.js']) {
+  for (const must of STATIC_REQUIRED) {
     if (!statics.includes(must)) {
-      console.error(`[build] 缺必需静态资源：${must}（导出/SW 会 404）`);
+      console.error(`[build] 缺必需静态资源：${must}（对应功能在线上直接不可用）`);
       process.exitCode = 1;
     }
   }

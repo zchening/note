@@ -96,6 +96,16 @@ export const OVERLAY = {
    */
   shadowChip: '0 14px 36px rgba(0,0,0,.16)',
   shadowCard: '0 18px 48px rgba(0,0,0,.2)',
+  // 二维码纸：必须始终是白纸 + 深色码，与主题无关（见 applyThemeVars 处注释）
+  qrPaper: '#FFFFFF',
+  // 取景台径向渐变两色：比任何相机画面都深，保证取景框永远看得见
+  scanStageA: '#1a1a1d',
+  scanStageB: '#0b0b0c',
+  // 取景台内描边：一像素的白，用来把 stage 边界从相机画面里分出来
+  scanStageEdge: 'rgba(255,255,255,.04)',
+  // 取景台上的提示字：浅色压深底。必须与 --muted 分开——muted 是"跟着主题走的
+  // 次要文字色"，夜间主题下它会变亮，白天主题下会变深，都不适合压在取景台上。
+  scanStageText: 'rgba(233,232,227,.62)',
 } as const;
 
 /** 复古皮肤三态（老项目叫"三态环"，靠连点 logo 7 次前进）。 */
@@ -174,6 +184,16 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   //   而投影本质是颜色，所以必须在这里注入而不是写在 styles.css。
   s.setProperty('--shadow-chip', OVERLAY.shadowChip);
   s.setProperty('--shadow-card', OVERLAY.shadowCard);
+  // 🔴 二维码纸与取景台是**两套与主题无关的固定色**，但仍由这里注入：
+  //   S4-T7 纪律闸禁止 styles.css 出现颜色字面量，就地写 rgba/hex 会绕过色板，
+  //   症状是"以后调深浅色时这两块忘了改"。
+  //   固定的理由：二维码必须在浅底上才识别得出来（老项目血泪，深色二维码在暗光下
+  //   大面积识别失败）；取景台必须比相机画面深，否则白墙白纸前根本看不见取景框。
+  s.setProperty('--qr-paper', OVERLAY.qrPaper);
+  s.setProperty('--scan-stage-a', OVERLAY.scanStageA);
+  s.setProperty('--scan-stage-b', OVERLAY.scanStageB);
+  s.setProperty('--scan-stage-edge', OVERLAY.scanStageEdge);
+  s.setProperty('--scan-stage-text', OVERLAY.scanStageText);
   el.classList.toggle('dark', theme === 'dark');
 }
 
