@@ -72,6 +72,57 @@ function substitute(text) {
 }
 
 /**
+ *🔴🔴🔴 重跑闸：目标文件里已有"脚本自己产不出的东西"时，拒绝执行。
+ *
+ * 本脚本只做两件事：搬文件 + 替换包名/域名。而下列改动是**移植之后手工加的**，
+ * 脚本无论重跑多少次都产不出来：
+ *   · strings.xml 的 app_name改成 "NoteSync BJ"（不替换包名/域名就改不到）
+ *   · RemPlugin 的 NOTIF_CHANNEL_NAME 改 "NoteSync BJ 提醒"
+ *   · MainActivity 的单域条件（老项目是双域，替换后会变成重复条件）
+ *   · 各文件顶部的"为什么这么写"注释
+ * 而这三个文件都在 **force 覆盖清单**里（不force 就撞上 Capacitor 骨架同名文件）。
+ * ⇒ 我为了验证新加的自检而重跑了一次脚本，这三个文件当场被冲回老项目版本：
+ *   app_name 变回 "NoteSync" —— 用户手机上两个 App 同名，桌面/任务切换器/
+ *   通知栏三处都分不清哪个是哪个，通知栏里两条"NoteSync 提醒"更是完全混在一起。
+ *   **而且 git 全绿、脚本还打印「✅ 自检通过」。**
+ *   ⇒ 纪律：本脚本**一次性**使用。移植完成、目标文件被手工改过之后，
+ *     再跑它就是破坏。宁可"源不存在"报错也不许静默覆盖。
+ */
+const HAND_EDITED = [
+  'app/src/main/res/values/strings.xml',
+  'app/src/main/java/cn/xuyinji/bj/MainActivity.java',
+  'app/src/main/java/cn/xuyinji/bj/rem/RemPlugin.kt',
+];
+/** 这些标记代表"这个文件已经被手工改过"，由脚本自己写下的印章。 */
+const HAND_EDIT_STAMPS = {
+  'app/src/main/res/values/strings.xml': '<string name="app_name">NoteSync BJ</string>',
+  'app/src/main/java/cn/xuyinji/bj/MainActivity.java': '// \u{1F534} 溯源：本文件与其余',
+  'app/src/main/java/cn/xuyinji/bj/rem/RemPlugin.kt': 'NOTIF_CHANNEL_NAME = "NoteSync BJ 提醒"',
+};
+
+function checkHandEdited() {
+  const touched = [];
+  for (const rel of HAND_EDITED) {
+    const p = join(NEW_ROOT, rel);
+    if (!existsSync(p)) continue; // 还没移植过，不算冲突
+    const t = readFileSync(p, 'utf8');
+    const stamp = HAND_EDIT_STAMPS[rel];
+    if (t.includes(stamp)) touched.push(rel);
+  }
+  if (touched.length) {
+    console.error('\n❌ 拒绝执行：下列文件已被手工改过，重跑会把改动冲掉：');
+    for (const rel of touched) console.error('   - ' + rel);
+    console.error('\n   本脚本是一次性移植工具（只搬文件 + 替换包名/域名），');
+    console.error('   产不出这些手工改动：app_name 改名、通知渠道改名、单域条件、');
+    console.error('   "为什么这么写"的注释。重跑 = 静默回退，且 git 全绿、');
+    console.error('   脚本还打印「✅ 自检通过」。');
+    console.error('\n   要重新移植请先手工备份这三个文件，或从git 恢复：');
+    console.error('     git checkout HEAD -- android/');
+    process.exit(1);
+  }
+}
+
+/**
  * 把老项目的相对路径映射到新项目的相对路径（统一正斜杠）。
  *
  * 🔴🔴 这里踩过一次**伪装成成功的静默失败**：初版写的是
@@ -144,6 +195,11 @@ function copyOne(dstRel, srcRel, force) {
   }
   copied++;
 }
+
+/* ---------- 0. 重跑闸 ---------- */
+// 🔴 必须在任何 copyOne 之前。见checkHandEdited 的注释：
+//   一次重跑就把 app_name 冲回 "NoteSync"，而全程无任何报错。
+checkHandEdited();
 
 /* ---------- 1. Kotlin / Java 源 ---------- */
 const JAVA_SRC = 'app/src/main/java/cn/xuyinji/notesync';

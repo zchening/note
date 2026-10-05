@@ -45,8 +45,12 @@ class RemPlugin : Plugin() {
         fun partIv(noteId: String) = "iv_n_" + noteId
         // 跨分区唯一稳定 id：旧版 requestCode/notifyId 用分区内 idx（0..9），多分区后会互撞覆盖
         fun stableUid(noteId: String, at: Long): Int = (noteId + "#" + at).hashCode()
+        // 🔴 渠道名与 strings.xml 的 app_name 保持一致（"NoteSync BJ 提醒"）：
+        //    老项目那条叫 "NoteSync 提醒"，两个 App 同时装时通知栏里必须能分清哪条是谁的。
+        //    🔴 NOTIF_CHANNEL_ID 不改（保持 "notesync_reminders"）：渠道 id 是**持久化**的，
+        //    改了等于新建一个渠道，用户系统设置里会同时看到两条同名渠道。
         const val NOTIF_CHANNEL_ID = "notesync_reminders"
-        const val NOTIF_CHANNEL_NAME = "NoteSync 提醒"
+        const val NOTIF_CHANNEL_NAME = "NoteSync BJ 提醒"
         const val ACTION_FIRE = "cn.xuyinji.bj.REM_FIRE"
         const val ACTION_NOTIFY_CLICK = "cn.xuyinji.bj.NOTIFY_CLICK"
 
