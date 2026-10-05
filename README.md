@@ -95,11 +95,29 @@ git push origin main --tags
 
 推送 tag 会触发 GitHub Actions 云构建 APK（`ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` 四个 secret 已在仓库配置）。本机零 Android 依赖。
 
+CI 里有两道闸，顺序不能颠倒：**单测不绿 → build 作业不执行 → 不出包**。除了全量单测，还会在 UTC / America/New_York / Pacific/Auckland 三个时区下各跑一遍客户端单测——写死时区的断言在开发者本机（GMT+8）永远绿，只有 CI 才抓得到（真踩过：`fmtRemTime` 的 ISO 断言）。
+
+### 🔴 出包之后还有一步：上传 App 升级元数据
+
+App 查新版的唯一入口是 `GET /api/latest`，它读的是**服务器磁盘上** `APP_DIR/deploy/latest_app.json` 那份文件。
+
+这跟"部署网页 index.html"是**两件完全无关的事**——同一台机器、同一次部署动作，两者之间没有任何因果关系。网页侧验收全绿**不能**代表 App 查得到新版：老项目 v10.1.8 就是网页全绿、App 永远收不到更新，因为那份 json 压根没人上传。
+
+```bash
+# 用 gh 读该 tag 的 Release 生成（体积等字段绝手填），
+# 再传到 C:\Services\NoteSyncBj\deploy\latest_app.json
+python tools/make_latest_app.py --tag v1.0.0
+```
+
+`make_latest_app.py` 会在三种情况下**拒绝生成**：Release 还是 draft（对外不可见，用户点更新跳 404）、没有 `.apk` 资产（传半份元数据比不传更坏，App 会显示"已是最新"）、`size` 为 0 或缺失（原生侧用 `expectedBytes` 判"下载完没"，填 0 会让截断的 APK 被当已下完，直接拉起安装器报 `packageInfo is null`）。
+
+真域名 e2e 的 LIVE-06 是这条链路的唯一独立判据：它分别判「有文件 → 200 + 真模块能解析 + 挑得出 .apk + `no-store`」与「无文件 → 404 + `no release metadata`」，两种状态都是合法部署态但必须各自判对。
+
 OTA 即部署：APK 是壳，页面从服务器加载，`capacitor.config.json` 的 `server.url` 指向线上域名，改完前端发版即生效。
 
 ## 版本历史
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
-| v1.0.0 | 2026-10-05 | 首个可用版本：编辑器、提醒、扫码配对、图片上传、导出长图、收藏夹与彩蛋层、App 壳配置全部就绪，已部署 bj.xuyinji.com.cn 并通过线上真域名验收 |
+| v1.0.0 | 2026-10-05 | 首个可用版本：编辑器、提醒、扫码配对、图片上传、导出长图、收藏夹与彩蛋层、Android 壳与云构建签名、App 在线升级全部就绪；已部署 bj.xuyinji.com.cn 并通过线上真域名验收 |
 | v0.1.0 | 2026-10-05 | 架构定稿 + 真源层 + 加密层 + 服务端，76 条测试全绿 |
