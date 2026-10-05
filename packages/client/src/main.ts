@@ -56,6 +56,7 @@ import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/fa
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
+import { copyNoteToClipboard } from './export/copy.ts';
 import { buildPairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
 import { parsePairLink } from './scan/pair-link.ts';
@@ -625,6 +626,11 @@ function goto(page: string): void {
  *   其余（图片、复制、导出、扫码、二维码）分别属于 S5/S6。
  *   未接的键**不弹"敬请期待"** —— 那是老项目没有的文案，用户会以为是坏了；
  *   静默无反馈也不行（用户会反复点），所以在底栏给一行短状态。
+ *
+ * 🔴 `default:` 分支只剩兜底，**新增顶栏键必须在这里补 case**。
+ *   复制键此前就漏在这儿：落进 default 只置了 connecting，
+ *   症状是"点了没反应、什么也没复制"，零报错（老项目是真复制）。
+ *   `TOPBAR_ITEMS`（ui/shell.ts）与本switch 的一致性由 ui-contract.test.mjs 盯。
  */
 function onTopbar(act: TopbarAction): void {
   const ed = editor;
@@ -646,6 +652,26 @@ function onTopbar(act: TopbarAction): void {
     case 'upload': {
       // 顶栏上箭头 = 选图上传（老项目同一入口）
       pickImage();
+      return;
+    }
+    case 'copy': {
+      // 🔴 必须判编辑器在不在：顶栏在编辑器卸载后仍留在 DOM 里（与 exportImg 同款守卫）。
+      //   复制是从**真源模型**读的（不是 DOM），所以收起态的折叠块也能读到完整正文 ——
+      //   见 export/copy.ts 文件头第一节：老项目需要"临时展开再还原"的那套
+      //   是因为它读 innerText 会被 CSS display:none 吃掉，我们不读 DOM 就没这问题。
+      if (!ed || currentPage !== 'editor') {
+        setFootStatus?.('offline', COPY.copyNoEditor);
+        return;
+      }
+      void copyNoteToClipboard({
+        getDoc: () => window.__NOTESYNC_DOC__?.() ?? emptyDoc(),
+        dismissKeyboard: () => dismissKeyboardForTouch(),
+        // 🔴 复用上传状态条而不是底栏：底栏那一行是同步状态的位置，
+        //   拿它显示"已复制"会让用户以为同步出了问题（与 exportImg 同款口径）。
+        onStatus: (kind, text, autoHideMs) => showUploadNote(kind, text, autoHideMs),
+        okMs: COPY.copyOkMs,
+        failMs: COPY.copyFailMs,
+      });
       return;
     }
     case 'exportImg': {
