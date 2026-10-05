@@ -285,8 +285,20 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   border: none; display: inline-block; }
 #timeChip .ns-chip-done { color: var(--accent); background: none; padding-left: 0; }
 
-/* ---- 响铃卡 remCard：页内主通道，无论通知权限如何都弹 ---- */
-.ns-remcard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+/* ---- 上传状态条 #uploadNote：老项目 showUploadStatus 同款 ----
+   🔴 失败态必须比成功态停留更久（4500 vs 2000，见 copy.ts）：
+   老项目 v10.0.0 关键路径止血 —— 2 秒在手机上根本来不及看清一次失败原因，
+   用户只看到图片没出来，以为功能坏了。静默失败比报错更伤信任。
+   零颜色字面量：ok / bad 都走 var() 令牌（有 S4-T7 机械扫描守护）。 */
+#uploadNote { position: fixed; top: 54px; left: 50%; transform: translateX(-50%);
+  z-index: 57; max-width: 88vw; padding: 9px 15px; font-size: 13.5px; line-height: 1.5;
+  color: var(--fg); background: var(--box-bg); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: var(--shadow-chip); pointer-events: none;
+  animation: chipRise .22s cubic-bezier(.2,.7,.3,1) both; }
+#uploadNote[data-kind="ok"] { color: var(--accent); }
+#uploadNote[data-kind="bad"] { color: var(--danger); }
+
+/* ---- 响铃卡 remCard：页内主通道，无论通知权限如何都弹 ---- */.ns-remcard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
   z-index: 58; width: min(90vw, 360px); padding: 20px 18px 16px; color: var(--fg);
   background: var(--box-bg); border: 1px solid var(--line); border-radius: 16px;
   box-shadow: var(--shadow-card); }

@@ -330,18 +330,66 @@ export class ImageBlockNode extends DecoratorNode<HTMLElement> {
     return false;
   }
 
-  override decorate(): HTMLElement {
-    const wrap = document.createElement('figure');
-    wrap.className = 'ns-img';
+  /**
+   * 🔴🔴🔴 本项目是**纯 DOM 宿主（不引 React）**，所以 `decorate()` 的返回值
+   *   **必须由 createDOM 自己挂上去**。
+   *
+   *   探针实锤（2026-10-05）：第一版按 React 侧的习惯分成
+   *   createDOM 造 figure + decorate 造 img，结果渲染出的是
+   *     `<figure class="ns-img" data-lexical-decorator="true" contenteditable="false"></figure>`
+   *   —— **空壳**。而真源里 img 块已经在了（用户数据没错、提示条也报"上传成功"），
+   *   属于纯视觉层的静默失效：数据对、界面空。
+   *
+   *   根因：Lexical 0.52 的 `$decorateDOM` 在默认 DOMRenderConfig 里是
+   *   **空函数**（`Lexical.dev.js:19530`原话`() => {}`），
+   *   它是留给 @lexical/react 去挂载的。纯 DOM 侧没人调 decorate，
+   *   返回值就永远不会被放进 createDOM 给的那只壳里。
+   *
+   *   ⇒ 本项目的正确形态是：**createDOM 里一次把壳和内容都造好**，
+   *   decorate 保留（基类契约 + 未来接 React 时用），但不再承担"挂载"职责。
+   */
+  override createDOM(): HTMLElement {
+    const dom = document.createElement('figure');
+    dom.className = 'ns-img';
+    // 官方要求 createDOM 返回**恰好一个** HTMLElement（不支持嵌套元素），
+    // 所以壳是 figure、内容是它唯一的子节点 <img>。
+    dom.appendChild(this.buildImg());
+    return dom;
+  }
+
+  /**
+   * src / alt 变了要重建 —— 返回 true 让 Lexical 卸载重建。
+   *
+   * 🔴 不能返回 false：图片已经渲染完，用户看不到变化，只能靠重建。
+   *   返回 false 的后果是"改了图的地址但画面不变"，属于静默失效。
+   */
+  override updateDOM(prev: ImageBlockNode): boolean {
+    return prev.__src !== this.__src || prev.__alt !== this.__alt;
+  }
+
+  /**
+   * 造 <img>。**唯一造图的地方**，createDOM 与 decorate 共用 ——
+   * 避免两处各造一份、改了一处忘了另一处（那会让刷新前后表现不一致）。
+   */
+  private buildImg(): HTMLImageElement {
     const img = document.createElement('img');
+    // 🔴 走 src / alt **属性赋值**，不走 innerHTML（云端 URL 属外部输入）
     img.src = this.__src;
     img.alt = this.__alt;
     img.loading = 'lazy';
     img.decoding = 'async';
     // 图床是外链，不带 referrer 免泄露访问页地址（老项目同策略）
     img.referrerPolicy = 'no-referrer';
-    wrap.appendChild(img);
-    return wrap;
+    return img;
+  }
+
+  /**
+   * 返回 createDOM 那只 figure 的**内部内容**（官方分工：createDOM 给外壳，
+   * decorate 给内容）。纯 DOM 宿主下本方法不再被自动调用（见 createDOM 注释），
+   * 保留它是基类契约，且接@lexical/react 时即刻生效。
+   */
+  override decorate(): HTMLElement {
+    return this.buildImg();
   }
 
   override getTextContent(): string {

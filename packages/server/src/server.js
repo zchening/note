@@ -180,12 +180,79 @@ async function writeAtomic(file, text) {
 }
 
 /* ------------------------------------------------------------------ *
- * 图床签名（Cloudinary upload preset 的 HMAC，v10.0.0 起服务端签发）
+ * 图床签名（Cloudinary upload preset 的 HMAC，服务端签发）
+ *
+ * 🔴 移植依据：老项目 server.js:647-668（v10.0.0 形态）逐条比对。
+ *   **不靠推理定案**，老源码读过。
+ *
+ * 为什么必须服务端签发：
+ *   免签名 preset 直传的年代，cloud_name + preset 名就印在页面源码里 ——
+ *   任何人拿它就能往本站图床账号白图：烧配额、塞违规内容连累封号。
+ *   改法：preset 转 Signed，签名由本端点签发。云端 secret 只当**配额闸门**，
+ *   不碰笔记明文，零知识不破。
+ *
+ * 已知边界（照老项目原样写进说明，不夸大）：
+ *   本服务零知识，无从判断客户端是否已解锁，所以这一版拦的是
+ *   「不经我服务器 + 无限量」；真正的「解锁才能签发」等 writeKey
+ *   全量强制后在同一处加一行校验即可。
  * ------------------------------------------------------------------ */
 
 const UPSIGN_SECRET = process.env.NS_BJ_UPSIGN_SECRET || '';
-const UPSIN_PRESET = process.env.NS_BJ_UPSIGN_PRESET || '';
+const UPSIGN_PRESET = process.env.NS_BJ_UPSIGN_PRESET || '';
+const UPSIGN_FOLDER = process.env.NS_BJ_UPSIGN_FOLDER || '';
+const UPSIGN_KEY = process.env.NS_BJ_UPSIGN_KEY || '';
 const CLOUD_NAME = process.env.NS_BJ_CLOUD_NAME || '';
+
+/**
+ * 🔴 签名参数清单 —— **只覆盖 Cloudinary 签名 preset 实际参与签名的那些字段**。
+ *
+ * 多带一个未签参数，云端就判签名不符（400，且提示含糊到没法查）。
+ * 老项目原注释：「签名只覆盖 folder+timestamp+upload_preset 三项，
+ * public_id 交云端随机生成，前端无从控制」。
+ *
+ * 🔴 字段顺序即签名串顺序，**改这里必须同步改客户端 FormData**。
+ * 约定：folder 在有值时参与（老项目行为），upload_preset 恒参与。
+ */
+function upsignSignedString({ timestamp, folder, uploadPreset }) {
+  const parts = [`timestamp=${timestamp}`];
+  if (folder) parts.push(`folder=${folder}`);
+  parts.push(`upload_preset=${uploadPreset}`);
+  return parts.join('&');
+}
+
+function upsignSign(timestamp) {
+  return crypto
+    .createHmac('sha1', UPSIGN_SECRET)
+    .update(upsignSignedString({ timestamp, folder: UPSIGN_FOLDER, uploadPreset: UPSIGN_PRESET }))
+    .digest('hex');
+}
+
+/** upsign 配额闸门（按 IP，老项目同款内存 Map + 120s 过期清理）。 */
+const upsignQuotaMap = new Map();
+function upsignQuota(ip) {
+  const now = Date.now();
+  let r = upsignQuotaMap.get(ip);
+  if (!r) {
+    r = { m: 0, ms: now, d: 0, ds: now };
+    upsignQuotaMap.set(ip, r);
+  }
+  if (now - r.ms >= 60000) {
+    r.m = 0;
+    r.ms = now;
+  }
+  if (now - r.ds >= 86400000) {
+    r.d = 0;
+    r.ds = now;
+  }
+  r.m += 1;
+  r.d += 1;
+  // 上界与老项目一致：分钟 12 次、日 200 次
+  if (r.m > 12 || r.d > 200) {
+    return { ok: false, retryAfter: Math.max(0, Math.ceil((60000 - (now - r.ms)) / 1000)) };
+  }
+  return { ok: true };
+}
+
 
 /* ------------------------------------------------------------------ *
  * 路由
@@ -333,10 +400,51 @@ async function route(req, res) {
 
   /* ---------- 图床签名 ---------- */
   if (method === 'POST' && p === '/api/upsign') {
-    if (!UPSIGN_SECRET) return sendJson(res, 501, { error: 'upsign not configured' });
+    if (!UPSIGN_SECRET || !UPSIGN_PRESET || !CLOUD_NAME || !UPSIGN_KEY) {
+      return sendJson(res, 501, { error: 'upsign not configured' });
+    }
+    // 🔴🔴 强制 JSON content-type —— 这不是"多余的校验"。
+    //   不要求的话这是 **simple 请求**，任意恶意网页都能跨域连发要签名；
+    //   要求了就触发 CORS 预检，而本服务不回 ACAO 头，浏览器直接拦死。
+    //   老项目 v5.52 的 /api/fail 用的是同一手法。
+    const ct = req.headers['content-type'] || '';
+    if (!ct.includes('application/json')) {
+      return sendJson(res, 400, { error: 'bad content-type' });
+    }
+    // 🔴 用通用 readBody（已有 MAX_BODY 上限），不自己再读一遍流。
+    //   upsign 的 body 只是一小段 JSON（{note}），走通用上限足够；
+    //   自己实现一个 4096 的读法等于多一条能漂移的路径。
+    let raw;
+    try {
+      raw = (await readBody(req)).toString('utf8');
+    } catch (e) {
+      if (e && e.code === 'BODY_TOO_LARGE') return sendJson(res, 413, { error: 'too large' });
+      return sendJson(res, 400, { error: 'bad body' });
+    }
+    let o = {};
+    try {
+      o = JSON.parse(raw || '{}');
+    } catch {
+      // 半截坏 JSON 不该 500：按空对象处理，照样走配额与签发
+      o = {};
+    }
+    const q = upsignQuota(clientIp(req));
+    if (!q.ok) {
+      return sendJson(res, 429, { error: 'too many', retryAfter: q.retryAfter });
+    }
     const ts = Math.floor(Date.now() / 1000);
-    const sig = crypto.createHmac('sha1', UPSIGN_SECRET).update(`timestamp=${ts}`).digest('hex');
-    return sendJson(res, 200, { timestamp: ts, signature: sig, cloudName: CLOUD_NAME, preset: UPSIN_PRESET });
+    const sig = upsignSign(ts);
+    // 🔴 日志只记时间与归属笔记，**绝不记 secret / 签名**。
+    const note = typeof o.note === 'string' && validId(o.note) ? o.note : '-';
+    console.log(`[upsign] ts=${ts} note=${note}`);
+    return sendJson(res, 200, {
+      cloudName: CLOUD_NAME,
+      apiKey: UPSIGN_KEY,
+      timestamp: ts,
+      signature: sig,
+      uploadPreset: UPSIGN_PRESET,
+      folder: UPSIGN_FOLDER,
+    });
   }
 
   /* ---------- 小游戏记录（彩蛋层用） ---------- */

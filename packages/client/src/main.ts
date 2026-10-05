@@ -45,11 +45,13 @@ import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
+import { COPY } from './ui/copy.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
 import { isEggRoute, sanitizeNoteName } from './ui/landing-logic.ts';
 import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
 import { ReminderUI } from './reminder/ui.ts';
+import { handleImageUpload } from './image/upload.ts';
 
 declare global {
   interface Window {
@@ -279,6 +281,137 @@ let editor: LexicalEditor | undefined;
 /** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
 let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
+
+/* ---- 上传状态条（老项目 showUploadStatus 同款） ---- */
+
+/** 上传提示条的自动收起计时器。🔴 换文案前必须清掉旧的，否则会出现"新文案被旧计时器提前收走"。 */
+let uploadNoteTimer: number | undefined;
+
+/**
+ * 显示上传状态。
+ *
+ * 🔴 为什么不用底栏 setStatus：底栏那一行是**同步状态**的位置
+ *   （connecting / synced / offline），拿它显示"正在压缩图片"会让用户
+ *   以为同步坏了。老项目是独立浮层，这里照搬。
+ *
+ * @param kind 'doing' 过程 / 'ok' 成功 / 'bad' 失败
+ * @param autoHideMs 自动收起毫秒；0 = 常驻（过程态就靠调用方重发覆盖）
+ */
+function showUploadNote(kind: 'doing' | 'ok' | 'bad', text: string, autoHideMs: number): void {
+  let el = document.getElementById('uploadNote');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'uploadNote';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+  }
+  // 🔴 走 textContent，不走 innerHTML：文案里含用户文件名/云端返回的原因，
+  //   一旦有尖括号就是注入面（S4 已立的 XSS 收口口径）。
+  el.textContent = text;
+  el.dataset.kind = kind;
+  if (uploadNoteTimer !== undefined) {
+    clearTimeout(uploadNoteTimer);
+    uploadNoteTimer = undefined;
+  }
+  if (autoHideMs > 0) {
+    uploadNoteTimer = window.setTimeout(() => {
+      el?.remove();
+      uploadNoteTimer = undefined;
+    }, autoHideMs);
+  }
+}
+
+function hideUploadNote(): void {
+  if (uploadNoteTimer !== undefined) {
+    clearTimeout(uploadNoteTimer);
+    uploadNoteTimer = undefined;
+  }
+  document.getElementById('uploadNote')?.remove();
+}
+
+/**
+ * 隐藏的 file input —— 图片选择的唯一入口。
+ *
+ * 🔴 为什么藏在 DOM 里而不是 `input.click()` 临时造一个：
+ *   iOS Safari 对**用户手势链外**的 input.click() 会直接忽略，
+ *   症状是"点上传没反应且零报错"。挂在 DOM 里有两个好处：
+ *   ① 手势链完整（点在按钮上 → 按钮 handler 内 click 它，仍在手势内）；
+ *   ② accept 属性让系统直接给"照片"选择器而不是文件管理器。
+ */
+let uploadInput: HTMLInputElement | undefined;
+
+/**
+ * 建立（并记住）隐藏的 file input。
+ *
+ * 🔴🔴 必须是**启动即建**，不能等点上传按钮才建。
+ *   我第一版挂在 pickImage() 里懒创建，e2e 一跑就报「未找到 nsUploadInput」——
+ *   而这不只是测试问题：**懒创建意味着「第一次点击必须成功」**，
+ *   一旦那次 appendChild 失败（或被扩展/内核拦了一次），按钮就永久是死的，
+ *   且症状是"点了没反应零报错"。
+ *   提前建好 = 第一次点击与第 n 次点击走完全同一条路径。
+ */
+function ensureUploadInput(): HTMLInputElement {
+  if (uploadInput) return uploadInput;
+  const el = document.createElement('input');
+  el.type = 'file';
+  el.accept = 'image/*';
+  el.id = 'nsUploadInput';
+  // 必须藏起来但**不能 display:none** —— display:none 的 input 在部分
+  // 内核里不可点击（等于死按钮）。用视觉隐藏，保留可交互性。
+  el.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+  el.addEventListener('change', () => {
+    const f = el.files?.[0];
+    // 🔴 必须清空 value：同一个文件连选两次，第二次不触发 change
+    //   （value 没变），用户会以为"点了没反应"。
+    el.value = '';
+    const ed = editor;
+    if (!f || !ed) return;
+    void handleImageUpload(f, ed, {
+      noteId: currentNote,
+      base: location.origin,
+      onStatus: (m) => showUploadNote('doing', m, 0),
+      onOk: () => showUploadNote('ok', COPY.uploadOk, COPY.uploadOkMs),
+      onError: (m) => showUploadNote('bad', m, COPY.uploadFailMs),
+    }).then((ok) => {
+      // 🔴 成功才收键盘：失败时图片没插进去，编辑器还该留着继续用。
+      //   判据用 handleImageUpload 的**返回值**，不是"看提示条是什么态"——
+      //   后者在两个提示同屏、或提示条已被收起计时器删掉时就不成立了。
+      if (ok) dismissKeyboardForTouch();
+    });
+  });
+  document.body.appendChild(el);
+  uploadInput = el;
+  return el;
+}
+
+function pickImage(): void {
+  // 🔴 开选前先收掉上一条提示：上一条失败提示还挂着（4.5 秒驻留）时
+  //   又发起新上传，两条提示会在同一位置叠着、互相盖住失败原因。
+  hideUploadNote();
+  ensureUploadInput().click();
+}
+
+/**
+ * 触屏下收起软键盘。
+ *
+ * 🔴 移植自老项目 v9.5.1 `dismissKeyboardForTouch`：
+ *   blur 是唯一能让移动端键盘收起的可靠手段（设 readonly 那些花招在
+ *   新版 WebKit 上已失效）。但**桌面端不能 blur** ——
+ *   用户正在打字时误触图片上传，编辑器一失焦、光标就丢了。
+ *   判据用「粗指针 + 无精确指针」，即 (hover: none) 且 (pointer: coarse)。
+ */
+function dismissKeyboardForTouch(): void {
+  try {
+    if (!window.matchMedia('(hover: none) and (pointer: coarse)').matches) return;
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  } catch {
+    // 收起键盘失败绝不影响主流程
+  }
+}
+
 let currentPage = 'boot';
 let currentNote = '';
 /** 收藏态与链接打开方式是**本机偏好**（老项目：仅对本机生效），存 localStorage。 */
@@ -337,6 +470,11 @@ function onTopbar(act: TopbarAction): void {
     case 'remind': {
       // 顶栏铃铛 = 打开提醒面板（老项目同一入口）
       reminderRef?.togglePanel();
+      return;
+    }
+    case 'upload': {
+      // 顶栏上箭头 = 选图上传（老项目同一入口）
+      pickImage();
       return;
     }
     default:
@@ -815,6 +953,9 @@ function route(): void {
 
 function boot(): void {
   applyTheme();
+  // 🔴 隐藏的 file input 必须在启动时就建好（见 ensureUploadInput 的注释）：
+  //   懒创建会让"第一次点击"成为唯一能走通的机会，一旦那次失败按钮就永久是死的。
+  ensureUploadInput();
   route();
   // 口令页关闭回落地页用的是 pushState，所以要监听 popstate
   window.addEventListener('popstate', () => route());
