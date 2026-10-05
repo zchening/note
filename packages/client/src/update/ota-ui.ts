@@ -53,7 +53,13 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   el.id = 'aboutMask';
 
   const box = document.createElement('div');
-  box.className = 'box';
+  // 🔴 老项目 index.html:830 `class="box qr-box"` —— 两个类都要。
+  //   .qr-box 提供 `text-align:center`（老项目 index.html:526），
+  //   关于页的「整体居中 + 标题金线」版式就是靠它落的。
+  //   只靠 .about-title 自带的 text-align:center 虽然当前显示等价，
+  //   但那是**新项目自己另找的等价路径**：一旦标题改成非块级或加副标题，
+  //   两边就会分叉。承重类优先用老项目的。
+  box.className = 'box qr-box';
 
   const h1 = document.createElement('h1');
   h1.textContent = COPY.aboutTitle;

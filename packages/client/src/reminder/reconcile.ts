@@ -262,7 +262,19 @@ function markSpans(
  * 🔴 只有这里能新增。理由：红线 1 说"没主动加过的绝不动"，
  *   而"主动"的唯一证据就是走过这个函数。
  */
-export function addReminder(doc: Doc, atMs: number, text: string): { doc: Doc; rem: Reminder } {
+export function addReminder(doc: Doc, atMs: number, text: string): { doc: Doc; rem: Reminder; rejected?: boolean } {
+  // 🔴🔴 兜底闸门：任何入口的过去时间一律不设（老项目 index.html:7297-7299）。
+  //   原注释「兜底闸门：任何入口的过去时间一律不设（chip/面板已各自拦，这里防漏网）」——
+  //   chip 与面板各自拦只是 UI 层，**函数本身必须再拦一次**：
+  //   chip 的时间串来自正文解析，正文里完全可以写一个昨天的时间再点它，
+  //   那条路径不经过面板的 Date.now 校验。此前这道闸门整个漏了，
+  //   于是点一下就能加出一条已过期的提醒，它会立刻进 dueReminders 触发响铃。
+  //   🔴 rejected 显式回传而不是靠 id 哨兵值：UI 要靠它决定说哪句话
+  //     （老项目那边是 showUploadStatus('已过去的时间不能设提醒') 后 return false），
+  //     靠"返回的 rem.id 是空的"去推断，调用方迟早会漏判。
+  if (atMs <= Date.now()) {
+    return { doc, rem: { id: '', at: new Date(atMs).toISOString(), text }, rejected: true };
+  }
   const at = new Date(atMs).toISOString();
   const rem: Reminder = { id: makeRemId(atMs, text), at, text };
   const list = [...(doc.reminders ?? [])];
@@ -306,6 +318,26 @@ export function removeReminder(doc: Doc, id: string): Doc {
   if (list.length > 0) out.reminders = list;
   else delete out.reminders;
   return normalize(out);
+}
+
+/**
+ * 按时刻删一条提醒（chip 确认卡上的「删除」钮走这条，老项目 index.html:6492 `removeReminder(at)`）。
+ *
+ * 🔴🔴 为什么需要它而不是复用 `removeReminder(doc, id)`：
+ *   chip 上的删除钮手里只有 **at**（`chipDeleteAt = m.at`，老项目 :6384），
+ *   没有 id —— id 是 `makeRemId(at, text)` 算出来的，而 chip 卡上不保存 text
+ *   （text 是从正文时间串后面现算的 itemAfterMatch，与建提醒时用的 text 不一定同源）。
+ *   拿不准 id 就不能删，否则会出现"点了删除但删不掉"或"删掉另一条"。
+ *   判据：**at 精确相等**（都是 ISO 毫秒精度，同一时刻唯一）。
+ *
+ * 🔴 找不到就**原样返回 doc**：不抛错、不返回半成品。
+ *   这是"删除"动作，重复点两次必须幂等 —— 抛错会让第二次点击把编辑器搞挂。
+ */
+export function removeReminderAt(doc: Doc, atMs: number): Doc {
+  const at = new Date(atMs).toISOString();
+  const hit = (doc.reminders ?? []).find((r) => r.at === at);
+  if (!hit) return doc;
+  return removeReminder(doc, hit.id);
 }
 
 /** 标记完成。done 不影响 at，也不影响正文。 */

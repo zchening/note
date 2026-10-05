@@ -161,15 +161,29 @@ test('EXPORT-13 blobToB64 去掉 data: 前缀', () => {
   assert.equal(typeof blobToB64, 'function');
 });
 
-test('EXPORT-14 🔴 失败文案必须自带「图片未生成」（静默失败=用户以为功能坏了）', async () => {
+test('EXPORT-14 🔴 失败文案逐字抄老项目，且成功文案按档位分档', async () => {
   const { COPY } = await import('../src/ui/copy.ts');
-  assert.match(COPY.exportFailMsg('x'), /图片未生成/);
-  assert.match(COPY.exportFailCors, /图片未生成/);
-  assert.match(COPY.exportFailUnknown, /图片未生成/);
-  assert.ok(COPY.exportLoadFail.length > 0);
+  // 🔴🔴 本条曾断言「失败文案必须自带『图片未生成』」，现已按老项目翻案。
+  //   翻案依据（不是推理，是穷举）：`grep -on "导出失败[^']*" 老项目 index.html`
+  //   全库只有两处出现——index.html:2922 与 :2926，两条**都不带**「图片未生成」：
+  //     2922  '导出失败：可能因外链图片跨域，请使用支持CORS的图床'
+  //     2926  '导出失败：渲染异常'
+  //   用户第 11 条原话是「所有的文案都必须和之前的一模一样」，
+  //   而「，图片未生成」是老项目里**不存在**的字 —— 属于上一轮自己加的"改进"，
+  //   属于用户明确点名的违规项。本条现在钉死逐字一致，**任何人不得再加后缀**。
+  assert.equal(COPY.exportFailCors, '导出失败：可能因外链图片跨域，请使用支持CORS的图床');
+  assert.equal(COPY.exportFailUnknown, '导出失败：渲染异常');
+  assert.equal(COPY.exportFailMsg('x'), '导出失败：x');
+  // 老项目 index.html:2899 原文
+  assert.equal(COPY.exportLoadFail, '图片导出组件加载失败，请检查网络后重试');
   // 成功文案按档位给不同措辞，不能一律"已复制"
-  assert.match(COPY.exportOkMsg('preview'), /长按保存|下载/);
-  assert.match(COPY.exportOkMsg('clipboard'), /已复制/);
+  assert.match(COPY.exportOkMsg('clipboard'), /已复制，可直接 Ctrl\+V 粘贴/);
+  assert.match(COPY.exportOkMsg('native'), /已复制，可直接粘贴/);
+  assert.match(COPY.exportOkMsg('share'), /系统分享/);
+  // 🔴 预览档**不给提示条**（老项目 index.html:2967 showImagePreview 第一行 hideUploadStatus），
+  //   所以它既没有措辞也不该有 okMs：export/index.ts 对 preview 直接 return，不走 onStatus。
+  assert.equal(COPY.exportOkMs, 3000);
+  assert.equal(COPY.exportFailMs, 3000);
 });
 
 test('EXPORT-15 🔴 借壳反色护栏：图片 filter 必须内联 !important 钉回none', () => {

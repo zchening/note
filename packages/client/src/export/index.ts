@@ -102,6 +102,11 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
       deps.onStatus('bad', COPY.exportFailUnknown, deps.failMs);
       return 'renderfail';
     }
+    // 🔴 预览档**不给任何提示条**（老项目 index.html:2967 showImagePreview 第一行
+    //   就是 hideUploadStatus）。此前这里统一弹「图片已生成，可长按保存或下载」——
+    //   那是老项目里不存在的文案，且弹在预览浮层**背后**，用户压根看不见，
+    //   等于凭空多一次状态切换（预览层盖住提示条，关闭后又闪一下）。
+    if (kind === 'preview') return kind;
     deps.onStatus('ok', COPY.exportOkMsg(kind), deps.okMs);
     return kind;
   } catch (e) {
@@ -130,11 +135,13 @@ export function showPreview(blob: Blob): void {
   const overlay = document.createElement('div');
   overlay.className = 'mask';
   overlay.id = 'imgPreviewMask';
+  // 🔴 老项目 index.html:2967 `overlay.style.zIndex = '40'` —— 预览层压在提示条之上，
+  //   所以"预览档不给提示条"是配套的：给了也看不见。
+  overlay.style.zIndex = '40';
 
   const box = document.createElement('div');
   box.className = 'box';
-  box.style.textAlign = 'center';
-  box.style.maxWidth = '92vw';
+  box.setAttribute('style', 'text-align:center;max-width:92vw');
 
   const h = document.createElement('h1');
   h.className = 'qr-title';
@@ -143,27 +150,32 @@ export function showPreview(blob: Blob): void {
   const img = document.createElement('img');
   img.src = url;
   img.alt = COPY.exportPreviewAlt;
-  img.style.maxWidth = '100%';
-  img.style.maxHeight = '60vh';
-  img.style.borderRadius = '12px';
-  img.style.background = '#fff';
+  img.setAttribute('style', 'max-width:100%;max-height:60vh;border-radius:12px;background:#fff');
 
   const tip = document.createElement('p');
-  tip.className = 'link-hint';
   tip.textContent = COPY.exportPreviewTip;
+  // 🔴 老项目这里是**内联样式**而非 class（index.html:2981）：
+  //   font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0
+  //   —— 与 .link-hint（11.5px/1.6）**不是**同一条规则，别混用。
+  tip.setAttribute('style', 'font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0');
 
+  // 🔴 老项目 index.html:2982-2988：按钮行与两个按钮全是内联样式，
+  //   描边胶囊 `padding:10px 22px;border:1px solid var(--line);border-radius:999px;font-size:13px`，
+  //   「完 成」按钮只补 `padding:10px 22px`（其余靠 row-btn 的 class 兜）。
   const btnRow = document.createElement('div');
-  btnRow.className = 'link-actions';
+  btnRow.setAttribute('style', 'display:flex;gap:12px;justify-content:center;margin-top:14px');
   const dl = document.createElement('a');
   dl.className = 'row-btn';
   dl.textContent = COPY.exportDownload;
   dl.href = url;
   dl.download = 'note.png';
+  dl.setAttribute('style', 'padding:10px 22px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--fg);text-decoration:none');
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.className = 'row-btn';
   cancel.id = 'imgPreviewClose';
   cancel.textContent = COPY.exportDone;
+  cancel.setAttribute('style', 'padding:10px 22px');
   btnRow.appendChild(dl);
   btnRow.appendChild(cancel);
 

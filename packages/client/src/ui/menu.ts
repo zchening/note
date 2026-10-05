@@ -48,6 +48,16 @@ export interface MenuState {
   /** 历史版本列表。S5 之后由真源喂进来。 */
   histList: Array<{ at: string; label: string }>;
   /**
+   * 🔴 列表**拉取失败**的原因（非空时覆盖空态文案）。
+   *
+   * 🔴🔴 不把这层意思压进 `histList.length === 0`：那是两个完全不同的事 ——
+   *   "服务端确实没有历史版本" 与 "网络断了没拉到"。
+   *   合成一个空数组的话，历史页会显示「暂无历史版本」，
+   *   而真实原因是"现在拿不到" —— 用户以为改动没被记下来，
+   *   而历史版本是找回丢失内容的唯一指望。这是比"功能坏了"更糟的误导。
+   */
+  histFail: string;
+  /**
    * 同步冲突条目。空数组 = 无冲突。
    * 🔴 状态里放的是**已经算好的文案**，不是原始 diff。菜单只负责显示，
    *   让它自己去理解 base/left/right 就会有两套"怎么算冲突"的理解。
@@ -60,7 +70,16 @@ export interface MenuCallbacks {
   onHome: () => void;
   onToggleFav: () => void;
   onOpenFav: (name: string) => void;
-  onSaveHist: () => void;
+  /**
+   * 存一版快照。返回 Promise 是为了**存完再重画**：
+   * 快照是网络往返，直接 `cb.onSaveHist(); render();` 会先画一遍旧列表 ——
+   * 用户会看到"点了没反应，过一会儿才多一行"，而那一行还是他自己刚存的当前版本。
+   */
+  onSaveHist: () => Promise<void> | void;
+  /**
+   * 进入历史二级视图时拉列表。菜单只负责触发与重画，**不认识网络**。
+   */
+  onLoadHist: () => Promise<void> | void;
   onOpenHist: (at: string) => void;
   onLinkMode: (inApp: boolean) => void;
   onBackup: () => void;
@@ -147,6 +166,25 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
   };
 
   /**
+   * 拉历史列表并重画历史视图。
+   *
+   * 🔴 三个必须都在这里挡掉，否则症状是"菜单整个坏掉"：
+   *   1. 回调抛错（网络/解析）→ try 吞掉，**不能让它冒到 wire 的事件处理器里**；
+   *   2. 拉的过程中用户已经返回主视图或关掉菜单 → 不许再 render，
+   *      否则会把已关的面板重新 innerHTML 一遍（"关不掉菜单"）；
+   *   3. 拉的过程中用户切了视图 → 同上，且不该拿这次的列表去画别的视图。
+   */
+  const reloadHist = async (): Promise<void> => {
+    try {
+      await cb.onLoadHist();
+    } catch {
+      /* onLoadHist 自己负责兜底文案；这里只保证不把异常抛进事件处理器 */
+    }
+    if (!open || view !== 'hist') return;
+    render();
+  };
+
+  /**
    * 二级视图标题行 —— **标准菜单行**，不是另画的一行。
    *
    * 🔴🔴 老项目 index.html:701/706/712 的返回行就是 `.menu-item` 本体：
@@ -199,7 +237,17 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
   };
 
   const renderHist = (): string => {
+    // 🔴 计数行同fav：只在**有版本**时出现（老项目 :8485 `if (list.length) kick.textContent = ...`）。
+    //   空列表时挂一句「版本 · 0 个」是给一个空页面加噪音。
+    const kick = st.histList.length
+      ? `<div class="list-kicker">${COPY.histKicker(st.histList.length)}</div>`
+      : '';
     // 🔴 同fav：三列（时钟 16px + 等宽时间 + 右箭头）。老项目 :8490-8491 用 HIST_CLOCK_SVG。
+    //
+    // 🔴🔴 中间那个 .grow 是**必要的第四列**，不是美化：.hist-meta 自身
+    //   `flex:1;min-width:0;white-space:nowrap`（styles.css:641），
+    //   没有它的话 meta 会吃掉恢复按钮的宽度，把「恢复」两字挤成竖排 ——
+    //   老项目那边的等价约束写在 `.hist-line{flex:1;min-width:0}`（index.html:466）。
     const rows = st.histList.length
       ? st.histList
           .map(
@@ -207,11 +255,13 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
               `<div class="list-row" data-at="${escapeTrunc(h.at, 30)}" role="button" tabindex="0">` +
               `<span class="hist-clock">${ICON_CLOCK()}</span>` +
               `<span class="hist-meta">${escapeTrunc(h.label)}</span>` +
+              `<span class="grow"></span>` +
+              `<button type="button" class="row-btn" data-restore="${escapeTrunc(h.at, 30)}">${COPY.histRestore}</button>` +
               `<span class="fav-go">${ICON_CHEVRON()}</span></div>`,
           )
           .join('')
-      : `<div class="empty">${COPY.histEmpty}</div>`;
-    return `${head(COPY.menuHistEntry)}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
+      : `<div class="empty">${escapeTrunc(st.histFail || COPY.histEmpty)}</div>`;
+    return `${head(COPY.menuHistEntry)}${kick}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
   };
 
   const renderConflict = (): string => {
@@ -256,7 +306,14 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
           case 'menuHome': close(); cb.onHome(); return;
           case 'menuFav': cb.onToggleFav(); render(); return;
           case 'menuFavEntry': view = 'fav'; render(); return;
-          case 'menuHistEntry': view = 'hist'; render(); return;
+          // 🔴 历史：先进视图（马上能看到返回行与空态），再拉列表。
+          //   反过来做（await 完再 render）的话，在网慢时点菜单会**毫无反应** ——
+          //   那是这一项的老症状，不能换个实现方式又长回来。
+          case 'menuHistEntry':
+            view = 'hist';
+            render();
+            void reloadHist();
+            return;
           case 'menuLink': view = 'link'; render(); return;
           case 'menuBackup': close(); cb.onBackup(); return;
           case 'menuPet': close(); cb.onPet(); return;
@@ -282,16 +339,33 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       });
     }
     // 历史版本行 + 存一个快照
+    //
+    // 🔴🔴 恢复按钮必须 `stopPropagation`，否则它在行里点一下会**同时**触发
+    //   行的「进入这一版」和按钮自己的恢复 —— 一次点击发两次网络请求，
+    //   且第二次请求到达时用户可能已经看到内容换了，两次写回互相覆盖。
+    //   这是行内按钮的通病，不是本功能特有的。
     for (const row of el.querySelectorAll<HTMLElement>('.list-row[data-at]')) {
       const at = row.dataset.at ?? '';
       bind(row, () => {
         close();
         cb.onOpenHist(at);
       });
+      const btn = row.querySelector<HTMLElement>('[data-restore]');
+      if (btn) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          close();
+          cb.onOpenHist(at);
+        });
+      }
     }
     bind(el.querySelector<HTMLElement>('#histSave'), () => {
-      cb.onSaveHist();
-      render();
+      // 🔴 存完再重画：否则新快照那一行要等下一轮网络往返才出现在列表里，
+      //   而这个按钮的全部意义就是"确认这一版被记下来了"。
+      void (async () => {
+        await cb.onSaveHist();
+        if (open && view === 'hist') await reloadHist();
+      })();
     });
     // 链接打开方式
     bind(el.querySelector<HTMLElement>('#linkInApp'), () => {

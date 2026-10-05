@@ -17,6 +17,7 @@ import { COPY } from '../ui/copy.ts';
 import { doorOf, eggById, markDiscovered, type EggStore } from './registry.ts';
 import { buildCodex, type Codex } from './codex.ts';
 import { buildShell, type AnyGame, type Shell } from './shell.ts';
+import { bindEggWordTrigger, type EggWordBinding } from './word-trigger.ts';
 import { buildSound, type Sound } from './sound.ts';
 import { burst, clearFx, firework, isFestival, rain, showBadge } from './fx.ts';
 import {
@@ -60,6 +61,22 @@ export interface EggLayer {
   openCodex: () => void;
   /** 绑定条件触发（正文数字梗/ notesync、节日雨/徽章）。 */
   bindTriggers: () => void;
+  /**
+   * 绑定正文彩蛋词表触发（敲 `/dragon` 弹确认层）。
+   *
+   * 🔴 为什么要**单独**一个入口而不是塞进 `bindTriggers`：
+   *   `bindTriggers` 绑的是**条件触发**（数字梗/烟花），判据跑在
+   *   编辑器 update 的真源文本上；词表触发需要的是**光标位置**，
+   *   必须在 root DOM 上挂 beforeinput / compositionend 监听。
+   *   两者触发时机与依赖完全不同，混在一个函数里会让人以为
+   *   「挂上 bindTriggers 词表就能用」—— 而漏调这个的后果是
+   *   **用户敲 /dragon 永远不弹，且零报错**（正是本次报障）。
+   */
+  bindWordTrigger: (root: HTMLElement) => void;
+  /** 词表确认浮层是否开着（给 e2e 钩子）。 */
+  wordAskOpen: () => boolean;
+  /** 词表确认浮层当前展示的蛋 id（空串 = 没展示）。 */
+  wordAskId: () => string;
   shell: Shell;
   sound: Sound;
   /** 图鉴是否开着。codex 对象是模块私有的，外部要判只能走这里。 */
@@ -69,6 +86,8 @@ export interface EggLayer {
 
 export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): EggLayer {
   const sound = buildSound();
+  /** 词表触发绑定句柄。`bindWordTrigger` 可被重复调，故存起来以便先解绑。 */
+  let wordBinding: EggWordBinding | undefined;
   const shell = buildShell(sound, {
     onClosed: () => h.onGameClosed?.(),
   });
@@ -87,8 +106,7 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     pet: () => petGame(),
   };
 
-  const codex: Codex = buildCodex(host, store, {
-    onReplay: (id) => {
+  const codex: Codex = buildCodex(host, store, {    onReplay: (id) => {
       codex.close();
       openByRoute(id);
     },
@@ -166,9 +184,22 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     doorOfPath: () => doorOf(location.pathname.replace(/^\/+|\/+$/g, '')),
     openCodex,
     bindTriggers,
+    bindWordTrigger: (root: HTMLElement) => {
+      // 🔴 幂等：main.ts 的挂载路径与热重载都可能调第二次，重复绑定会让
+      //   一次击键弹两层确认层（用户看到两个「进入」按钮）。
+      wordBinding?.dispose();
+      wordBinding = bindEggWordTrigger(root, {
+        launch: openByRoute,
+        refocus: h.refocus,
+      });
+    },
+    wordAskOpen: () => wordBinding?.isOpen() ?? false,
+    wordAskId: () => wordBinding?.showingId() ?? '',
     shell,
     sound,
     dispose: () => {
+      wordBinding?.dispose();
+      wordBinding = undefined;
       shell.close(false);
       clearFx();
     },

@@ -74,7 +74,6 @@ import {
   type LexicalNode,
 } from 'lexical';
 
-import { registerAutoLink } from '@lexical/link';
 import { registerList } from '@lexical/list';
 import { registerRichText } from '@lexical/rich-text';
 // 🔴 只取 `signal` 这一个纯函数，**从深路径 `@lexical/extension/signals.js` 引**。
@@ -87,6 +86,7 @@ import { registerRichText } from '@lexical/rich-text';
 import { signal } from '@lexical/extension/signals.js';
 
 import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
+import { registerLinkify } from './linkify/deferred.ts';
 import type { Span } from '@bj/shared-schema';
 
 /**拖拽高亮用的 class。与 styles.css `.ns-editor.dragover` 一一对应（改一处必须改两处）。 */
@@ -110,6 +110,33 @@ export interface BehaviorDeps {
    * 这里**不另立标准**。
    */
   uploadImage: (file: File) => void;
+  /**
+   * 链接识别的遮罩守卫：当前有没有遮罩态面板（提醒 / 二维码 / 扫一扫）。
+   *
+   * 🔴 与 uploadImage 同款纪律：判定逻辑全在 main.ts（那里才有面板状态），
+   *   本模块**不去猜 class 名**。猜错的后果是"面板开着时光标被链接重建弹走"，
+   *   零报错、极难自查。
+   */
+  hasOverlayOpen: () => boolean;
+}
+
+/**
+ * `registerBehaviors` 的返回值。
+ *
+ * 🔴 为什么不再只返回注销函数：链接识别需要一个「立刻跑一轮」的入口，
+ *   供真源换档时调用（解锁 / 远端合并 / 导入 —— 老项目 index.html:3471
+ *   `if (note.ct) linkifyEditor()` 是同一件事）。
+ *   少了它，那些**用户没敲过字**的裸网址永远不亮 ——
+ *   而这恰恰是老项目迁移过来的真源里最常见的样子。
+ *
+ *   做成对象而不是让 main.ts 直接 import registerLinkify：
+ *   那样会出现第二个注册入口，与这里的组装顺序脱钩。
+ */
+export interface BehaviorHandle {
+  /** 立刻跑一轮链接识别（跳过打字守卫）。真源换档后调用。 */
+  linkifyNow: () => void;
+  /** 注销全部行为（逆序执行）。S4 热重载与测试隔离会用到。 */
+  dispose: () => void;
 }
 
 /**
@@ -119,20 +146,31 @@ export interface BehaviorDeps {
  *   setRootElement会触发一次 reconcile 与 `$commitPendingUpdates`，
  *   在它之前注册则行为插件看不到稳定态的root 绑定。
  *
- * @param deps 外部能力注入（当前只有图片上传）。**刻意做成必填**：
+ * @param deps 外部能力注入（上传 + 遮罩判定）。**刻意做成必填**：
  *   做成可选等于给"忘了传uploadImage"留一个静默降级的口子——
  *   表现是"编辑器能打字但图片拖进来没反应"，零报错，正是本文件要消灭的那类故障。
- *
- * @returns 注销函数（逆序执行）。S4 热重载与测试隔离会用到。
  */
-export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): () => void {
-  // 自动链接：输入 URL / 邮箱并敲空格或标点时自动转链接。
-  // 🔴 用 `registerAutoLink` 而不是 `registerLink`：后者的签名是
-  //   `registerLink(editor, stores: NamedSignalsOutput<LinkConfig>)`，
-  //   第二个参数是 Extension 体系内部的 signal store —— 本项目不引React 就没有它，
-  //   TS2554 直接报出来。`registerAutoLink(editor, config?)` 才是纯文本输入路径
-  //   需要的那个入口，且 config 可整体省略。
-  const unregisterAutoLink = registerAutoLink(editor);
+export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): BehaviorHandle {
+  // 🔴🔴🔴 自动链接识别 —— 老项目 index.html:3846 `linkifyEditor` 的等价物。
+  //
+  //   **这里原来调的是 `registerAutoLink(editor)`，而它是彻底无效的**（探针
+  //   .probe/probe-c.mjs 实锤）：不传 config 时 `defaultConfig.matchers` 是
+  //   **空数组**（node_modules/@lexical/link/dist/LexicalLink.dev.js:1773-1778），
+  //   于是它注册的是一个「零匹配器」的节点变换 —— 不报错、不生效、也不留痕。
+  //   用户报「正文里的网址没有被自动识别」就是这条。
+  //
+  //   为什么不能改成「给它配 matchers 就好」（那才是最小改动）：
+  //     1. 它的 URL 正则与老项目**不是一套**（Unicode `\p{L}` + 括号配平
+  //        vs 老项目的 CJK 字符类方案），中文正文里判据完全不同；
+  //     2. 它是**打字即时**的增量变换，老项目是**停笔 1.5s 后的全量重扫**，
+  //        节奏不同（老项目注释明写实时改树会让光标跳，index.html:3624-3627）；
+  //     3. 它不认手机号、不认裸域名 TLD 白名单、不管 ZWSP 兼容；
+  //     4. 它产出 AutoLinkNode，而这个节点**没注册进 ALL_NODES**
+  //        （node-registry.ts 只有 LinkNode），真机上一旦触发就抛
+  //        "Attempted to create node AutoLinkNode that was not configured"
+  //        —— 症状是整篇文档变空（探针 probe-b.mjs 实测）。
+  //   ⇒ 走项目自己的 linkify/，规则逐条抄老项目并已实跑对拍（test/linkify.test.mjs）。
+  const linkify = registerLinkify(editor, { hasOverlayOpen: deps.hasOverlayOpen });
 
   // 列表：Tab / Shift+Tab 缩进与反缩进、Enter 新建条目、Backspace 退出列表。
   const unregisterList = registerList(editor);
@@ -166,14 +204,17 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): ()
   //   **只要剪贴板里有图片，就走图片通道**，文本让位。
   const unregisterRichText = registerRichText(editor, undefined, signal(() => true));
 
-  return () => {
-    // 逆序注销，与注册顺序严格相反
-    unregisterRichText();
-    unregisterImageInput();
-    unregisterFoldAuto();
-    unregisterFold();
-    unregisterList();
-    unregisterAutoLink();
+  return {
+    linkifyNow: linkify.runNow,
+    dispose: () => {
+      // 逆序注销，与注册顺序严格相反
+      unregisterRichText();
+      unregisterImageInput();
+      unregisterFoldAuto();
+      unregisterFold();
+      unregisterList();
+      linkify.dispose();
+    },
   };
 }
 
@@ -422,14 +463,30 @@ function $promoteFoldMarks(editor: LexicalEditor): void {
     dbg('not-at-start');
     return;
   }
-
-  // 标记后面必须只剩空白（用户还没打标题）—— 打了就说明标题已在，
-  // 这时**不**自动建组，让用户能自由编辑标题（老项目同款：先打完再识别）。
-  const rest = startsClose ? raw.slice(FOLD_CLOSE_MARK.length) : raw.slice(FOLD_OPEN_MARK.length);
-  if (rest.trim() !== '') {
-    dbg('rest-not-blank=' + JSON.stringify(rest));
+  // 🔴🔴🔴 闭合锚**绝不能**被当成开标记去建组。
+  //   老项目 index.html:4101 `foldLeadInfo` 只匹配 FOLD_MARK（`[折叠]`），
+  //   闭合锚另有 `foldEndKind`（:4101-4103）那一套判定，两者从不相交。
+  //   本函数此前把两种标记合流处理，一旦放开门把判据（见下），
+  //   用户打 `[/折叠]` 就会被**新建一个折叠块** —— 而老项目里闭合锚的语义是
+  //   "把这一行挂到组尾/压成零高"，不是开新组。
+  //   症状极隐蔽：正文里凭空多出一个空折叠块，且用户看不出多出来的是什么。
+  if (startsClose) {
+    dbg('close-mark-skip');
     return;
   }
+
+  // 🔴🔴🔴 标记后**允许有内容**（老项目 index.html:4101 foldLeadInfo 的判据是
+  //   `orig.slice(lead).indexOf(FOLD_MARK) === 0` —— 只看**行首**，后面跟什么都算把手）。
+  //   本条曾写成 `if (rest.trim() !== '') return`，要求标记后必须为空，
+  //   于是「用户打完标记紧接着打标题」这个**最自然的用法永远不成立**：
+  //   用户输入 `[折叠]买菜清单`，rest = "买菜清单" 非空 → 直接 return → 什么也没发生。
+  //   症状是"折叠功能我根本用不了"，而界面上没有任何提示说为什么
+  //   （用户报障第 19 条：「怎么在笔记正文添加折叠列表」）。
+  //
+  //   为什么当初要加这条限制：怕用户正文里提到"[折叠]"三个字被误吞成结构。
+  //   但那个担心已被"必须行首"这一条挡住了 —— 行中出现这三个字不会命中。
+  //   老项目行首语义（v7.3.1 F2）不能动，所以这里照抄老项目，不自己加严。
+  const rest = raw.slice(FOLD_OPEN_MARK.length);
 
   const para = anchor.getParent();
   if (para === null || !$isElementNode(para)) {
@@ -445,8 +502,12 @@ function $promoteFoldMarks(editor: LexicalEditor): void {
     return;
   }
 
-  // 标题 = 标记之后到段末的可见文字（当前恒为空，标题随后由用户接着打）
-  const title = rest;
+  // 标题 = 标记之后到段末的可见文字（老项目：把手行的标题就是行首标记之后的那截）
+  // 🔴 剥零宽字符（ZWSP/ZWNJ/BOM/word-joiner）：老项目 linkify 会往长词里插 ZWSP
+  //   （index.html:10944 nsStripZW 就是干这个的），标记与标题之间也可能有。
+  //   不剥的话标题里会藏一个不可见字符 —— 用户看着是"买菜清单"，
+  //   点开折叠后标题前后多一个幽灵字符，复制出去还带着它。
+  const title = rest.replace(/[‌‍⁠﻿]/g, '');
   // 🔴🔴🔴 标题 span **不能是空串**。FoldNode.getTextContent() 走
   //   `title.map(s => s.t).join('')`，空标题会让折叠块文本为空 ——
   //   而序列化/复制/搜索都读它。更要紧的是：老项目新建的折叠块，

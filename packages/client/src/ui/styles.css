@@ -13,18 +13,26 @@
 /* ---------- reset ---------- */
 * { box-sizing: border-box; }
 html, body {
-  margin: 0;
+margin: 0;
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-               "PingFang SC", "Microsoft YaHei", sans-serif;
-  line-height: 1.6;
-  -webkit-text-size-adjust: 100%;
-  -webkit-font-smoothing: antialiased;
-  overscroll-behavior: none;
-  /* 🔴 主题切换的过渡：只过渡颜色，不动布局属性（避免重排抖动） */
-  transition: background-color .18s ease, color .18s ease;
+  /* 🔴🔴 老项目 index.html:96：`font:16px/1.6 -apple-system,...` —— font **简写**，
+     字号 16px 就在这条简写里。此前新项目拆成 font-family + line-height，
+     **把 font-size 整条丢了**，于是继承下来的是浏览器默认 16px（恰好同值，PC 看不出来），
+     但在有全局 font-size 的壳里就会被继承成别的值。
+     而 display:flex + flex-direction:column 是布局的命门，见下。 */
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 🔴🔴 老项目 index.html:96 末段 `display:flex;flex-direction:column` —— **本条曾整个漏掉**。
+     后果是整条纵向布局链全断：
+       body 不是 flex 容器 → .shell 的 `min-height:100%` 无参照
+       → .ns-main 的 `flex:1` 无处可伸 → 编辑器不撑满剩余高度
+       → 底部菜单栏（footer）被正文顶下去、随内容滚动，而不是钉在界面底部。
+     这正是用户报的「笔记编辑界面应该比较高，菜单栏应该在界面底部」。 */
+  display: flex; flex-direction: column;
+  /* 老项目 `transition:background .3s,color .3s`（.3s 不是 .18s，属性名是简写） */
+  transition: background .3s, color .3s;
 }
 button, input { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; padding: 0; }
@@ -238,19 +246,32 @@ svg .gf { fill: var(--accent); stroke: none; }
              background: var(--accent-soft); padding: 3px 8px; border-radius: 6px; }
 
 /* ---------- 应用外壳（顶栏 / 编辑器 / 底栏） ---------- */
-.shell { display: flex; flex-direction: column; min-height: 100%; }
+/* 🔴 body 是 flex column（老项目 index.html:96）之后，.shell 是 body 的唯一 flex 子项，
+   必须 `flex:1` 才能占满高度 —— 否则它的 `min-height:100%` 参照的是 body 的内容高，
+   底栏 footer 照样被正文顶下去。两者缺一，菜单栏就回不到界面底部（用户报障第 3 条）。 */
+.shell { display: flex; flex-direction: column; min-height: 100%; flex: 1; }
 header.ns-top {
+  /* 🔴 逐字抄老项目 index.html:100（v9.0.0 注释：position:relative 给桌宠当包含块，
+     #nsPet 是 absolute 且 append 进 header，缺它等于钉在首屏底缘外）。
+     此前这里是 position:sticky + z-index:20 + background:var(--bg) ——
+     三样老项目都没有：sticky 让顶栏吸附，老项目它是文档流内的一行；
+     叠层与实底则会在滚动时糊出一层与老项目不同的底色。 */
+  position: relative;
   display: flex; align-items: center; gap: 10px;
   font-size: 12px;
   color: var(--muted);
   letter-spacing: .04em;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; z-index: 20;
-  background: var(--bg);
 }
-.ns-brand { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.ns-brand .ns-mark { color: var(--accent); flex: none; }
+/* 🔴 老项目 index.html:101：`gap:8px`（不是 7px）、`color:var(--fg)`（不是 muted）、
+   `flex-shrink:1`（不是 flex:none）。gap 差 1px 在 logo 与 NoteSync 字标之间看得出来，
+   而 v7.3.3 的注释说明了 flex-shrink 的用途：长笔记名在窄屏不把右侧工具键挤出屏幕。 */
+.ns-brand { display: flex; align-items: center; gap: 8px; color: var(--fg);
+            flex-shrink: 1; min-width: 0; }
+/* 🔴 老项目 index.html:102：17px 见方 + flex-shrink:0。缺了尺寸则图标按 SVG 自带
+   viewBox 铺开，与右侧 17px 的工具键不同高 —— 顶栏最显眼的一处"不一样"。 */
+.ns-brand .ns-mark { width: 17px; height: 17px; color: var(--accent); flex-shrink: 0; }
 .ns-brand b { font-family: var(--serif); font-weight: 500; font-size: 13.5px;
               letter-spacing: .06em; }
 /* App 端品牌位常驻当前笔记名（App 没地址栏，看不见笔记名）。
@@ -262,12 +283,17 @@ header.ns-top {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ns-top .sp { flex: 1; }
+/* 🔴 老项目 index.html:104：flex + align/justify center（不是 grid/place-items），
+   transition 简写 `color .2s,background .2s`（不是 background-color .2s ease）。
+   grid 居中与 flex 居中在 17px 的 svg 上有一像素差，肉眼在 PC 并排时能看出来。 */
 .ns-top button.ns-ic {
   flex: none;
   width: 31px; height: 31px; border-radius: 8px;
-  display: grid; place-items: center; color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted); background: none; border: 0;
+  cursor: pointer;
   touch-action: manipulation; -webkit-tap-highlight-color: transparent;
-  transition: color .2s ease, background-color .2s ease;
+  transition: color .2s, background .2s;
 }
 .ns-top button.ns-ic svg { width: 17px; height: 17px; pointer-events: none; }
 .ns-top button.ns-ic:hover { color: var(--fg); background: var(--hover); }
@@ -529,10 +555,19 @@ footer.ns-foot #menuBtn svg { width: 19px; height: 19px; display: block; }
 footer.ns-foot #menuBtn:active { opacity: .6; }
 footer.ns-foot #menuBtn:hover { background: var(--hover); }
 footer.ns-foot .dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--line);
-  margin-left: 42px; flex: none; transition: background-color .3s ease;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--dot-idle);
+  /* 🔴🔴 老项目 index.html:498 只有 `flex-shrink:0`，**没有 margin-left**。
+     此前这里写了 `margin-left:42px` —— 一个没有任何出处的硬编码偏移，
+     把「绿点 + 文字」这一组整体往右推，于是"已同步"看着就不居中了（用户报障第 4 条）。
+     居中由footer 的 justify-content:center + gap:7px 负责，元素自己不许再偏移。 */
+  flex-shrink: 0;
+  /* 老项目 index.html:498 `transition:background .3s`（简写、非 ease）——照抄不改。 */
+  transition: background .3s;
 }
-footer.ns-foot .dot.on { background: var(--accent); }
+/* 🔴🔴 老项目 index.html:499 `footer .dot.on{background:#2FA866}`。
+   此前接的是 var(--accent)（金色 #8F7126），于是"已同步"显示成**黄点** —— 用户报障第 4 条。
+   老项目 .dot 无夜间覆写（两档都是硬编码单值），故夜间同为这枚绿。 */
+footer.ns-foot .dot.on { background: var(--dot-on); }
 footer.ns-foot .dot.off { background: var(--danger); }
 #refreshBtn {
   position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
@@ -611,7 +646,7 @@ footer.ns-foot .dot.off { background: var(--danger); }
   content: ''; width: 5px; height: 5px; border-radius: 50%;
   background: var(--accent); margin-right: 8px; flex: none;
 }
-.link-hint { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin-top: 4px; }
+.link-hint { margin: 2px 6px 0; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .empty { padding: 26px 0; text-align: center; font-size: 13px; color: var(--muted); }
 /* 列表行：与主菜单同族的胶囊行（老项目 .fav-row index.html:456）。
    🔴 三列各自定宽：图标列 / 名字列 / 右箭头列 —— 与主菜单的"112px 标签列"是同一种
@@ -715,12 +750,29 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
 #timeChip .ns-chip-cta { align-self: stretch; display: flex; align-items: center;
   justify-content: center; min-height: 42px; padding: 0; border-radius: 11px;
   font-size: 14.5px; font-weight: 600; letter-spacing: .02em;
-  color: var(--bg); background: var(--fg); }
+  color: var(--bg); -webkit-text-fill-color: var(--bg); background: var(--fg); }
 #timeChip .ns-chip-cta:active { opacity: .82; }
-/* 已添加的两行确认卡：不是按钮，不吃通栏反色（老项目 index.html:229-230） */
-#timeChip .ns-chip-done { background: none; color: var(--accent); font-weight: 600;
-  justify-content: flex-start; }
-#timeChip .ns-chip-done:active { opacity: 1; }
+/* 已添加的两行确认卡：不是按钮，不吃通栏反色（老项目 index.html:229-230）
+   🔴 老项目 `.chip-ok1` 是 flex + space-between（左右分置），不是通栏居中；
+      `.chip-ok2` 的色是 muted。这里照抄老项目的「行左标题 + 行右事项」布局。 */
+/* 🔴🔴 已添加态两行确认卡（老项目 index.html:228-230 + 6486 buildChipDeleteBtn）。
+   此前新项目是**三行 + 无删除钮 + ok1 吃 var(--accent) 金色**：
+     - ok1 必须是 flex + space-between（左「✅ 提醒已添加」右「删除」钮），
+       色是 var(--fg)（**不是** accent）—— 金色会把"状态"读成"可点"。
+     - ok2 是时间＋事项（色 muted），不是相对日。
+     - chip-del 是 span 伪按钮：描边胶囊 12px，不是实心块。
+   这三样都落在用户报的第 8 条「弹窗标题、按钮大小、字体大小和颜色不一样」上。 */
+#timeChip.feedback { gap: 5px; cursor: default; }
+#timeChip .ns-chip-ok1 { display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; font-size: 14.5px; font-weight: 600; line-height: 1.4; color: var(--fg); }
+#timeChip .ns-chip-ok2 { font-size: 13px; line-height: 1.5; margin-top: 0; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#timeChip .ns-chip-del { flex: none; padding: 2px 10px; font-size: 12px; font-weight: 400;
+  color: var(--fg); border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+#timeChip .ns-chip-del:hover { border-color: var(--muted); }
+#timeChip .ns-chip-del:active { opacity: .7; }
 
 /* ---- 上传状态条 #uploadNote：老项目 showUploadStatus 同款 ----
    🔴🔴 位置与配色整体退回老项目（index.html:598 `.upload-status`）：
@@ -873,7 +925,11 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .ns-rem-off:hover { border-color: var(--muted); }
 .ns-rem-off:active { opacity: .7; }
-.ns-rem-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--muted); }
+/* 🔴 老项目 index.html:281 `#remBoxList:empty{display:none}` —— 空列表**整个隐藏**。
+   漏了它：无提醒时那条 1px 上边框 +14px 上内边距仍在，
+   于是"设置行"下方凭空多一道横线与一段空白，弹窗凭空高一截。
+   用户报的"界面显示和之前不一样"里就有这一条。 */
+.ns-rem-list:empty { display: none; }
 
 /* ══════════════════════════════════════════════════════════════════
    彩蛋层：图鉴 / 游戏外壳 / 粒子 / 徽章
@@ -1097,6 +1153,30 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
 #qrLarge canvas { width: 88vmin; height: 88vmin; max-width: 92vw; max-height: 92vh;
   display: block; image-rendering: pixelated; }
 
+/* ── 扫码换机（出码/收码浮层）────────────────────────────────────
+   🔴 复用 .mask/.box/.qr-box/.qr-title 这些既有承重类，新增元素零自定义配色。
+   理由与老项目 v10.1.4 的注释同款：动态板（.night 覆盖）用 !important 压死裸 color，
+   新造一个色值会出现"日间能看、夜间隐身"。所以这里只加**几何**不加**颜色**。 */
+#migrateQrHolder { display: flex; align-items: center; justify-content: center;
+  min-height: 236px; margin: 0 0 12px; }
+#migrateQr { border-radius: 12px; border: 1px solid var(--line); background: var(--qr-paper);
+  max-width: 100%; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; }
+#migrateCodeIn { width: 100%; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  font-size: 12px; line-height: 1.6; resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+#migrateCodeIn:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+
+/* 换机码的全屏放大层：几何与 #qrLarge 逐字同款（老项目「点码放大」是同一交互），
+   独立 id 是因为两层的 show/hide 生命周期不同（出码层与收码层可能先后打开）。 */
+#migrateLarge { position: fixed; inset: 0; z-index: 300; background: var(--qr-paper); display: none;
+  align-items: center; justify-content: center; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+#migrateLarge.show { display: flex; }
+#migrateLarge canvas { width: 88vmin; height: 88vmin; max-width: 92vw; max-height: 92vh;
+  display: block; image-rendering: pixelated; }
+
 /* ── 扫一扫（取景浮层）──────────────────────────────────────────
    🔴 取景面积 56vh/420px（老项目 v10.1.4）：密集码要对得更远才装得下，
    窗口一小就变成「太远解不出、太近被裁掉」两头堵。 */
@@ -1190,3 +1270,37 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
 .upd-foot > button.primary { color: var(--bg); background: var(--fg); border-color: var(--fg); }
 .upd-foot > button:disabled { opacity: .4; cursor: not-allowed; }
 
+
+/* ================= 彩蛋词表确认浮层 =================
+   老项目 index.html:10467-10476（#nsAsk）+ :11007（挂 .ns-ask-m）。
+   🔴🔴 值逐条照抄，只把 id 换成本项目命名（#eggAsk），并把 rgba 投影提成
+   var(--shadow-ask)（颜色字面量只允许在 ui/theme.ts，见 S4-T7 机械扫描闸）。
+   投影值与 --shadow-upload 同尺寸不同透明度，是老项目两个不同的值，不要合并。 */
+#eggAsk {
+  position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
+  /* 🔴 z85：必须**低于图鉴 z90**（老项目「图鉴最高」是钉住的口径），
+     高于游戏外壳 z80（从编辑器里弹时不该被游戏盖住）。 */
+  z-index: 85;
+  display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+  border: 1px solid var(--line); border-radius: 14px;
+  background: var(--box-bg); box-shadow: var(--shadow-ask);
+  font: 400 13.5px/1 -apple-system, "PingFang SC", sans-serif; color: var(--fg);
+}
+#eggAsk button { font: 400 13px/1 -apple-system, "PingFang SC", sans-serif;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: none; color: var(--muted); cursor: pointer; }
+#eggAsk .ns-go { border-color: var(--accent); color: var(--accent);
+  background: var(--accent-soft); font-weight: 600; }
+/* 金胶囊 pill 变体（老项目 v9.3.6 A：PC/移动统一）
+   圆角 999px 是老项目「移动端改单行胶囊」那条结论，桌面端同款。 */
+#eggAsk.ns-ask-m { gap: 10px; padding: 9px 10px 9px 16px; border-radius: 999px;
+  bottom: calc(76px + env(safe-area-inset-bottom, 0px)); font-size: 13.5px;
+  white-space: nowrap; }
+#eggAsk.ns-ask-m .ns-w { font-family: var(--serif); color: var(--accent);
+  font-weight: 600; letter-spacing: .02em; }
+#eggAsk.ns-ask-m .ns-go { border: 0; background: var(--accent); color: var(--box-bg);
+  border-radius: 999px; padding: 9px 15px; font-weight: 600; }
+#eggAsk.ns-ask-m .ns-no { width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--line); border-radius: 50%; background: none;
+  color: var(--muted); font-size: 15px; line-height: 1;
+  display: flex; align-items: center; justify-content: center; }

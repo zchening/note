@@ -271,6 +271,7 @@ test('VIS-06 🔴 底栏：触控区 ≥44px / 状态点中性灰 / 字距 .14em
         dotBg: getComputedStyle(dot).backgroundColor,
         lineToken: toRgb(root.getPropertyValue('--line')),
         accentToken: toRgb(root.getPropertyValue('--accent')),
+        dotIdleToken: toRgb(root.getPropertyValue('--dot-idle')),
       };
     });
     assert.ok(m, '底栏三件套应齐全');
@@ -278,15 +279,31 @@ test('VIS-06 🔴 底栏：触控区 ≥44px / 状态点中性灰 / 字距 .14em
       m.btnH >= 44 && m.btnW >= 44,
       `菜单键触控区应≥44×44px（手指够得着），实际 ${m.btnW}×${m.btnH}`,
     );
+    // 🔴🔴 本条曾断言状态点吃 `--line`，现已按老项目翻案。
+    //   翻案依据：老项目 index.html:498 `footer .dot{...background:#C9C7BE}` ——
+    //   是**硬编码单值**，不是 var(--line)（--line 是 #ECEAE2，比它浅得多，
+    //   点在暖白底 #FBFBF8 上几乎看不见 —— 这正是用户报「底栏状态点看不见/颜色不对」的真因）。
+    //   同理 `.dot.on` 是 #2FA866 绿，不是 var(--accent) 金 —— 用户报的第 4 条。
+    //   两个值现已落成 --dot-idle / --dot-on 令牌（夜间与日间同值，老项目无夜间分支）。
     assert.equal(
       m.dotBg,
-      m.lineToken,
-      `状态点应吃中性灰令牌 --line（${m.lineToken}），实际 ${m.dotBg} —— 改成金色会与 accent 语义打架`,
+      m.dotIdleToken,
+      `状态点应吃 --dot-idle（老项目 #C9C7BE），实际 ${m.dotBg} —— 用 --line(#ECEAE2) 太浅、点在暖白底上几乎看不见`,
     );
     assert.notEqual(
       m.dotBg,
       m.accentToken,
       `状态点不应是金色 accent（${m.accentToken}）`,
+    );
+    // 🔴 老项目 index.html:498 只有 flex-shrink:0，**没有 margin-left**。
+    //   此前新项目写了 margin-left:42px 的硬编码偏移，把「点 + 文字」整体右推，
+    //   于是"已同步"看着不居中（用户报障第 4 条）。此处钉死偏移为 0。
+    const dotML = await page.evaluate(
+      () => getComputedStyle(document.querySelector('.ns-foot .dot')).marginLeft,
+    );
+    assert.ok(
+      ['0px', 'normal'].includes(dotML),
+      `状态点不许有左外边距（居中由 footer 的 justify-content:center 负责），实际 ${dotML}`,
     );
     assert.ok(
       parseFloat(m.footLetter) > 1.5,

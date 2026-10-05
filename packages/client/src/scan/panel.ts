@@ -25,6 +25,18 @@ export interface PairPanelDeps {
   origin: string;
   /** 关闭后归还焦点（老项目红线：关弹窗必须让光标回到编辑器）。 */
   onClosed: () => void;
+  /**
+   * 「锁定笔记」按钮的回调（可省）。
+   *
+   * 🔴 只在**本机没有口令**（passphrase 为 null）时才用到 ——
+   *   典型触发路径：本次是「记忆解锁」进来的（route() 里 unlockIfRemembered 成功），
+   *   而记忆解锁从不经过口令，所以 sessionPass 为空。
+   *   老项目在这条路径上仍能出码（raw key 常驻 localStorage），
+   *   新项目不能，且**不该**为了出码把密钥降级成可导出（见 pair-link.ts 文件头）。
+   *   于是给一条可执行的一步：锁定 → 解锁 → 出码。
+   *   不给按钮的话，用户只看到一句「无法生成」，等于走进死路。
+   */
+  onLockNow?: () => void;
 }
 
 export interface PairPanel {
@@ -89,6 +101,29 @@ function putHint(host: HTMLElement, text: string): void {
   host.appendChild(p);
 }
 
+/**
+ * 「没有口令」专用提示：一句原因 + 一个能走下去的动作。
+ *
+ * 🔴 与 putHint 的区别不是样式，而是**有没有出口**。
+ *   单纯显示一句「无法生成配对码」＝把用户放在死路上：
+ *   他既不知道为什么，也不知道下一步该做什么，只能反复点二维码按钮。
+ */
+function putNeedPassphrase(host: HTMLElement, onLockNow?: () => void): void {
+  host.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'ns-lock-warn';
+  p.textContent = COPY.pairNeedPassphrase;
+  host.appendChild(p);
+  if (!onLockNow) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ns-ghost-btn';
+  btn.id = 'pairLockNow';
+  btn.textContent = COPY.pairLockNow;
+  btn.addEventListener('click', onLockNow);
+  host.appendChild(btn);
+}
+
 function putReveal(host: HTMLElement, onReveal: () => void): void {
   host.innerHTML = '';
   const btn = document.createElement('button');
@@ -141,6 +176,16 @@ export function buildPairPanel(deps: PairPanelDeps): PairPanel {
   h.className = 'qr-title';
   h.textContent = COPY.pairTitle;
 
+  // 🔴 老项目 index.html:774 标题下方的引导段，此前新项目**整个漏了**：
+  //   <p>用另一台设备扫描二维码，<br>直接打开此笔记，无需输入口令。</p>
+  // 它排在 holder **之前**，是扫码配对弹层的第二段。
+  // 漏掉的后果不只是少一句话：弹层直接从标题跳到二维码，
+  // 而「无需输入口令」正是扫码配对与"扫码换机"的分界说明 ——
+  // 用户分不清这两件事，就会以为扫了还得手输口令（用户第 13 条抱怨的就是配对这一层说不清）。
+  // innerHTML 安全：内容是本项目常量，不含任何用户输入。
+  const lead = document.createElement('p');
+  lead.innerHTML = COPY.pairLead;
+
   const holder = document.createElement('div');
   holder.id = 'qrHolder';
 
@@ -152,7 +197,7 @@ export function buildPairPanel(deps: PairPanelDeps): PairPanel {
   closeBtn.id = 'qrClose';
   closeBtn.textContent = COPY.pairClose;
 
-  box.append(h, holder, warn, closeBtn);
+  box.append(h, lead, holder, warn, closeBtn);
   mask.appendChild(box);
   document.body.appendChild(mask);
 
@@ -160,7 +205,7 @@ export function buildPairPanel(deps: PairPanelDeps): PairPanel {
 
   const reveal = async (): Promise<void> => {
     if (link === null) {
-      putHint(holder, COPY.pairNeedUnlock);
+      putNeedPassphrase(holder, deps.onLockNow);
       return;
     }
     if (!(await loadQrcode())) {
@@ -211,7 +256,10 @@ export function buildPairPanel(deps: PairPanelDeps): PairPanel {
     if (e.target === mask) teardown();
   });
 
-  if (link === null) putHint(holder, COPY.pairNeedUnlock);
+  // 🔴🔴 拿不到口令（本次是「记忆解锁」进来的）时，给的是**带按钮**的提示。
+  //   此前只 putHint 一句「解锁后才可使用二维码配对」，而此时用户明明在编辑器里，
+  //   看起来就是自相矛盾的死路（用户报障第 13 条）。
+  if (link === null) putNeedPassphrase(holder, deps.onLockNow);
   else void reveal();
 
   void acquireWakeLock();

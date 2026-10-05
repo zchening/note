@@ -97,6 +97,43 @@ export const COPY = {
     downloading: (p: number): string => `正在下载 ${p}%`,
   },
 
+  /* ── 扫码换机（弹层，不是独立页面；依据见 migrate/panel.ts 文件头）─────
+     两态文案：备份侧（make）与恢复侧（take）。
+     🔴🔴 本段曾整段自创措辞（「把当前这篇笔记生成一张换机码…」/「生成换机码」/「知道了」），
+       现按老项目 index.html:924-939 bakMask 逐字翻案。用户第 13/15 条报的就是这层。
+     🔴「口令不进码」这条安全设计**必须有可见文案兜底**：
+        用户在新设备上看到"你的口令"输入框才知道还要手输，
+        否则他会对着二维码反复扫，怀疑是功能坏了。 */
+  migrateTitle: '扫码换机',
+  // 🔴 老项目 index.html:926 原文（含 <b> 备份笔记 </b> 强调，panel.ts 按 innerHTML 分段注入）
+  migrateMakeLeadHtml:
+    '换机备份要用口令为专用的<b>备份笔记</b>派生密钥：<br>收藏夹里笔记的密钥都写进它，扫一扫整体带走。',
+  migrateMakeLead: '换机备份要用口令为专用的备份笔记派生密钥：收藏夹里笔记的密钥都写进它，扫一扫整体带走。',
+  // 🔴 老项目 index.html:929 原文是「生成备份码」（不是「生成换机码」——那三个字是新项目自造的）
+  migrateMakeGo: '生成备份码',
+  migrateTakeGo: '恢复',
+  migrateTakeLead: '粘贴旧设备上的换机码，再输入原来的口令。',
+  migrateCodePh: '粘贴换机码',
+  migratePassPh: '你的口令',
+  migrateCancel: '取消',
+  migrateWorking: '正在处理…',
+  /** 出码后提示：点码可放大（老项目 v10.1.7：放大改成手动后屏上必须补这条指引） */
+  migrateScanTip: '在新设备上打开首页，扫一扫对准这张码。口令不会进码，到那边手输即可。看不清就点一下码。',
+  migrateDoneMsg: '已恢复，可以继续编辑了',
+  // 🔴 老项目 index.html:937 是「关 闭」（**中间一个全角空格**），不是「知道了」
+  migrateDoneClose: '关 闭',
+  migrateNeedPass: '请输入口令',
+  migrateNeedCode: '请先粘贴换机码',
+  migrateRenderFail: '二维码生成失败，请重试',
+  /** 文档超出定长容量。老项目有同款"超限不静默截断"的纪律（BAK_MAX / capped）。 */
+  migrateTooLong: '这篇笔记太长，扫码换机装不下，请改用别的方式搬运',
+  migrateNotMigrate: '这不是换机码，请检查是否复制完整',
+  // 🔴 老项目 index.html:5759 备份/恢复的锁定态只有一句「请先解锁」。
+  //   「解锁后才可生成换机码」是本项目自造的第四种说法，用户第 13 条报的
+  //   「解锁后才可使用二维码配对」也是同一类毛病：老项目根本没有这些句子。
+  //   统一回老项目那一句。
+  migrateNeedUnlock: '请先解锁',
+
   /* 菜单：二级视图 */
   back: '返回',
   favEmpty: '暂无收藏',
@@ -106,6 +143,28 @@ export const COPY = {
   favFull: (n: number): string => `收藏最多 ${n} 篇，已把最旧的一篇挤出去`,
   histEmpty: '暂无历史版本',
   histSave: '新增历史版本',
+  /** 每一行右端的「恢复」按钮（老项目 index.html:8492 `rs.textContent = '恢复'` 逐字） */
+  histRestore: '恢复',
+  /** 历史列表上方的计数行：`{n}` 是版本数（老项目 index.html:8486「版本 · N 个」） */
+  histKicker: (n: number): string => `版本 · ${n} 个`,
+  /** 手动打的点（老项目 :8493 逐字：自动的不标注，只有手动带这个后缀） */
+  histManualMark: ' · 手动',
+  /** 恢复成功（老项目 :8527 逐字） */
+  histRestored: '已恢复所选版本',
+  /** 手动存一版成功（老项目 :8551 逐字） */
+  histSaved: '已保存当前版本',
+  /**
+   * 某一版取不到/解不开（老项目 markHistBad :8455-8462）。
+   * 🔴 不区分"没有这一版"与"解不开" —— 区分开等于给暴力破解一个 oracle
+   *   （ARCH 安全不变量，与解锁失败同一句文案）。
+   */
+  histBad: '该版本不可用',
+  /** 取某一版时网络异常（老项目 :8504/:8519 逐字） */
+  histNetFail: '网络异常，请重试',
+  /** 列表都取不到（老项目 loadHistList 整段 catch） */
+  histListFail: '历史版本读取失败，请检查网络后重试',
+  /** 没解锁时点历史（老项目 :8548 逐字） */
+  histNeedUnlock: '请先解锁',
   linkKicker: '链接打开方式',
   linkInApp: '应用内',
   linkBrowser: '系统浏览器',
@@ -135,6 +194,10 @@ export const COPY = {
   /* 提醒：时间 chip（光标落在时间串上浮出）。老项目 v7.8.0 起是三行小卡，不是单行胶囊 */
   remChipAdd: '添加提醒',
   remChipAdded: '✅ 提醒已添加',
+  /** 确认卡尾部「删除」伪按钮的文字（老项目 index.html:6488 `d.textContent = '删除'`） */
+  remChipDeleteLabel: '删除',
+  /** 同上按钮的 aria-label（老项目 index.html:6348 aria-label 逐字「删除这条提醒」） */
+  remChipDelete: '删除这条提醒',
   /** 时间 chip 关闭按钮的 aria */
   remChipClose: '关闭',
   /** chip 上时间行：`{time}　{item}` */
@@ -151,11 +214,15 @@ export const COPY = {
   remWheelHhAria: '小时',
   remWheelMmAria: '分钟',
   remIosTip: 'iOS 需先添加到主屏幕才能收到通知（仍可设置，下次打开会提示）',
-  remEmpty: '还没有设置提醒',
   /** 面板回写正文的格式：`{time}　{item}` —— 全角空格是分隔符，解析层靠它划「事项区」 */
   remInsertLine: (time: string, item: string): string => (item ? `${time}　${item}` : `${time}　`),
-  /** 已过时刻时的accent 提示（老项目只闪红框不弹文字，这里给一句可读的） */
-  remPastTip: '这个时间已经过去了，换一个吧',
+  /** 已过时刻的拦截提示。
+   *  🔴 老项目 index.html:7299 原文「已过去的时间不能设提醒」——
+   *    走的是**顶部提示条**（addReminder 的兜底闸门），不是面板里的一行文字。
+   *    面板内只闪红框（`bads.forEach(x => x.classList.add('bad'))` 后 900ms 移除，
+   *    index.html:7740）。此前新项目在面板里插了一行「这个时间已经过去了，换一个吧」，
+   *    那是老项目里不存在的文案，还把弹窗顶高一截。 */
+  remPastTip: '已过去的时间不能设提醒',
 
   /* 提醒：到期与权限 */
   remPermTitle: '开启提醒通知',
@@ -243,6 +310,9 @@ export const COPY = {
   /* 扫码配对（老项目原文，个别处按新架构改了措辞并注明） */
   /** 出码弹层标题 */
   pairTitle: '扫码配对',
+  /** 🔴 老项目 index.html:774 标题下方的引导段，此前新项目漏了整段。
+   *  含 <br>，用 innerHTML 注入（内容是本项目常量，不含用户输入）。 */
+  pairLead: '用另一台设备扫描二维码，<br>直接打开此笔记，无需输入口令。',
   /**
    * 出码弹层的风险提示。老项目原文是"二维码含解锁密钥"，逐字抄。
    * 🔴 措辞不再改：用户要的是与老项目一致的体验，而"含解锁密钥"这句话
@@ -251,8 +321,36 @@ export const COPY = {
    */
   pairWarn: '二维码含解锁密钥，等同你的口令：<br>仅限自有设备间扫码，勿截图外传。',
   pairClose: '关 闭',
-  /** 锁定态（尚未解锁 → 本机没有可用凭据） */
+  /** 锁定态提示。
+   *  🔴🔴 本条**曾被我误判为"新项目自造"**，已撤回。
+   *   它是老项目原文（index.html:3335 resetQrHolder）：
+   *     const hint = document.createElement('p');
+   *     hint.className = 'qr-lock-warn';
+   *     hint.textContent = '解锁后才可使用二维码配对';
+   *   第一次 grep 时只搜了 showUploadStatus 与字面量，漏掉了这条，
+   *   于是差点把用户第 13 条报的这句话当成"新项目凭空加的"删掉 ——
+   *   那正好删掉了用户**在老项目里见过的那句话**。
+   *   教训：判"某句文案是老项目原文还是自创"时，grep 范围必须覆盖
+   *   所有赋值途径（textContent / innerHTML / 模板串），只搜一种会误判。
+   *  配对侧锁定态仍应显示这句：老项目在这个状态下确实只给提示，不给码。 */
   pairNeedUnlock: '解锁后才可使用二维码配对',
+  /** 🔴 S9 新增：记忆解锁（unlockIfRemembered 成功）时本机没有口令时的可执行提示。
+   *
+   *  背景：新项目的 CryptoKey 是 extractable:false，raw 字节导不出，
+   *  所以配对码只能装**口令**（见 scan/pair-link.ts 文件头的权衡说明）。
+   *  而「记忆解锁」这条路径（route() 里 unlockIfRemembered 成功）**本来就没经过口令**，
+   *  于是 sessionPass 为空 → 出码函数拿不到载荷 → 只能显示上面那句「解锁后才可使用」。
+   *  用户看到的就是：明明已经在编辑正文了，点配对却说没解锁（用户报障第 13 条）。
+   *
+   *  为什么不照抄老项目：老项目把 raw key 明文存 localStorage（KEY_STORE），
+   *  所以"记忆解锁后出码"对它天然成立。照抄就得先把密钥降级成可导出，
+   *  等于亲手把「XSS 拿到密钥即可离线解开全部历史密文」这个缺口请回来。
+   *  省掉的是一次输入，赔进去的是全部历史数据 —— 不划算。
+   *  所以给的是可执行的一步（锁定 → 解锁 → 出码），而不是偷偷存口令。
+   */
+  pairNeedPassphrase: '本机未保留口令，无法生成配对码。请先锁定，再解锁一次即可生成。',
+  /** 上面那条提示里的行动按钮 */
+  pairLockNow: '锁定笔记',
   /**
    * 兜底失败文案。触发路径：IndexedDB 读不到 key-store（隐私模式/清过数据）
    *   或导出密钥被拒。**绝不能**退化成空按钮或静默无反应
@@ -313,28 +411,36 @@ export const COPY = {
 
   /* 导出长图（老项目原文；失败文案必须自带「图片未生成」） */
   /** 组件加载失败（自托管文件没部署 / 断网 / CSP） */
-  exportLoadFail: '图片导出组件未加载，请检查网络后重试',
+  exportLoadFail: '图片导出组件加载失败，请检查网络后重试',
   /** 渲染过程提示（常驻，被下一条覆盖） */
   exportDoing: '正在生成图片…',
-  /** 外链图片跨域导致的失败（SecurityError 要说人话，不能回显英文） */
-  exportFailCors: '导出失败：可能因外链图片跨域，请使用支持跨域的图床，图片未生成',
-  /** 其他渲染失败：`{msg}` 由异常 message 拼入 */
-  exportFailMsg: (msg: string): string => `导出失败：${msg}，图片未生成`,
-  /** 渲染完成但没有任何交付出口（理论上不可达，留着兜底） */
-  exportFailUnknown: '导出失败：渲染异常，图片未生成',
-  /** 成功提示，按实际生效的那一档给不同措辞 */
+  /** 外链图片跨域导致的失败（SecurityError 要说人话，不能回显英文）
+   *  🔴 老项目 index.html:2922 原文：「导出失败：可能因外链图片跨域，请使用支持CORS的图床」
+   *    —— **没有「，图片未生成」后缀**。此前新项目自己加的后缀是凭空多出来的字，
+   *    用户可见文案必须与老项目逐字一致。 */
+  exportFailCors: '导出失败：可能因外链图片跨域，请使用支持CORS的图床',
+  /** 其他渲染失败：`{msg}` 由异常 message 拼入（老项目 index.html:2922 同款，无后缀） */
+  exportFailMsg: (msg: string): string => `导出失败：${msg}`,
+  /** 渲染完成但没有任何交付出口（老项目 index.html:2923 原文「导出失败：渲染异常」） */
+  exportFailUnknown: '导出失败：渲染异常',
+  /** 成功提示，按实际生效的那一档给不同措辞
+   *  🔴🔴 逐字对照老项目（index.html:2915 / 2931 / 2937 / 2955）：
+   *    - 剪贴板两档（Promise 形态 + Blob 重试）都是**「图片已复制，可直接 Ctrl+V 粘贴」**
+   *      —— 用户报的第 11 条就是这里：新项目把默认档也写成了「可直接粘贴」，
+   *      少了「Ctrl+V」。这是最常走的一档（PC 浏览器点复制就落这里）。
+   *    - 只有 App 原生桥那档是「图片已复制，可直接粘贴」（触屏没有 Ctrl+V 这个动作）。
+   *    - 分享档「已通过系统分享发出」，预览档老项目**根本不给提示条**
+   *      （showImagePreview 第一行就是 hideUploadStatus，见 index.html:2967）。 */
   exportOkMsg: (kind: string): string =>
     kind === 'native'
       ? '图片已复制，可直接粘贴'
       : kind === 'share'
         ? '已通过系统分享发出'
-        : kind === 'preview'
-          ? '图片已生成，可长按保存或下载'
-          : '图片已复制，可直接粘贴',
-  /** 成功驻留毫秒 */
+        : '图片已复制，可直接 Ctrl+V 粘贴',
+  /** 成功驻留毫秒（老项目剪贴板档 3000 / 原生桥与分享档 2400，这里取剪贴板档的 3000） */
   exportOkMs: 3000,
-  /** 失败驻留毫秒（比成功长，与上传同口径） */
-  exportFailMs: 4500,
+  /** 失败驻留毫秒（老项目三处失败分支全是 3000，此前新项目自己抬到 4500） */
+  exportFailMs: 3000,
   /* 全屏预览兜底 */
   exportPreviewTitle: '图片已生成',
   exportPreviewAlt: '笔记图片',

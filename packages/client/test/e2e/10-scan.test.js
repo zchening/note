@@ -286,8 +286,55 @@ test('SCAN-E 扫码配对全链路', async (t) => {
       await new Promise((r) => setTimeout(r, 400));
       await page.click('#scanBtn');
       await new Promise((r) => setTimeout(r, 800));
-      const count = await page.evaluate(() => document.querySelectorAll('#scanMask').length);
-      assert.ok(count <= 1, '叠出了多层取景框：' + count);
+      // 🔴🔴 本条曾写 `count <= 1`，而**0 也满足 <= 1** ——
+      //   于是「浮层建好但从未 append 到 document.body」这条真 bug 长期全绿：
+      //   用户点「扫一扫」→ 浏览器弹摄像头权限 → 允许 → 屏幕上什么都不出，
+      //   控制台零报错（buildScanLayer 里每个环节都"成功"了）。
+      //   教训：判「浮层可用」必须钉住"它进过 document.body"，而不是"此刻在不在"。
+      //
+      // 🔴 headless 没有摄像头 ⇒ getUserMedia 必失败 ⇒ 层会走 catch 分支被 cleanup 立即拆掉。
+      //   所以**不能**断言"此刻 DOM 里还有 #scanMask"（老项目 v10.1.4 的降级路径就是这样）。
+      //   正确的判据是「挂载发生过」+「相机不可用时给出了可见原因」。
+      //   怎么证明挂载发生过：在点击**之前**给 document.body 打一个 MutationObserver 哨兵，
+      //   记录 #scanMask 曾经被插入 —— 这比断言"此刻还在"更贴合真实用户能感知的东西。
+      const seen = await page.evaluate(() => new Promise((resolve) => {
+        const hits = [];
+        const mo = new MutationObserver((muts) => {
+          for (const m of muts) {
+            for (const n of m.addedNodes) {
+              if (n && n.id === 'scanMask') hits.push('added');
+            }
+            for (const n of m.removedNodes) {
+              if (n && n.id === 'scanMask') hits.push('removed');
+            }
+          }
+        });
+        mo.observe(document.body, { childList: true, subtree: true });
+        // 点三下（含重入锁验证）
+        const btn = document.getElementById('scanBtn');
+        for (let i = 0; i < 3; i += 1) btn.click();
+        setTimeout(() => {
+          mo.disconnect();
+          const added = hits.filter((x) => x === 'added').length;
+          const removed = hits.filter((x) => x === 'removed').length;
+          resolve({
+            added,
+            removed,
+            nowInBody: !!document.querySelector('#scanMask'),
+            foot: document.querySelector('#syncText')?.textContent ?? '',
+          });
+        }, 1400);
+      }));
+      // 🔴 至少挂载过一次，且**最多一次**（重入锁不许叠层）
+      assert.ok(seen.added >= 1, '取景层从未挂到 document.body（用户点扫一扫屏幕上什么都没有）：' + JSON.stringify(seen));
+      assert.ok(seen.added <= 1, `叠出了多层取景框（挂载 ${seen.added} 次）：` + JSON.stringify(seen));
+      // headless 无摄像头：层被拆掉是**正确降级**，但必须留下可见原因（老项目 v10.1.4）
+      if (!seen.nowInBody) {
+        assert.ok(
+          /摄像头|相机|扫码/.test(seen.foot),
+          '相机不可用时层被拆了却没给可见原因，用户只看到"点了没反应"：' + JSON.stringify(seen),
+        );
+      }
       // 收尾：关掉可能还开着的层
       await page.evaluate(() => document.querySelector('#scanCancel')?.click());
       await new Promise((r) => setTimeout(r, 300));

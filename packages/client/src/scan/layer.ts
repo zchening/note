@@ -70,6 +70,18 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
   //   症状是"点了没反应"，实际浮层已经建好了（老项目 v7.7.0 同款）。
   overlay.style.zIndex = '40';
 
+  // 🔴🔴🔴 必须挂到 document.body —— 本条曾整段缺失，于是「扫一扫」对用户
+  //   **完全不可用**：浮层建好了、摄像头也起了（getUserMedia 会弹权限框），
+  //   但 DOM 里没有它，于是屏幕上什么也不出，只剩一个黑着的取景框状态。
+  //   症状极具欺骗性：点「扫一扫」→ 浏览器问你要摄像头权限 → 允许 → 然后没反应，
+  //   用户判定"功能坏了"，而控制台零报错。
+  //
+  //   为什么难自查：`cleanup()` 里写好了 `if (overlay.parentNode) removeChild(overlay)`，
+  //   那句"摘除逻辑已就位"读起来像是挂载也做完了。**死代码与完成只差一次 appendChild。**
+  //   而且 e2e 10-scan 之所以长期全绿：它直接 `buildScanLayer` 拿返回的 `el` 去断言，
+  //   从没验过它是不是真的在 document.body 里。
+  document.body.appendChild(overlay);
+
   const box = document.createElement('div');
   box.className = 'box';
   // 🔴 max-height + overflow：横屏矮视口下按钮不被顶出屏（老项目 v10.1.4）。

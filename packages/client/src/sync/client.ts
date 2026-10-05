@@ -52,6 +52,21 @@ export interface SyncDeps {
   onError: (msg: string) => void;
   /** 网络层是否可达（测试注入用；默认读 navigator.onLine） */
   isOnline?: () => boolean;
+  /**
+   * 🔴 推送成功后，把**刚被覆盖的那一版**交给调用方存档（历史版本环）。
+   *
+   * 🔴🔴 传的是 `base`（上次同步成功时的文档），不是本次推的 `doc` ——
+   *   老项目 index.html:7162 传的是 `prevHtml2`（保存前的正文），同理。
+   *   传成本次 doc 的症状很隐蔽：历史列表里全是"当前这一版"，
+   *   而用户真正想找回的恰恰是**刚刚被改掉的那段**。
+   *
+   * 🔴 调用时机是**推送成功之后**，不是之前（老项目同款：`if (body)` 在 200 之后）。
+   *   放前面的话，网络失败也会把这一版记进去，于是"从没存上过的内容"出现在历史里。
+   *
+   * 🔴 fire-and-forget：本仓不 await 它。存档是保险不是主链路，
+   *   存档失败**绝不能**让这次推送变成失败。
+   */
+  onArchive?: (prev: Doc) => void;
 }
 
 /** 去抖：停止输入多久后推送 */
@@ -306,6 +321,9 @@ export class SyncClient {
     }
     this.send('push');
     const doc = normalize(this.d.getDoc());
+    // 🔴 记住本轮推之前的 base，成功后作为"刚被覆盖的那一版"交给 onArchive。
+    //   在 push() 开头取（而不是成功后再读 this.base）——成功后它已经被覆盖成 doc 了。
+    const prev = this.base;
     let payload: NotePayload;
     // 🔴 env 必须提到 try 外面：推送成功后要拿它写本地缓存。
     //   声明在 try 块内的话，写缓存那行拿不到，编译期不报错（同一函数作用域内），
@@ -343,6 +361,19 @@ export class SyncClient {
     // 🔴 只有确认成功才推进 base —— 失败时 base 保持旧值，
     //   下次合并的"祖先"才不会错位。
     this.base = doc;
+    // 🔴 存档"刚被覆盖的那一版"（历史版本环）。
+    //   两个必须挡掉的：
+    //     ① 首推：prev 是空文档，存进去等于给用户一条"（空）"历史版本；
+    //     ② 内容没真变：与老项目 :7162 的 `prevHtml2 !== html` 同款判据。
+    //   两者不清掉的话，用户会看到一串内容完全相同的版本，
+    //   且 10 条的环会被无意义的重复占满（真正值得找回的那几版被挤掉）。
+    if (this.d.onArchive && !isDocEmpty(prev) && canonicalize(prev) !== canonicalize(doc)) {
+      try {
+        this.d.onArchive(prev);
+      } catch {
+        /* 存档是保险：抛了也不许影响本次同步的结论 */
+      }
+    }
     // 🔴🔴 推送成功后**必须**更新本地缓存。
     //   漏了这一步的症状：云端是新内容，本机缓存还是旧的 —— 用户一断网就看到旧正文，
     //   而且**没有任何报错**。这正是"静默降级"最典型的形态：

@@ -167,6 +167,59 @@ function metaPath(id) {
   return path.join(META_DIR, `${id}.json`);
 }
 
+/* ------------------------------------------------------------------ *
+ * 历史版本快照环
+ *
+ * 🔴 移植依据：老项目 server.js:350-365（存储）+ :458-547（三个端点）逐条比对，
+ *   **不靠推理定案**。
+ *
+ * 形态照老项目：独立文件 `<id>.hist.json`、FIFO 上限 10 条、列表只回元数据
+ * （ts/v/manual/size，**不下发密文**，省流量）、相同密文不重复入栈、
+ * 手动打点不参与挤出（先挤自动）、同毫秒去重。
+ *
+ * 🔴🔴 与老项目的三处**有意分歧** —— 都是新架构不同导致的，不是图省事：
+ *
+ *  1. **"没有这一版"返回 200 + 空体，不是 404**（老项目此处给 404）。
+ *     本项目铁律：4xx 会让客户端当成网络错误去重试，而"这一版不存在"是正常状态。
+ *     取单版时给 200 + 空体，客户端据此判"没有这一版"，与 GET /api/note/:id 同款。
+ *
+ *  2. **本段必须排在笔记读分支之前**。ID_RE 不含斜杠，
+ *     `/api/note/abc/history` 落进主分支会被切成 `id="abc/history"` → 400。
+ *     （老项目 :458 的注释记的是同一个坑。）且匹配用正则直判而不是
+ *     `p.includes('/history')` —— 后者会把**笔记名恰好叫 history** 的那篇
+ *     （`/api/note/history`）误吞掉，而笔记名是用户自己起的。
+ *
+ *  3. **快照存整个信封，不只 `{ct, iv}`**。新项目 envelope 自描述
+ *     （ARCH.md §4.2.3），decryptString 会校验 v / alg / kdf.name / kdf.iter ——
+ *     只存 ct/iv 解不开，且报错长得像"数据坏了"。返回形状仍是老项目
+ *     `{ts, ct, iv}` 的超集（多带 v/alg/kdf），客户端挑信封字段喂 decryptString。
+ *
+ *  不移植老项目的"孤儿快照 403"：那条是 writeKey 灰度期的配套，而新项目解锁时
+ *  **不建笔记档**（首推才落盘）—— 加上它会让"新笔记手动打第一个点"直接失败。
+ *  任意 id 造文件的攻击面与既有的 `POST /api/note/:id` 完全一致，本端点不扩大它。
+ * ------------------------------------------------------------------ */
+
+/** 快照环上限。与老项目 HISTORY_MAX 同值，不擅自放宽。 */
+const HISTORY_MAX = 10;
+
+function histPath(id) {
+  return path.join(NOTES_DIR, `${id}.hist.json`);
+}
+
+async function readHist(id) {
+  try {
+    const h = JSON.parse(await fsp.readFile(histPath(id), 'utf8'));
+    if (h && Array.isArray(h.list)) return h;
+  } catch {
+    // 没有 / 半截坏文件：按空环处理（与笔记读同款，不抛、不 500）
+  }
+  return { list: [] };
+}
+
+async function writeHist(id, h) {
+  await writeAtomic(histPath(id), JSON.stringify(h));
+}
+
 async function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`;
   await fsp.writeFile(tmp, text, 'utf8');
@@ -310,6 +363,115 @@ async function route(req, res) {
       return sendJson(res, st.locked ? 429 : 200, st, st.locked ? { 'Retry-After': String(st.retryAfter) } : {});
     }
     return sendJson(res, 405, { error: 'method not allowed' });
+  }
+
+  /* ---------- 历史版本 ----------
+   * 🔴🔴 必须排在下面笔记读分支**之前**：ID_RE 不含斜杠，
+   *   `/api/note/abc/history` 会被笔记读分支切成 `id="abc/history"` → 400。
+   *   （老项目 server.js:458 记的是同一个坑。）
+   *   匹配用正则直判而不是 `p.includes('/history')`：后者会把笔记名恰好叫
+   *   `history` 的那篇（`/api/note/history`）误吞进本段。
+   *
+   * GET  /api/note/:id/history      → 元数据列表（ts/v/manual/size，不含密文）
+   * GET  /api/note/:id/history/:ts  → 那一版的信封（ct/iv/kdf/alg）
+   * PUT  /api/note/:id/history      → 追加一版快照 {…信封, manual}
+   */
+  {
+    const hm = /^\/api\/note\/([^/]+)\/history(?:\/(\d+))?$/.exec(p);
+    if (hm) {
+      const id = hm[1];
+      if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
+      const key = `${clientIp(req)}:${id}`;
+      const st = failmap.checkLimit(key);
+      if (st.locked) {
+        return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
+      }
+
+      if (method === 'GET') {
+        const hist = await readHist(id);
+        if (hm[2] !== undefined) {
+          const item = hist.list.find((x) => String(x.ts) === hm[2]);
+          // 🔴 没有这一版 = 200 + 空体（本项目铁律，与 GET /api/note/:id 同款）。
+          //   给 404 会让客户端把它当成网络错误去重试，而"这一版不存在"是正常状态。
+          if (!item) return send(res, 200, '');
+          return sendJson(res, 200, {
+            ts: item.ts,
+            v: item.v,
+            alg: item.alg,
+            kdf: item.kdf,
+            iv: item.iv,
+            ct: item.ct,
+          });
+        }
+        return sendJson(res, 200, {
+          list: hist.list.map((x) => ({ ts: x.ts, v: x.v, manual: !!x.manual, size: (x.ct || '').length })),
+        });
+      }
+
+      if (method === 'PUT') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (e) {
+          if (e && e.code === 'BODY_TOO_LARGE') return sendJson(res, 413, { error: 'too large' });
+          return sendJson(res, 400, { error: 'bad body' });
+        }
+        let obj;
+        try {
+          obj = JSON.parse(body.toString('utf8') || '{}');
+        } catch {
+          return sendJson(res, 400, { error: 'bad json' });
+        }
+        // 🔴 必填校验按**自描述 envelope** 的实际需要列，不按老项目的 {ct, iv} 两项：
+        //   少 kdf 就解不开（且报错长得像"数据坏了"），少 alg/v 同理。
+        if (
+          !obj ||
+          typeof obj.ct !== 'string' || !obj.ct ||
+          typeof obj.iv !== 'string' || !obj.iv ||
+          !obj.kdf || typeof obj.kdf.name !== 'string' || !obj.kdf.name ||
+          typeof obj.kdf.salt !== 'string' || !obj.kdf.salt ||
+          !Number.isInteger(obj.kdf.iter)
+        ) {
+          return sendJson(res, 400, { error: 'missing fields' });
+        }
+        const hist = await readHist(id);
+        let ts = Date.now();
+        // 同毫秒去重：否则两次快照 ts 相同，GET /:ts 永远只命中第一条
+        while (hist.list.some((x) => x.ts === ts)) ts++;
+        const item = {
+          ts,
+          v: Number.isInteger(obj.v) ? obj.v : 1,
+          alg: typeof obj.alg === 'string' ? obj.alg : 'AES-256-GCM',
+          kdf: { name: obj.kdf.name, iter: obj.kdf.iter, salt: obj.kdf.salt },
+          iv: obj.iv,
+          ct: obj.ct,
+          manual: !!obj.manual,
+        };
+        const last = hist.list[hist.list.length - 1];
+        // 相同密文不重复入栈（否则连点两次「新增历史版本」会得到两条一模一样的）
+        if (!last || last.ct !== item.ct || last.iv !== item.iv) {
+          hist.list.push(item);
+          while (hist.list.length > HISTORY_MAX) {
+            // 手动打点优先保留：先挤自动的，全是手动才挤最早那条
+            let idx = hist.list.findIndex((x) => !x.manual);
+            if (idx === -1) idx = 0;
+            hist.list.splice(idx, 1);
+          }
+          try {
+            await writeHist(id, hist);
+          } catch (e) {
+            return sendJson(res, 500, { error: 'write failed', detail: String(e && e.message) });
+          }
+          failmap.recordOk(key);
+          // 🔴 写后广播与 POST 笔记同款，让另一台设备的快照环也跟着更新。
+          //   last-write-wins：服务端不合并、不比版本号，后写覆盖先写。
+          sseBroadcast(id, { t: 'hist', id, v: Date.now() });
+        }
+        return sendJson(res, 200, { ok: true, ts: item.ts, count: hist.list.length });
+      }
+
+      return sendJson(res, 405, { error: 'method not allowed' });
+    }
   }
 
   /* ---------- 笔记读 ---------- */

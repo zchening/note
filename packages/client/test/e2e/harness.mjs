@@ -59,7 +59,11 @@ export function makeApiStore() {
   const notes = new Map();
   /** 记录收到的 POST，供用例断言"确实推上去了" */
   const posts = [];
-  return { notes, posts };
+  /** @type {Map<string, Map<string, {body:string, manual:boolean}>>} 笔记 id → (ts → 快照) */
+  // 🔴 S9 接入真历史链路后新增。漏了它，历史相关用例的表现是
+  //   "点了新增历史版本但列表一直空" —— 看起来像应用 bug，实际是桩没这条路由。
+  const history = new Map();
+  return { notes, posts, history };
 }
 
 /**
@@ -76,6 +80,8 @@ export function makeApiStore() {
 export function handleApi(req, res, store) {
   {
     const p = new URL(req.url, 'http://x').pathname;
+    // 快照序号（服务端生成 ts 的替身：单调递增整数，够用且不撞）
+    let histSeq = 1000;
     const send = (code, body, type = 'application/json; charset=utf-8') => {
       res.writeHead(code, { 'content-type': type });
       res.end(body);
@@ -86,7 +92,71 @@ export function handleApi(req, res, store) {
       return;
     }
     if (p.startsWith('/api/note/')) {
-      const id = decodeURIComponent(p.slice('/api/note/'.length));
+      const rest = p.slice('/api/note/'.length);
+      // 🔴🔴 历史版本子路径 `/api/note/<id>/history[/<ts>]` **必须先于笔记本体判定**。
+      //   S9 接入真历史链路后，这个前缀会落到下面的笔记分支里，
+      //   于是 id 变成 "vvw05/history"，POST 被当成"存一篇叫 vvw05/history 的笔记"，
+      //   GET 返回 200 + 空体 —— 而客户端把空体读成"没有历史版本"，
+      //   点「新增历史版本」后列表永远空着，测试只报一句
+      //   `waiting for locator('.list-row[data-at]') to be visible` 超时。
+      //   这类"测试桩没跟上新能力"的失败看起来像应用 bug，实际是桩缺路由。
+      const hi = rest.indexOf('/history');
+      if (hi > 0) {
+        const id = decodeURIComponent(rest.slice(0, hi));
+        const tail = rest.slice(hi + '/history'.length); // '' | '/<ts>'
+        const hist = store.history.get(id) ?? new Map();
+        store.history.set(id, hist);
+        if (req.method === 'GET' && tail === '') {
+          // 🔴🔴 响应形态必须是 `{list:[...]}`（服务端 server.js:405
+          //   `sendJson(res,200,{list: hist.list.map(...)})`），
+          //   **不是裸数组**。客户端 fetchHistoryList 读的是 `j.list`
+          //   （sync/history.ts:71 `Array.isArray(j.list) ? j.list : []`），
+          //   桩若返回裸数组，客户端会静默解析成`[]` ——
+          //   症状是「PUT 成功、GET 也返回了数据，但列表永远空」，
+          //   而网络面板里两条都是 200，看起来一切正常。
+          //   这就是本项目记过的「桩与服务端契约漂移」：桩不是测试的附属品，
+          //   它是**契约的第二份实现**，错了就把真 bug 伪装成应用 bug。
+          const items = [...hist.entries()]
+            .map(([ts, v]) => ({ ts: Number(ts), v: 1, manual: !!v.manual, size: v.body.length }))
+            .sort((a, b) => a.ts - b.ts); // 服务端按入栈顺序，旧的在前
+          send(200, JSON.stringify({ list: items }));
+          return;
+        }
+        if (req.method === 'GET' && tail.startsWith('/')) {
+          const ts = decodeURIComponent(tail.slice(1));
+          const v = hist.get(ts);
+          // 200 + 空体 = 这一版不存在（与服务端一致，客户端据此判"该版本不可用"）
+          send(200, v ? JSON.stringify(v) : '');
+          return;
+        }
+        // 🔴🔴 写入用 **PUT**（sync/history.ts pushHistory），不是 POST。
+        //   🔟 ts 由**服务端生成**并在响应里回 `{ts}`（客户端 body 不带 ts，
+        //   它从 `j.ts` 读回来）。桩若自己造 ts 或只认 POST，
+        //   客户端就拿不到合法 ts → 列表行渲染不出来 → 用例只报一句超时，
+        //   看起来像应用 bug。
+        if ((req.method === 'PUT' || req.method === 'POST') && tail === '') {
+          const chunks = [];
+          req.on('data', (c) => chunks.push(c));
+          req.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
+            let manual = false;
+            try {
+              manual = !!JSON.parse(body).manual;
+            } catch {
+              // 非法 JSON：回 400，与服务端一致（客户端据此报失败而不是静默成功）
+              send(400, JSON.stringify({ error: 'bad body' }));
+              return;
+            }
+            // 单调递增整数当 ts，与服务端"取当前毫秒"同量级，且保证不撞
+            histSeq += 1;
+            const ts = histSeq;
+            hist.set(String(ts), { body, manual });
+            send(200, JSON.stringify({ ok: true, ts }));
+          });
+          return;
+        }
+      }
+      const id = decodeURIComponent(rest);
       if (req.method === 'GET') {
         const v = store.notes.get(id);
         // 🔴 200 + 空体 = 没有这篇笔记。这与服务端一致，
@@ -227,7 +297,30 @@ export function installHarness(test, { dir, onReady, api }) {
  *   **测试路径必须等于用户路径。**
  */
 export async function openEditor(browser, base, noteName = 'e2e', pass = '测试口令') {
+  return openEditorAt(browser, base, noteName, pass, null);
+}
+
+/**
+ * 🔴🔴🔴 把页面时钟**钉死**在某个时刻的openEditor。
+ *
+ * **为什么必须有这个**：项目里已经吃过两次「测试依赖真实时钟」的亏，
+ *   而这类失败有个共同特征 —— **同一个断言在两个时刻得到两个结论**，
+ *   且它自己不知道自己依赖了时钟：
+ *     ① 老项目 `nsBadgeAt`（index.html:6574）：深夜 22:00–06:00 或节日**必然显示**徽章。
+ *        于是「徽章默认 display:none」这条断言白天恒绿、深夜恒红。
+ *     ② 主题跟随时间（07:00/19:00 切日夜）：跨 19:00 那条边界时颜色断言整片翻红。
+ *
+ * **为什么不用 `Date.now()` mock 源码**：那要去改产品代码里的时钟来源，
+ *   为了测试去动生产逻辑是本末倒置。这里用 Playwright 的 `page.clock`，
+ *   在**页面外**冻结时间，产品代码一行不动。
+ *
+ * @param {{iso: string}} opts.iso 固定时刻（带时区偏移，避免本机时区参与判定）
+ */
+export async function openEditorAt(browser, base, noteName, pass, opts) {
   const page = await withTimeout(browser.newPage(), 30_000, 'newPage');
+  if (opts && opts.iso) {
+    await page.clock.install({ time: new Date(opts.iso) });
+  }
   const errors = [];
   const consoleErrs = [];
   page.on('pageerror', (e) => errors.push(String(e.message)));

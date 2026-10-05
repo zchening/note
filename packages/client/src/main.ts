@@ -39,10 +39,18 @@ import { registerBehaviors } from './behaviors.ts';
 import { insertFoldAtCaret, registerCommands } from './commands.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc } from './serialize.ts';
-import { canonicalize, emptyDoc, normalize, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
+import { canonicalize, deriveKey, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
 import { SyncClient } from './sync/client.ts';
+import {
+  autoSnapshotThrottled,
+  fetchHistoryDoc,
+  fetchHistoryList,
+  fmtHistTime,
+  pushHistory,
+} from './sync/history.ts';
 import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
+import { writeCache } from './sync/local-cache.ts';
 import { buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { COPY } from './ui/copy.ts';
@@ -57,9 +65,19 @@ import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
 import { copyNoteToClipboard } from './export/copy.ts';
-import { buildPairPanel } from './scan/panel.ts';
+import { buildPairPanel, closePairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
 import { parsePairLink } from './scan/pair-link.ts';
+import {
+  buildMigrateCode,
+  fitsInMigrateCode,
+  isMigrateCode,
+  readMigrateEnvelope,
+  resealMigrateDoc,
+  restoreMigrateCode,
+  MIGRATE_PAYLOAD_CAP,
+} from './migrate/code.ts';
+import { buildMigratePanel, closeMigratePanel } from './migrate/panel.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
 import type { ScanDiag } from './scan/engine.ts';
@@ -120,6 +138,10 @@ declare global {
     __NOTESYNC_EGG_CODEX__?: () => boolean;
     /** 主动打开图鉴（与 `?eggs` 同一条生产路径）。 */
     __NOTESYNC_EGG_CODEX_OPEN__?: () => void;
+    /** 词表确认浮层是否开着（e2e 判「敲 /dragon 弹了没」）。 */
+    __NOTESYNC_EGG_ASK__?: () => boolean;
+    /** 当前浮层里展示的蛋 id（空串= 没展示）。 */
+    __NOTESYNC_EGG_ASK_ID__?: () => string;
     /**
      * 最近一次扫码自检（引擎/帧数/错误摘要）。正式接口。
      * 🔴 只含元信息，**不含扫码内容** —— 码里带着口令。
@@ -137,6 +159,23 @@ declare global {
      *   不回显口令本身 —— 免得这个钩子变成一个"把口令打印到控制台"的入口。
      */
     __NOTESYNC_PARSE_PAIR__?: (raw: string) => { ok: boolean; noteId?: string; passLen?: number; reason?: string };
+    /* ── 换机码（扫码换机）──────────────────────────────────────────────
+       🔴🔴 四条钩子**一律不回显口令、也不回显笔记明文**。
+         钩子挂在 window 上 = 任何页面脚本都能调；把口令或正文放进返回值，
+         它就成了"任何人可读的口令/内容出口"，而那正是这个功能要保护的东西。
+         e2e 要的安全断言（码里不含明文）靠"拿码去搜明文"做，不需要钩子吐明文。 */
+    /** 生成换机码（生产实现本体）。回显成败，不回显码。 */
+    __NOTESYNC_MIGRATE_MAKE__?: (passphrase: string) => Promise<{ ok: boolean; reason?: string }>;
+    /** 取最近一次生成的码（只有密文，无口令无明文）。 */
+    __NOTESYNC_MIGRATE_CODE__?: () => string;
+    /** 走生产恢复链路。回显成没成。 */
+    __NOTESYNC_MIGRATE_TAKE__?: (code: string, passphrase: string) => Promise<boolean>;
+    /** 最近一次恢复的结果：**含"失败时真源是否被动过"**（反向闸的核心判据）。 */
+    __NOTESYNC_MIGRATE_LAST__?: () => { ok: boolean; reason?: string; docChanged?: boolean } | null;
+    /** 打开恢复面板（e2e 走真实用户路径）。 */
+    __NOTESYNC_MIGRATE_OPEN_TAKE__?: (code?: string) => void;
+    /** 定长容量（供 e2e 断言"超长被如实拒绝"）。 */
+    __NOTESYNC_MIGRATE_CAP__?: () => number;
     /**
      * Capacitor 全局（App 壳注入）。
      *
@@ -219,6 +258,35 @@ function noteNameFromPath(): string {
 }
 
 /* ---------------- 路由 ---------------- */
+
+/**
+ * 当前有没有遮罩态面板开着。
+ *
+ * 🔴 这是链接识别延迟守卫的一项（老项目 index.html:3632 的 `!remPanelOpen`）。
+ *   判据抄老项目的语义：**面板开着时正文不可编辑**，那种场景没有打字，
+ *   若也把链接识别推迟 1.5s，标记/链接会晚 1.6s 才出现（老项目 e2e V545-1 实锤）。
+ *
+ * 判据用「遮罩元素是否可见」而不是「有没有记录打开状态」：
+ *   面板的显隐走 class（reminder/ui.ts:608 用 `mask.classList.contains('hidden')`），
+ *   任何一处漏更新状态变量都会让这个守卫静默失效 —— 而症状是"打开面板时
+ *   光标被链接重建弹走"，用户只会觉得"这软件的焦点有点莫名其妙"。
+ *
+ * 覆盖三类遮罩（与老项目remPanelOpen 单一遮罩的差异）：
+ *   提醒面板 / 二维码配对 / 扫一扫。它们都是"挡住正文、抢走焦点"，
+ *   对链接识别的意义完全相同。
+ */
+function hasOverlayPanelOpen(): boolean {
+  if (typeof document === 'undefined') return false;
+  // 提醒面板（reminder/ui.ts 的 mask）
+  const remMask = document.querySelector('.ns-rem-mask:not(.hidden)');
+  if (remMask) return true;
+  // 二维码配对（scan/panel.ts 的 isPanelOpen 用 getElementById('pairMask')）
+  if (document.getElementById('pairMask')) return true;
+  // 扫一扫图层
+  const scanLayer = document.querySelector('.ns-scan:not(.hidden)');
+  if (scanLayer) return true;
+  return false;
+}
 
 /* ---------------- 提醒：往正文插一行 ---------------- */
 
@@ -329,6 +397,19 @@ if (!appEl) throw new Error('#app 不存在：index.html 与本文件不同源')
 const app: HTMLElement = appEl;
 
 let editor: LexicalEditor | undefined;
+/**
+ * 「立刻跑一轮链接识别」句柄。模块级的原因与上面 `editor` 相同：
+ * 远端合并（setDoc）、历史版本恢复、迁移恢复这三条路径都在 mountEditor 之外，
+ * 它们换完真源后都需要重新识别链接。
+ *
+ * 🔴🔴 漏掉任何一条的用户症状都极难自查：
+ *   打开旧笔记是裸网址（首屏已修）、打字敲的网址会亮（延迟链路已修），
+ *   但「另一台设备同步过来的网址」永远不亮 —— 用户会怀疑是同步坏了。
+ *   老项目对应用法是 `applyRemoteBody` / `remoteTake` / `undo` 之后都调一次
+ *   `linkifyEditor`（index.html:3977-3979 在 finally 里统一收口）。
+ *   本项目用这一个函数把那些散点收成同一处。
+ */
+let linkifyNowRef: (() => void) | undefined;
 /** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
 let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
@@ -548,6 +629,7 @@ const menuState: MenuState = {
   linkInApp: readPref('linkInApp', '1') === '1',
   favList: [],
   histList: [],
+  histFail: '',
   conflicts: [],
 };
 
@@ -623,6 +705,11 @@ window.__NOTESYNC_EGG_CODEX__ = (): boolean => eggLayer?.codexOpen() ?? false;
 window.__NOTESYNC_EGG_CODEX_OPEN__ = (): void => {
   ensureEggLayer()?.openCodex();
 };
+// 🔴 词表确认浮层的只读探针。**不含**任何能改状态的入口 ——
+//   「关掉浮层」「点进入」都由真实点击走生产路径（e2e 用真click），
+//   这里只回答「弹了没有 / 弹的是谁」，避免测试为了方便去开后门。
+window.__NOTESYNC_EGG_ASK__ = (): boolean => eggLayer?.wordAskOpen() ?? false;
+window.__NOTESYNC_EGG_ASK_ID__ = (): string => eggLayer?.wordAskId() ?? '';
 
 let menuRef: ReturnType<typeof buildMenu> | undefined;
 
@@ -729,6 +816,16 @@ function onTopbar(act: TopbarAction): void {
         passphrase: passForPair(),
         noteId: currentNote,
         origin: location.origin,
+        // 🔴 本机没有口令时的唯一出口：锁定 → 解锁 → 出码。
+        //   触发路径是「记忆解锁」进来的那次会话（route() 里 unlockIfRemembered 成功，
+        //   从未经过口令，sessionPass 为空）。不给这个按钮，用户看到的就是
+        //   「明明在编辑器里却说没解锁」，且无路可走（用户报障第 13 条）。
+        //   🔴 锁定前先关弹层：否则新弹层盖在旧弹层上，reload 前的观感是"点了没反应"。
+        onLockNow: () => {
+          closePairPanel();
+          sessionPass = '';
+          void lockNote(currentNote).then(() => location.reload());
+        },
         onClosed: () => {
           // 🔴 关闭必须归还焦点（老项目红线）：否则用户关掉弹窗后
           //   光标停在 body 上，接着敲键盘什么都不会发生。
@@ -806,22 +903,45 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     onOpenFav: (n) => {
       location.href = '/' + encodeURIComponent(n);
     },
-    onSaveHist: () => {
-      // S5 接真源后落历史版本；S4 先给明确的空态反馈而不是静默无响应
-      menuState.histList = [
-        { at: new Date().toISOString().slice(0, 16).replace('T', ' '), label: '（S5 接入后可用）' },
-        ...menuState.histList,
-      ];
+    onSaveHist: async () => {
+      // 手动打点：用户明确要的，**不过自动节流**（老项目 :8551 同款）。
+      const dk = currentDk;
+      if (!dk) {
+        showUploadNote('bad', COPY.histNeedUnlock, 2200);
+        return;
+      }
+      const doc = window.__NOTESYNC_DOC__?.();
+      if (!doc) {
+        showUploadNote('bad', COPY.histNeedUnlock, 2200);
+        return;
+      }
+      const ts = await pushHistory(name, doc, dk.key, dk, true);
+      showUploadNote(ts === null ? 'bad' : 'ok', ts === null ? COPY.histNetFail : COPY.histSaved, 2200);
     },
-    onOpenHist: () => {
-      /* 历史版本回滚在 S5 接真源后开放 */
+    onLoadHist: async () => {
+      await loadHistIntoMenu(name);
+    },
+    onOpenHist: (at) => {
+      // 🔴 点行/点「恢复」都走这里。老项目只有一个恢复入口，本项目两个入口同一条路。
+      void restoreHistVersion(name, at);
     },
     onLinkMode: (inApp) => {
       menuState.linkInApp = inApp;
       writePref('linkInApp', inApp ? '1' : '0');
     },
     onBackup: () => {
-      location.href = '/backup';
+      // 🔴🔴 这里曾是一句 `location.href = '/backup'` —— 一条**死链**。
+      //   服务端没有这个页面（SPA 回落到 index.html），
+      //   而 egg/registry.ts:88 又把 `backup` 列为保留字，
+      //   于是「点扫码换机 → 跳 /backup → 回落 → 落进首页提示页 → 什么也没发生」，
+      //   全程零报错。用户看到的就是"这个按钮坏了"。
+      //
+      //   老项目（index.html:795`class="mask hidden" id="bakMask"` +
+      //   9113 菜单项 click 里 `menuMask.classList.add('hidden')` 且全程无 location 赋值）
+      //   是**弹层**，不是独立页面 —— 依据见 migrate/panel.ts 文件头。
+      //   所以这里开遮罩，既与老项目一致，也让 `backup` 保留字可以留在原地
+      //   （egg-registry.test.mjs:72 正钉着它）。
+      openMigrateMake();
     },
     onPet: () => {
       // 🔴 桌宠是**彩蛋门牌**（老项目：菜单「桌宠」直接进 /pet），
@@ -901,11 +1021,27 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
   //   deps.uploadImage 指向 main.ts 里那**唯一**的上传入口，
   //   于是「选图 / 拖拽 / 粘贴」三条路共用同一份校验与提示。
-  registerBehaviors(ed, { uploadImage: uploadImageFromFile });
+  //   deps.hasOverlayOpen 是链接识别的遮罩守卫（老项目 index.html:3632 的
+  //   `!remPanelOpen` 那一项）：面板开着时 lastTypeAt 可能被程序化回写，
+  //   那种场景根本没有 typing，推迟会让标记晚 1.6s 才出现（老项目 e2e V545-1 实锤）。
+  const behaviors = registerBehaviors(ed, {
+    uploadImage: uploadImageFromFile,
+    hasOverlayOpen: () => hasOverlayPanelOpen(),
+  });
   // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
   //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，
   //   与文件头behaviors.ts 记的 registerRichText 那条P0 是同一个形状。
   registerCommands(ed);
+
+  // 🔴🔴 彩蛋词表触发（本次报障那条链路）：正文里敲 `/dragon`、`/pet`
+  //   → 弹「进入 /dragon？」确认层 → 点「进入」直达游戏。
+  //   **漏掉的后果就是用户报的那句话**：「在笔记正文输入『/dragon』『/pet』
+  //   等菜单文字没有正常识别并可以进入」—— 且零报错（没有异常、没有 console）。
+  //   为什么放这里而不是 ensureEggLayer()：那个函数是**懒建**的，
+  //   而词表触发必须在编辑器 root 就绪的同一拍挂上；挂晚了用户已经敲完字了。
+  //   为什么不用 ensureEggLayer 里的 bindTriggers：那条是**条件触发**
+  //   （数字梗/烟花，跑在 update 真源文本上），与光标位置无关（见 layer.ts 注释）。
+  ensureEggLayer()?.bindWordTrigger(editorHost);
 
   /* ---- 提醒层接线 ---- */
   // 🔴 对账必须发生在 docToLexical **之前**：对账会把提醒的 rem 标记挂到
@@ -945,6 +1081,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     onPanelToggle: () => reminderRef?.togglePanel(),
     insertLine: (text) => insertRemLineToEditor(text),
     saveSelection: () => saveEditorSelection(),
+    // 🔴 addReminder 兜底闸门拒掉过去时间时，老项目走顶部提示条说一句
+    //   （index.html:7299 showUploadStatus('已过去的时间不能设提醒')）。
+    //   不接这一条，被拒就是**完全静默** —— 用户点了"添加提醒"，界面毫无反应，像是坏了。
+    onStatus: (kind, text) => showUploadNote(kind, text, 2200),
   });
 
   let latestDoc: Doc = initial;
@@ -1003,6 +1143,22 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
   ed.update(() => docToLexical(initial), { discrete: true });
 
+  // 🔴🔴 首屏跑一轮链接识别（老项目 index.html:3471 `if (note.ct) linkifyEditor()`）。
+  //
+  //   为什么必须显式跑：延迟链路只由 `beforeinput` 触发（打字）。
+  //   而**打开一篇已有笔记时用户一个字都没敲** —— 正文里那些裸网址
+  //   （老项目迁移过来的真源就是这个样子）不会因为"没人打字"而自动变链接。
+  //   漏这一句的症状极具迷惑性：新建笔记里敲网址链接会亮，
+  //   但打开旧笔记全是裸文本 —— 用户会以为是"同步没同步过来"。
+  //
+  //   顺序：必须在上面那次 docToLexical **之后**（树里要有内容才有意可识别），
+  //   且在 window.__NOTESYNC_DOC__ 挂载**之前**（让 e2e 读到的是已识别的真源）。
+  //   runNow 内部自己 editor.update，不与外层事务嵌套。
+  behaviors.linkifyNow();
+  // 🔴 挂到模块级：那三条「换真源」的路径要用（见 linkifyNowRef 的注释）。
+  //   卸载时随 editor 一起重建，所以这里覆盖赋值而不是 push。
+  linkifyNowRef = behaviors.linkifyNow;
+
   // 暴露真源读取口。**这不是调试后门**：S5 的加密入口、S4 的自动保存、
   // 以及 e2e 的「输入是否真进了真源」判据都走它，是正式接口的一部分。
   window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latestDoc);
@@ -1020,6 +1176,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       },
       { discrete: true },
     );
+    // 🔴 这个钩子的语义是「重放真源」= 模拟一次真实的页面重载，
+    //   而真实重载会走 mountEditor 里的 linkifyNow（首屏那一轮）。
+    //   不在这里补上，e2e 里"重载后链接没了"会被误当成真源丢数据 ——
+    //   钩子与生产行为不一致时，测试结论不可信。
+    behaviors.linkifyNow();
   };
   // 🔴 只读探针：把 Lexical 侧选区读出来，供 e2e 与 DOM 选区对照。
   //   必须在 editor.getEditorState().read(...) 里读 —— 选区是 editor state 的一部分，
@@ -1066,6 +1227,21 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 /** 当前笔记的同步实例。切笔记时必须先 stop()，否则旧实例的 SSE 还在跑。 */
 let syncRef: SyncClient | undefined;
 
+/**
+ * 🔴 当前笔记的派生密钥（模块级）。
+ *
+ * 🔴🔴 为什么必须提到模块级：历史版本的三个动作（存快照 / 取某一版 / 恢复）
+ *   都要用密钥加密解密，而菜单回调是在 `mountEditor` 内部定义的闭包 ——
+ *   把密钥塞进那个闭包就得给 SyncDeps 再开一个字段专门往回调里递，
+ *   于是"快照用哪把密钥"这件事出现两个可能来源。
+ *   这里是**唯一**来源：`startSyncFor` 一处赋值。
+ *
+ * 🔴 切笔记时必须清空（startSyncFor 开头就置 undefined）：
+ *   留着上一把的话，"在 A 笔记点恢复、写回 B 笔记"就成了可能，
+ *   而症状是 B 的内容被 A 的密钥加密 —— 云端再也解不开，且零报错。
+ */
+let currentDk: DerivedKey | undefined;
+
 /** 当前笔记的提醒 UI。切笔记时必须先 destroy()，否则旧 chip/卡片/面板留在页面上，
  *  而它们的调度器还持有旧文档 ⇒ 上一篇笔记的提醒会在这一篇里炸出来。 */
 let reminderRef: ReminderUI | undefined;
@@ -1096,12 +1272,16 @@ function footFor(s: SyncState): { s: 'connecting' | 'synced' | 'offline'; d?: st
 async function startSyncFor(name: string): Promise<void> {
   syncRef?.stop();
   syncRef = undefined;
+  // 🔴🔴 先清密钥再解新的：解密钥是 await，期间任何一次历史操作都该看到"没有密钥"，
+  //   而不是拿着上一篇的密钥去加密这一篇的内容（见 currentDk 的注释）。
+  currentDk = undefined;
   const dk = await deriveKeyFor(name);
   if (!dk) {
     // 拿不到密钥（理论上不该发生：能进编辑器就说明解锁成功过）
     setFootStatus?.('offline', '本机密钥不可用，请刷新页面');
     return;
   }
+  currentDk = dk;
   const c = new SyncClient({
     noteId: name,
     key: dk.key,
@@ -1113,6 +1293,12 @@ async function startSyncFor(name: string): Promise<void> {
       editor?.update(() => {
         docToLexical(d);
       }, { discrete: true });
+      // 🔴 换完真源立刻重跑链接识别。老项目对应用法：
+      //   `applyRemoteBody` / `remoteTake` 之后都调 linkifyEditor
+      //   （index.html:3977-3979 在 finally 里统一收口）。
+      //   漏掉的症状：另一台设备同步过来的网址在本机永远是裸文本，
+      //   而本机敲的会亮 —— 用户会怀疑"同步把内容搞坏了"。
+      linkifyNowRef?.();
     },
     onSnapshot: (s) => {
       const f = footFor(s.state);
@@ -1122,6 +1308,11 @@ async function startSyncFor(name: string): Promise<void> {
     },
     onError: (msg) => {
       setFootStatus?.('offline', msg);
+    },
+    // 🔴 自动快照：每次推送成功后把"刚被覆盖的那一版"存进快照环。
+    //   节流在 pushAutoHistory 里（60s，老项目 :8469 同值同理由）。
+    onArchive: (prev) => {
+      void pushAutoHistory(name, prev);
     },
   });
   syncRef = c;
@@ -1168,6 +1359,119 @@ async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
   return { key: rec.key, saltB64: rec.salt, iter: rec.iter };
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * 历史版本（服务端快照环的客户端一侧）
+ *
+ * 🔴🔴 加密边界：三个动作全部走 sync/history.ts 里那唯一一处 `sealDoc`
+ *   —— 与正常保存同一个 `canonicalize` + 同一个 `encryptString(..., 'note', dk)`。
+ *   服务端从头到尾只见密文（这是本项目的核心红线）。
+ *
+ * 🔴 恢复**不是**"回滚版本号"，而是"把那一版的内容当**当前新内容**推上去"：
+ *   老项目 :8536 `saveLocal(true)` 同款。快照环**不删不改** ——
+ *   用户"恢复到旧版再后悔"，要能找回恢复之前那一版。
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 拉历史列表塞进菜单状态。
+ *
+ * 🔴🔴 `at` 存的是**服务端给的 ts 字符串**，不是格式化过的时间：
+ *   它同时是 `GET /history/<ts>` 的路径段与行上的 `data-at`，
+ *   格式化过就取不回原文（`fmtHistTime` 出的 `MM-DD HH:mm` 是给人看的，
+ *   见 menu.ts MenuState.histList 的注释）。
+ *
+ * 🔴 失败**不伪装成空列表**：网络不通时列表显示"历史版本读取失败"，
+ *   而"暂无历史版本"是另一个意思（服务端确实没有）。合成一个空数组的话，
+ *   用户会以为改动没被记下来 —— 而历史版本是找回丢失内容的唯一指望。
+ */
+async function loadHistIntoMenu(name: string): Promise<void> {
+  const list = await fetchHistoryList(name);
+  if (list === null) {
+    menuState.histList = [];
+    menuState.histFail = COPY.histListFail;
+    return;
+  }
+  menuState.histFail = '';
+  menuState.histList = list.map((h) => ({
+    at: String(h.ts),
+    // 🔴 「· 手动」只标手动打的点（老项目 :8493 逐字：自动的不标注）
+    label: fmtHistTime(h.ts) + (h.manual ? COPY.histManualMark : ''),
+  }));
+}
+
+/**
+ * 自动快照（每次推送成功后调）。
+ *
+ * 🔴 节流在 `autoSnapshotThrottled` 里判：60s 一版（老项目 :8469）。
+ *   不节流的话连续打字 30 秒能把 10 条的环全冲掉，只剩最后几十秒的内容 ——
+ *   而用户想找回的恰恰是"一小时前那段"。
+ *
+ * 🔴 失败静默（老项目 :8478）：快照是保险不是主链路。
+ *   但**不给"已保存"提示** —— 自动快照用户没主动要求，
+ *   每次打字后弹一次提示条会变成噪音。
+ */
+async function pushAutoHistory(name: string, prev: Doc): Promise<void> {
+  const dk = currentDk;
+  if (!dk) return;
+  if (!autoSnapshotThrottled(Date.now())) return;
+  await pushHistory(name, prev, dk.key, dk, false);
+}
+
+/**
+ * 恢复某一版：取回 → 解密 → 写进编辑器 → 走正常保存路径推上云端。
+ *
+ * 🔴🔴 写入顺序**不能反**：必须先 `fetchHistoryDoc` 拿到可信 doc，
+ *   确认拿到了才动编辑器。反过来做（先挂编辑器再解密）的话，
+ *   一次失败的恢复会把用户**当前正文**换成空文档 —— 而那次恢复本来就是失败的，
+ *   等于"失败的恢复把原文擦了"。这与 migrate 的 applyMigrateRestore 同一条纪律。
+ *
+ * 🔴 写回走 `editor.update(() => docToLexical(d))` + `syncRef.noteEdit()`，
+ *   与 setDoc（远端合并写回）是同一条路。不自己另调 push：
+ *   那会把去抖 / 版本协商 / 409 重试全绕过去，等于开了第二条推送链路。
+ *
+ * 🔴 折叠块的展开态是 ephemeral UI 态，**不在真源里**（见 nodes.ts）：
+ *   恢复后由 docToLexical 重建的折叠块一律回到默认收起态，这是正确的
+ *   —— 用户要的是"那一版的正文"，展开态不属于正文。
+ */
+async function restoreHistVersion(name: string, at: string): Promise<void> {
+  const dk = currentDk;
+  if (!dk) {
+    showUploadNote('bad', COPY.histNeedUnlock, 2200);
+    return;
+  }
+  const ts = Number(at);
+  if (!Number.isFinite(ts)) {
+    showUploadNote('bad', COPY.histBad, 2200);
+    return;
+  }
+  // 🔴🔴 解不开 / 没有这一版 → 同一句「该版本不可用」（老项目 :8539 同款）。
+  //   不区分"取不到"与"解不开"：区分开等于给暴力破解一个 oracle
+  //   （ARCH 安全不变量，与解锁失败同一句文案）。
+  const doc = await fetchHistoryDoc(name, ts, dk.key);
+  if (!doc) {
+    showUploadNote('bad', COPY.histBad, 2200);
+    return;
+  }
+  editor?.update(
+    () => {
+      docToLexical(doc);
+    },
+    { discrete: true },
+  );
+  // 🔴 历史版本里的裸网址也要亮（老项目 undo/redo 后同样走 linkify 收口，
+  //   index.html:3977）。漏掉的症状：恢复历史版本后正文全是裸网址。
+  linkifyNowRef?.();
+  // 🔴 不在这里赋值 latestDoc：它是 mountEditor 的闭包局部变量（main.ts:989），
+  //   而 registerUpdateListener 会在 docToLexical 触发的那次 update 里
+  //   **自动**把最新真源写回 latestDoc —— 与 applyMigrateRestore 同一份理由。
+  //
+  // 🔴 必须 noteEdit()：不推的话这次恢复只活在本机，
+  //   用户换个设备 / 刷新一下就回到恢复前的内容，而界面上什么都没说。
+  syncRef?.noteEdit();
+  //🔴 恢复完把列表也重拉一次：服务端里那一版的"手动"标记没变，
+  //   但恢复本身是一次编辑，下一次自动快照会把它记进去 —— 用户可能想立刻看到。
+  showUploadNote('ok', COPY.histRestored, 2200);
+}
+
 /**
  * 扫码结果落地 —— 不管从哪一级引擎扫出来的，都只走这一个入口判定。
  *
@@ -1179,6 +1483,14 @@ async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
  *   这正是要的：一条路径，一种失败语义。
  */
 async function handleScanRaw(raw: string): Promise<void> {
+  // 🔴🔴 换机码必须**先于**配对链接分流。
+  //   两者的失败文案天差地别（换机码是"口令不对"、配对链接是"这不是配对链接"），
+  //   而它们都是一串 base64 —— 若先试配对链接，换机码会走进 URL 解析，
+  //   报出"这不是配对链接"，用户完全想不到真正原因（他手里确实是一张换机码）。
+  if (isMigrateCode(raw)) {
+    openMigrateTake(raw);
+    return;
+  }
   // 🔴 解析**只经由** resolveScan 一处，落地路径与 e2e 钩子共用它。
   //   两处各写一遍判定的话，改了一边就会表现为
   //   "钩子说能解、实际扫进去说口令不对" —— 极难自查。
@@ -1245,6 +1557,53 @@ function resolveScan(raw: string): { parsed: ReturnType<typeof parsePairLink>; s
   }
   return { parsed, shape: { ok: false, reason: parsed.reason } };
 }
+
+/* ── 换机码的 e2e 钩子（正式接口，不是调试后门）───────────────────────────
+   🔴🔴 **绝不同回口令、也绝不回明文**：这三个钩子只吐"码本身"与"长度/形状"这类
+   与内容无关的元信息。理由与 __NOTESYNC_PARSE_PAIR__ 完全同款 ——
+   钩子挂在 window 上，任何页面脚本都能调；把口令或笔记明文放进返回值，
+   它就从"测试钩子"变成"任何人可读的口令/内容出口"，
+   而那正是这个功能要保护的东西。e2e 需要的安全断言（码里不含明文）
+   靠"拿码去搜明文"来做，不需要钩子吐明文。 */
+/** 当前会话最后一次生成的换机码（仅码，无口令无明文）。 */
+let lastMigrateCode = '';
+/** 恢复尝试的形状：成没成、失败原因、以及**恢复后真源是否变了**。 */
+let lastMigrateRestore: { ok: boolean; reason?: string; docChanged?: boolean } | null = null;
+/** 手动生成换机码（e2e 与将来的"分享到另一台设备"入口共用同一实现）。 */
+window.__NOTESYNC_MIGRATE_MAKE__ = async (passphrase: string): Promise<{ ok: boolean; reason?: string }> => {
+  const doc = window.__NOTESYNC_DOC__?.();
+  if (!doc) return { ok: false, reason: 'empty' };
+  const r = await buildMigrateCode(doc, passphrase);
+  if (!r.ok) return { ok: false, reason: r.reason };
+  lastMigrateCode = r.code;
+  return { ok: true };
+};
+/** 取最近一次生成的码。 */
+window.__NOTESYNC_MIGRATE_CODE__ = (): string => lastMigrateCode;
+/** 走**生产恢复链路**（applyMigrateRestore），供 e2e 注入替身喂码。 */
+window.__NOTESYNC_MIGRATE_TAKE__ = async (code: string, passphrase: string): Promise<boolean> => {
+  const before = window.__NOTESYNC_DOC__ ? canonicalize(window.__NOTESYNC_DOC__()) : '';
+  const r = await applyMigrateRestore(code, passphrase);
+  const after = window.__NOTESYNC_DOC__ ? canonicalize(window.__NOTESYNC_DOC__()) : '';
+  // 🔴🔴 本仓开了 exactOptionalPropertyTypes：`reason: undefined` **不合法**，
+  //   必须"键存在且有值"或"键压根不存在"。用条件展开而不是写 `undefined`。
+  //   （这条与 local-cache.ts 里 `iter: number | undefined` 那个显式注释同源。）
+  lastMigrateRestore = r.ok
+    ? { ok: true }
+    : {
+        ok: false,
+        reason: r.reason,
+        // 🔴 "失败时真源有没有被动过" —— 这是反向闸的核心判据：
+        //   一次失败的恢复绝不允许改动用户当前的正文。
+        docChanged: before !== after,
+      };
+  return r.ok;
+};
+window.__NOTESYNC_MIGRATE_LAST__ = () => (lastMigrateRestore ? { ...lastMigrateRestore } : null);
+/** 打开恢复面板（e2e 走真实用户路径：点菜单/扫到码，而不是直接调内部函数）。 */
+window.__NOTESYNC_MIGRATE_OPEN_TAKE__ = (code?: string): void => openMigrateTake(code);
+/** 定长容量（供 e2e 断言"超长被如实拒绝"）。 */
+window.__NOTESYNC_MIGRATE_CAP__ = (): number => MIGRATE_PAYLOAD_CAP;
 
 /**
  * 打开取景层。
@@ -1331,6 +1690,121 @@ function openScanner(): void {
     scanBusyAt = 0;
     scanFeedback(COPY.scanStartFail);
     console.error('[scan] 取景层构建失败', e);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 扫码换机（备份侧 / 恢复侧）
+ *
+ * 🔴 口令流：口令由用户在面板里手输，只作为 PBKDF2 的输入被消费，
+ *   **既不进二维码、也不进日志、也不进任何 storage**。
+ *   生成成功后立刻清空输入框（老项目 index.html:9192 bakPass.value = '' 同款纪律）。
+ *
+ * 🔴🔴 恢复侧失败时**不写任何东西**：不建笔记、不写缓存、不写 key-store。
+ *   这不是"尽量少写"，是硬要求 —— 见 migrate/code.ts 的 restoreMigrateCode 注释。
+ *   「恢复失败但原文被清空」比直接报错糟糕得多（用户内容没了还不知道）。
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** 备份侧：菜单「扫码换机」进来。 */
+function openMigrateMake(): void {
+  const doc = window.__NOTESYNC_DOC__?.();
+  if (!doc) {
+    setFootStatus?.('offline', COPY.migrateNeedUnlock);
+    return;
+  }
+  buildMigratePanel({
+    mode: 'make',
+    // 🔴 预判放在生成之前：超长就别白跑600,000 次 PBKDF2。
+    //   超限时**如实说装不下**，绝不静默截断（截断 = 恢复出被腰斩的笔记）。
+    precheck: () => (fitsInMigrateCode(canonicalize(doc)) ? null : COPY.migrateTooLong),
+    onMake: async (passphrase) => {
+      const latest = window.__NOTESYNC_DOC__?.() ?? doc;
+      const r = await buildMigrateCode(latest, passphrase);
+      if (r.ok) return r;
+      return { ok: false, reason: r.reason === 'too-long' ? COPY.migrateTooLong : COPY.migrateRenderFail };
+    },
+    onClosed: () => {
+      try {
+        editor?.focus();
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+}
+
+/**
+ * 恢复侧：喂码 + 口令 → 解密 → 写进编辑器并落缓存。
+ *
+ * 🔴🔴 写入顺序是有讲究的，**不能反**：
+ *   先解密成功（拿到可信 doc）→ 再写缓存 → 最后挂编辑器并通知同步推。
+ *   反过来做（先挂编辑器再解密）的话，一次失败就会把用户**当前正文**换成空文档 ——
+ *   而那次恢复本来就是失败的，等于"失败的换机把原文擦了"。
+ */
+async function applyMigrateRestore(code: string, passphrase: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const env = readMigrateEnvelope(code);
+  if (env === null) return { ok: false, reason: COPY.migrateNotMigrate };
+
+  const r = await restoreMigrateCode(code, passphrase);
+  if (!r.ok) {
+    // 口令错/码被改 → 同一句文案，不区分（ARCH 安全不变量）
+    return { ok: false, reason: PASS_ERROR };
+  }
+
+  // 🔴 缓存与 key-store 用**重封**后的信封，不能直接用换机码那份
+  //   （载荷是 pad 过的 JSON，塞进缓存会让"缓存 == 真源"这条不变量破掉，
+  //   离线读到的与在线读到的会分叉。见 migrate/code.ts 的 resealMigrateDoc）。
+  const resealed = await resealMigrateDoc(r.doc, passphrase, env);
+  if (resealed) {
+    const dk = await deriveKey(passphrase, env.kdf.salt);
+    // 🔴 用 currentNote（模块级，main.ts:528）而不是函数局部的 name：
+    //   恢复是**跨设备**动作，写入目标必须是"当前打开的这篇"，
+    //   拿错变量会把密钥/缓存写到别的篇名上 —— 那症状是
+    //   "恢复成功了，但换台设备打开还是空的"，极难自查。
+    await putKey({ id: currentNote, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+    writeCache(currentNote, resealed);
+  }
+
+  // 挂编辑器：走**现成的** docToLexical 反序列化（不另写一套，见 serialize.ts）
+  editor?.update(
+    () => {
+      docToLexical(r.doc);
+    },
+    { discrete: true },
+  );
+  // 🔴 迁移回来的真源是**老项目格式**，正文里的裸网址带 ZWSP
+  //   （老项目 linkify 插的，见 linkify/recognize.ts 的 stripZeroWidth 注释）。
+  //   换机恢复后必须重跑识别，否则用户看到的是"恢复了但网址全没了格式"。
+  linkifyNowRef?.();
+  // 🔴 不在这里赋值 latestDoc：它是 mountEditor 的闭包局部变量（main.ts:989），
+  //   而 registerUpdateListener 会在 docToLexical 触发的那次 update 里
+  //   **自动**把最新真源写回 latestDoc（main.ts:1015 `latestDoc = rec.doc`）。
+  //   在这里另写一份是多余的，而且会与监听器形成两个写入口 ——
+  //   那种"两个地方都以为自己是真源"的局面正是 main.ts:958-977 记的那类静默故障。
+  //
+  // 通知同步把恢复出来的内容推上云端 —— 否则换机后的内容只活在这一台设备上。
+  // 🔴 走 noteEdit 而不是直连 push：那是生产推送的唯一入口，
+  //   自己另调一条会把去抖/版本协商/409 重试全绕过去。
+  syncRef?.noteEdit();
+  return { ok: true };
+}
+
+/** 恢复侧：从菜单/落地页进来（扫到码或手粘码都走它）。 */
+function openMigrateTake(initialCode?: string): void {
+  buildMigratePanel({
+    mode: 'take',
+    onTake: (code, passphrase) => applyMigrateRestore(code, passphrase),
+    onClosed: () => {
+      try {
+        editor?.focus();
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+  if (initialCode) {
+    const el = document.getElementById('migrateCodeIn') as HTMLTextAreaElement | null;
+    if (el) el.value = initialCode;
   }
 }
 

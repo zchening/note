@@ -20,7 +20,7 @@
 
 import { COPY } from '../ui/copy.ts';
 import { fmtLate, fmtRelDay, fmtRemInsert, fmtRemTime, itemForChip, matchAtCaret } from '../reminder/format.ts';
-import { addReminder, removeReminder, upcomingReminders, dueReminders } from './reconcile.ts';
+import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
 import type { Doc } from '@bj/shared-schema';
 
 type ReminderDoc = Doc;
@@ -59,6 +59,16 @@ export interface ReminderHost {
    *   编辑器就丢光标 —— 等点提交时已经不知道该往哪插行了。
    */
   saveSelection: () => void;
+  /**
+   * 顶部状态提示条（老项目 showUploadStatus）。
+   *
+   * 🔴 可选不是为了省事，而是**唯一一处"拒绝用户操作"的反馈出口**：
+   *   addReminder 的兜底闸门拒掉一个过去时间时，老项目走的就是这条路
+   *   （index.html:7299 提示条说一句「已过去的时间不能设提醒」后 return false）。
+   *   没有它，被拒就是**完全静默**——用户点了"添加提醒"，面板毫无反应，
+   *   像是坏了。可选则保证不传也不会崩（单测里就没传）。
+   */
+  onStatus?: (kind: 'doing' | 'ok' | 'bad', text: string) => void;
 }
 
 export class ReminderUI {
@@ -73,6 +83,20 @@ export class ReminderUI {
 
   /** 本次已弹过卡片的提醒 at，避免同一批反复弹（老项目 cardShownAts）。 */
   private shownAts = new Set<string>();
+
+  /**
+   * 🔴 chip 状态三件（老项目 chipData / chipDeleteAt / chipAutoHideTimer+chipFeedbackUntil）
+   *
+   * chipDeleteAt：确认卡上那个「删除」按钮的目标 at。不是 null 时确认卡正在展示（老项目 :6384）。
+   * chipAutoHideTimer：自动收卡句柄。任何新展示前必须 clearTimeout（老项目 :6377）。
+   * chipFeedbackUntil：收卡后的冷却截止戳。老项目 :6390 autoHideTimeChip 里
+   *   `chipFeedbackUntil = Date.now() + 2000`，refreshChip 开头判它。
+   */
+  private chipDeleteAt: number | null = null;
+  private chipAutoHideTimer: number | undefined;
+  private chipFeedbackUntil = 0;
+  /** CTA 卡的目标时间串（老项目 chipData）。展示确认卡时必须置 null（老项目 :6382）。 */
+  private chipData: { at: number; index: number; length: number } | null = null;
 
   /** 已经响过的提醒 id，进内存即可（老项目把它写进密文以跨端一致）。 */
   private firedIds = new Set<string>();
@@ -104,7 +128,12 @@ export class ReminderUI {
   private buildChip(): HTMLDivElement {
     const el = document.createElement('div');
     el.id = 'timeChip';
-    el.className = 'ns-timechip';
+    // 🔴🔴 初始必须带 `hidden`（老项目 index.html:672 `<div id="timeChip" class="hidden">`）。
+    //   漏了它就是一个**永远看得见的空圆角矩形**—— position:fixed 贴在顶栏下方，
+    //   内容为空时宽高都不为零，`.ns-timechip` 也没有 `display:none` 兜底。
+    //   用户报的"笔记编辑界面正上方有个圆角矩形一直显示"就是它，
+    //   而它平时完全不做事，看起来像凭空多出来的 UI 元素。
+    el.className = 'ns-timechip hidden';
     el.setAttribute('role', 'button');
     el.setAttribute('tabindex', '0');
     el.setAttribute('aria-label', COPY.remChipAdd);
@@ -128,6 +157,10 @@ export class ReminderUI {
   /** 光标/选区变化时调；命中未过期时间串就显示，否则收起。 */
   refreshChip(editable: HTMLElement | null): void {
     if (!editable) return this.hideChip();
+    // 🔴 冷却期内不唤起（老项目 index.html:6390 autoHideTimeChip 把 chipFeedbackUntil
+    //   推到 2 秒后，showChipForMatch 开头判它）。缺这一句：光标停在时间串上时，
+    //   自动收卡 → selectionchange 立刻唤回 → 用户看到卡片每3 秒闪一次。
+    if (Date.now() < this.chipFeedbackUntil) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return this.hideChip();
     const range = sel.getRangeAt(0);
@@ -138,7 +171,131 @@ export class ReminderUI {
     const text = editable.textContent ?? '';
     const m = matchAtCaret(text, offset, Date.now());
     if (!m) return this.hideChip();
-    this.showChip(m, itemForChip(text, m, Date.now()));
+    const item = itemForChip(text, m, Date.now());
+    // 🔴🔴 已添加态优先判定（老项目 index.html:6380
+    //   `if (reminders.some(r => r.at === m.at))`）。
+    //   此前这一步整个缺失 —— 只要命中一个未过期时间串就弹 CTA「添加提醒」卡，
+    //   于是**已经加过提醒的时间串，光标移上去仍然要你再点一次添加**；
+    //   而 addReminder 走「同一时刻不重复加」分支静默返回，
+    //   用户看到的就是"我明明加过了，怎么还要再加"。
+    const now = Date.now();
+    const existing = (this.host.getDoc().reminders ?? []).find((r) => r.at === new Date(m.at).toISOString());
+    if (existing) {
+      // 真已过期：与下划线同步消失，不弹（老项目 :6381）
+      if (m.at <= now) return this.hideChip();
+      this.chipData = null; // 清残留，防此前 CTA 卡的旧目标被误触
+      this.chipDeleteAt = m.at; // v5.47：展示卡带「删除」按钮
+      this.showChipFeedback(m.at, item);
+      return;
+    }
+    // 🔴 已过期的时间串**不浮 chip**（老项目 :6393 `if (m.expired) hideTimeChip()`，零打扰铁律）
+    if (m.at <= now) return this.hideChip();
+    this.chipDeleteAt = null;
+    this.chipData = { at: m.at, index: m.index, length: m.length };
+    this.showChip(m, item);
+  }
+
+  /** 两行「已添加」确认卡（老项目 index.html:6382-6389）。 */
+  private showChipFeedback(at: number, item: string): void {
+    this.chip.textContent = '';
+    this.chip.classList.add('feedback');
+    const l1 = document.createElement('div');
+    l1.className = 'ns-chip-ok1';
+    l1.appendChild(document.createTextNode(COPY.remChipAdded));
+    l1.appendChild(this.buildChipDeleteBtn());
+    const l2 = document.createElement('div');
+    l2.className = 'ns-chip-ok2';
+    l2.textContent = fmtRemTime(at) + (item ? `　${item}` : '');
+    this.chip.appendChild(l1);
+    this.chip.appendChild(l2);
+    this.chip.classList.remove('hidden');
+    // 🔴 走冷却包装（老项目 :6390 autoHideTimeChip）：
+    //   收卡后 2 秒内不重弹。缺冷却 = 光标停在时间串上时卡片反复闪。
+    this.armChipAutoHide();
+  }
+
+  /**
+   * 「删除这条提醒」伪按钮（老项目 buildChipDeleteBtn，index.html:6486）。
+   * 🔴🔴 用 span + role=button（老项目 v5.39「伪按钮键盘可达」惯例），
+   *   四条激活路径全绑：pointerdown / touchstart / mousedown / 键盘 Enter·Space。
+   *   只绑 click 的话，移动端 pointerdown 之后仍可能不产生 click（老内核）。
+   *   每条都要 stopPropagation —— 否则冒泡到整卡的 chipActivate = 先加后删。
+   */
+  private buildChipDeleteBtn(): HTMLElement {
+    const d = document.createElement('span');
+    d.className = 'ns-chip-del';
+    d.setAttribute('role', 'button');
+    d.setAttribute('tabindex', '0');
+    d.setAttribute('aria-label', COPY.remChipDelete);
+    d.textContent = COPY.remChipDeleteLabel;
+    const act = (e: Event): void => {
+      e.preventDefault();
+      e.stopPropagation(); // 阻止冒泡到 chipActivate（整卡点击路径）
+      const at = this.chipDeleteAt;
+      if (at === null) return;
+      this.chipDeleteAt = null;
+      this.host.setDoc(removeReminderAt(this.host.getDoc(), at));
+      this.hideChip();
+    };
+    d.addEventListener('pointerdown', act);
+    d.addEventListener('touchstart', act, { passive: false });
+    d.addEventListener('mousedown', act);
+    d.addEventListener('keydown', (e) => {
+      const ke = e as KeyboardEvent;
+      if (ke.key === 'Enter' || ke.key === ' ') act(ke);
+    });
+    return d;
+  }
+
+  /**
+   * 自动收卡 + 冷却（老项目 autoHideTimeChip / hideTimeChip）。
+   * 🔴 收卡时把 chipFeedbackUntil 推到 2 秒后：这一段内refreshChip 不再唤起。
+   *   没有它，光标仍停在时间串上时 selectionchange 会把卡立刻唤回来 ——
+   *   用户看到的是卡片每 3 秒闪一次。
+   */
+  private armChipAutoHide(ms = 3000): void {
+    window.clearTimeout(this.chipAutoHideTimer);
+    this.chipAutoHideTimer = window.setTimeout(() => {
+      this.chipFeedbackUntil = Date.now() + 2000;
+      this.hideChip();
+    }, ms);
+  }
+
+  /** CTA 卡（老项目未添加态：时间＋相对日 / 事项 / 通栏主按钮）。 */
+  private showChip(m: { at: number; index: number; length: number }, item: string): void {
+    const time = fmtRemTime(m.at);
+    this.chip.textContent = '';
+    this.chip.classList.remove('feedback');
+    const hd = document.createElement('div');
+    hd.className = 'ns-chip-hd';
+    const rel = document.createElement('span');
+    rel.className = 'ns-chip-rel';
+    rel.textContent = fmtRelDay(m.at, Date.now());
+    const clock = document.createElement('span');
+    clock.className = 'ns-chip-clock';
+    clock.textContent = time;
+    hd.appendChild(rel);
+    hd.appendChild(clock);
+    const it = document.createElement('div');
+    it.className = 'ns-chip-item';
+    // 🔴 截断只落在事项行：老项目 v7.8.0 定的规矩（CTA 恒完整可见可点）
+    it.textContent = item ? escapeTruncPlain(item, 30) : '';
+    const cta = document.createElement('div');
+    cta.className = 'ns-chip-cta';
+    cta.textContent = COPY.remChipAdd;
+    this.chip.appendChild(hd);
+    if (item) this.chip.appendChild(it);
+    this.chip.appendChild(cta);
+    this.chip.dataset.at = String(m.at);
+    this.chip.classList.remove('hidden');
+  }
+
+  private hideChip(): void {
+    // 🔴 任何新展示都要作废旧自动收定时器（老项目 index.html:6377 clearTimeout）：
+    //   否则「已添加」卡的残留定时器会把随后弹出的 CTA 卡误收。
+    window.clearTimeout(this.chipAutoHideTimer);
+    this.chipDeleteAt = null;
+    this.chip.classList.add('hidden');
   }
 
   /**
@@ -165,67 +322,27 @@ export class ReminderUI {
     return probe.toString().length;
   }
 
-  private showChip(m: { at: number; index: number; length: number }, item: string): void {
-    const time = fmtRemTime(m.at);
-    this.chip.textContent = '';
-    const hd = document.createElement('div');
-    hd.className = 'ns-chip-hd';
-    const rel = document.createElement('span');
-    rel.className = 'ns-chip-rel';
-    rel.textContent = fmtRelDay(m.at, Date.now());
-    const clock = document.createElement('span');
-    clock.className = 'ns-chip-clock';
-    clock.textContent = time;
-    hd.appendChild(rel);
-    hd.appendChild(clock);
-    const it = document.createElement('div');
-    it.className = 'ns-chip-item';
-    // 🔴 截断只落在事项行：老项目 v7.8.0 定的规矩（CTA 恒完整可见可点）
-    it.textContent = item ? escapeTruncPlain(item, 30) : '';
-    const cta = document.createElement('div');
-    cta.className = 'ns-chip-cta';
-    cta.textContent = COPY.remChipAdd;
-    this.chip.appendChild(hd);
-    if (item) this.chip.appendChild(it);
-    this.chip.appendChild(cta);
-    this.chip.dataset.at = String(m.at);
-    this.chip.classList.remove('hidden');
-  }
-
-  private hideChip(): void {
-    this.chip.classList.add('hidden');
-  }
-
   private chipActivate(): void {
     const at = Number(this.chip.dataset.at ?? '');
     if (!Number.isFinite(at) || at <= 0) return;
     const d = this.host.getDoc();
     const item = this.chip.querySelector('.ns-chip-item');
     const text = item && item.textContent ? item.textContent : '';
-    this.host.setDoc(addReminder(d, at, text).doc);
-    this.hideChip();
-    this.showChipAdded(at, text);
-  }
-
-  /** 点添加后就地变两行确认卡（老项目 v5.45 行为）。 */
-  private showChipAdded(at: number, text: string): void {
-    this.chip.textContent = '';
-    const head = document.createElement('div');
-    head.className = 'ns-chip-cta ns-chip-done';
-    head.textContent = COPY.remChipAdded;
-    const when = document.createElement('div');
-    when.className = 'ns-chip-hd';
-    when.textContent = `${fmtRelDay(at, Date.now())} ${fmtRemTime(at)}`;
-    this.chip.appendChild(head);
-    this.chip.appendChild(when);
-    if (text) {
-      const it = document.createElement('div');
-      it.className = 'ns-chip-item';
-      it.textContent = text;
-      this.chip.appendChild(it);
+    const r = addReminder(d, at, text);
+    // 🔴 过去时间：老项目 index.html:7299 是「提示条说一句 + return false」，
+    //   面板**不**变确认卡。addReminder 的兜底闸门会拒，此时不许弹确认卡
+    //   ——弹了就等于骗用户「加上了」，而 reminders 里根本没有这一条。
+    if (r.rejected) {
+      this.hideChip();
+      this.host.onStatus?.('bad', COPY.remPastTip);
+      return;
     }
-    this.chip.classList.remove('hidden');
-    window.setTimeout(() => this.hideChip(), 1600);
+    this.host.setDoc(r.doc);
+    // 🔴 🔴 确认卡走老项目 showChipForMatch 的「已添加」分支（index.html:6382）：
+    //   两行 + 尾部删除钮 + 3 秒自动收。此前是三行、无删除钮、1.6 秒硬收。
+    this.chipDeleteAt = null;
+    this.hideChip();
+    this.showChipFeedback(at, text);
   }
 
   private bindSelection(): void {
@@ -547,20 +664,16 @@ export class ReminderUI {
         ? new Date(+dv.slice(0, 4), +dv.slice(5, 7) - 1, +dv.slice(8, 10), h, m).getTime()
         : 0;
       if (!at || at <= Date.now()) {
-        // 已过/无效：accent 提示，不设（老项目只闪红框；这里给一句可读的）
-        dateInp.classList.add('ns-bad');
-        hh.wrap.classList.add('ns-bad');
-        mm.wrap.classList.add('ns-bad');
-        const tip = document.createElement('div');
-        tip.className = 'ns-rem-tip';
-        tip.textContent = COPY.remPastTip;
-        form.appendChild(tip);
+        // 🔴 已过/无效：**只闪红框**（老项目 index.html:7740
+        //   `bads.forEach(x => x.classList.add('bad'))` 后 `setTimeout(..., 900)` 移除），
+        //   面板里不插任何文字行。此前这里插了一行「已过去的时间不能设提醒」——
+        //   老项目这句话只出现在**顶部提示条**（addReminder 兜底闸门 index.html:7299），
+        //   面板里多这一行既是凭空多出的可见元素，又把弹窗顶高一截。
+        const bads = [dateInp, hh.wrap, mm.wrap];
+        bads.forEach((x) => x.classList.add('ns-bad'));
         window.setTimeout(() => {
-          dateInp.classList.remove('ns-bad');
-          hh.wrap.classList.remove('ns-bad');
-          mm.wrap.classList.remove('ns-bad');
-          tip.remove();
-        }, 1500);
+          bads.forEach((x) => x.classList.remove('ns-bad'));
+        }, 900);
         return;
       }
       const text = item.value.trim();
@@ -610,13 +723,35 @@ export class ReminderUI {
       row.appendChild(off);
       list.appendChild(row);
     }
-    if (up.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'ns-rem-empty';
-      empty.textContent = COPY.remEmpty;
-      list.appendChild(empty);
-    }
+    // 🔴🔴 无提醒时**不渲染任何空态文案**（老项目 renderRemPanel 一带根本没有这层）。
+    //   这里曾经凭空加了一句「还没有设置提醒」—— 面板空着本来就自明，
+    //   多这一行既是老项目里不存在的东西（违反"用户可见层逐字复刻"这条硬约束），
+    //   又把「设置行」与「已设列表」之间的留白切掉一截，弹窗高度都跟着变了。
     this.mask.classList.remove('hidden');
+    // 🔴🔴 滚轮定位必须在 mask 摘掉 hidden **之后**（老项目 v5.55 resetWheelScroll 同款，
+    //   原文注释：「display:none 内 scrollTop 无效，必须显示后设置」）。
+    //   症状是用户报的第6 条「提醒弹窗默认时间不对」：dataset.val 已经是当前 +5 分钟，
+    //   但滚轮的可视位置还停在 00:00 —— **值对、显示不对**，最容易被当成"随机"，
+    //   而且点一下滚轮就"跳"到正确值，更显得莫名其妙。
+    //   顺序反过来（先定位再显示）等于什么都没做，且不报错。
+    this.resetWheelScroll();
+  }
+
+  /**
+   * 滚轮滚到当前值（老项目 resetWheelScroll）。
+   * 🔴 用 dataset.val 而不是重新构造时的入参：值以 dataset 为唯一事实源（v5.55），
+   *   用户手动调过之后重开面板，滚轮必须停在他上次调的位置，而不是重置回 +5 分钟。
+   */
+  private resetWheelScroll(): void {
+    this.wheels.forEach((wh) => {
+      const v = Number(wh.dataset.val);
+      if (!Number.isFinite(v)) return;
+      try {
+        wh.scrollTop = v * REM_WHEEL_ITEM_H;
+      } catch {
+        // jsdom / 无布局环境写不进 scrollTop —— dataset 已是唯一事实源，测试靠它
+      }
+    });
   }
 
   /**

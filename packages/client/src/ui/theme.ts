@@ -62,6 +62,16 @@ export interface ThemeTokens {
   zoomLine: string;
   zoomDim: string;
   zoomSolid: string;
+  /**
+   * 🔴🔴 底栏同步状态点两档（老项目 index.html:498/499）。
+   *
+   * 独立于 accent 的理由：`.dot.on` 此前接的是 var(--accent)，于是"已同步"
+   * 显示成**金色**（用户报的第 4 条）。而老项目那里是 `#2FA866` 一枚**绿点**。
+   * 语义上也该分开 —— 金色是"可点/强调"，绿色是"已连通"，
+   * 混用会把状态读成动作。
+   */
+  dotOn: string;
+  dotIdle: string;
 }
 
 /**
@@ -91,6 +101,13 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     zoomLine: 'rgba(255,255,255,.22)',
     zoomDim: 'rgba(242,241,236,.62)',
     zoomSolid: '#141412',
+    // 🔴🔴 底栏同步状态点（老项目 index.html:499 `footer .dot.on{background:#2FA866}`）。
+    //   此前这里用的是 var(--accent)（金色 #8F7126）—— 那正是用户报的
+    //   "显示黄色而非绿色"。同步状态点与品牌金是两件事：
+    //   品牌金是"可点/强调"，绿是"已连通"，混用会让"已同步"读起来像"可点击"。
+    //   dotIdle 同老项目 `#C9C7BE`（不是 --line #ECEAE2，后者太浅、点在白底上几乎看不见）。
+    dotOn: '#2FA866',
+    dotIdle: '#C9C7BE',
   },
   dark: {
     bg: '#0F0F11',
@@ -117,6 +134,10 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     zoomLine: 'rgba(255,255,255,.18)',
     zoomDim: 'rgba(242,241,236,.55)',
     zoomSolid: '#000000',
+    // 🔴 与浅色逐字节相同：老项目 footer .dot 两档都是硬编码单值，夜间不覆写
+    //   （index.html:498/499 只出现一次，无夜间分支）。照实抄。
+    dotOn: '#2FA866',
+    dotIdle: '#C9C7BE',
   },
 } as const;
 
@@ -166,6 +187,13 @@ export const OVERLAY = {
    *   和弹窗共用一档会让它看起来像个大浮层。
    */
   shadowUpload: '0 10px 30px rgba(20,20,18,.2)',
+  /**
+   * 彩蛋词表确认浮层（`#eggAsk`）的投影 —— 老项目 index.html:10467
+   * `#nsAsk{...box-shadow:0 10px 30px rgba(20,20,18,.14)}`。
+   * 🔴 与 `shadowUpload` **同尺寸不同透明度**（.14 vs .2）：老项目就是两个值。
+   *   合并成一档会让浮层在浅色暖白底上"压得太重"，与老项目并排看得出。
+   */
+  shadowAsk: '0 10px 30px rgba(20,20,18,.14)',
   /**
    * 提醒滚轮的上下渐隐遮罩（老项目 index.html:235 `-webkit-mask-image:
    * linear-gradient(transparent,#000 32%,#000 68%,transparent)`）。
@@ -290,6 +318,8 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--zoom-line', p.zoomLine);
   s.setProperty('--zoom-dim', p.zoomDim);
   s.setProperty('--zoom-solid', p.zoomSolid);
+  s.setProperty('--dot-on', p.dotOn);
+  s.setProperty('--dot-idle', p.dotIdle);
   s.setProperty('--img-menu-shadow', OVERLAY.imgMenuShadow);
   s.setProperty('--zoom-btn-ink', OVERLAY.zoomBtnInk);
   s.setProperty('--zoom-pri-bg', OVERLAY.zoomPriBg);
@@ -303,6 +333,7 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--shadow-card', OVERLAY.shadowCard);
   s.setProperty('--shadow-box', OVERLAY.shadowBox);
   s.setProperty('--shadow-upload', OVERLAY.shadowUpload);
+  s.setProperty('--shadow-ask', OVERLAY.shadowAsk);
   s.setProperty('--wheel-fade-mask', OVERLAY.wheelFadeMask);
   // 🔴 二维码纸与取景台是**两套与主题无关的固定色**，但仍由这里注入：
   //   S4-T7 纪律闸禁止 styles.css 出现颜色字面量，就地写 rgba/hex 会绕过色板，

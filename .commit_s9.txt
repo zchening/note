@@ -1,0 +1,57 @@
+v1.1.0：用户报障 21 条逐条修复 —— 6 个 P0 全是"测试全绿但功能对用户不可达"
+
+## P0（测试长期全绿，用户实际用不了）
+
+1. **扫一扫浮层从未挂载**（第 12 条）
+   scan/layer.ts 建好 overlay 后只 append 到 box，从未 document.body.appendChild。
+   症状：点扫一扫 → 浏览器弹摄像头权限 → 允许 → 屏幕什么都不出，控制台零报错。
+   之所以长期全绿：cleanup() 里已写好 removeChild（读起来像挂载也完成了），
+   而 e2e 10-scan 只查 querySelector('#scanMask') !== null —— 那只证明对象建出来了。
+   守护：SCAN-E07 判据由 `count <= 1`（0 也满足！）改为 MutationObserver 观测
+   「挂载发生过 >=1 且 <=1」+ 相机不可用时必须给可见原因。
+
+2. **记忆解锁后二维码配对永远提示"解锁后才可使用"**（第 13 条）
+   route() 的 unlockIfRemembered 成功分支没设 sessionPass → 配对码拿不到载荷。
+   刻意不照抄老项目：老项目 raw key 明文存 localStorage，所以"记忆解锁后出码"天然成立；
+   本项目 CryptoKey 是 extractable:false，为出码降级成可导出，等于把
+   「XSS 拿到密钥即可离线解开全部历史密文」请回来。改为给「锁定笔记」的可执行出路。
+
+3. **折叠对真实用户不可达**（第 19 条）
+   behaviors.ts 的 rest.trim() !== '' 要求 [折叠] 之后必须为空，
+   而老项目 index.html:4101 foldLeadInfo 只看行首。删限制 + 补 startsClose 短路
+   （闭合锚 [/折叠] 绝不能建新组，老项目走 foldEndKind 另一套）。
+
+4. **AutoLinkNode type 对不上**（第 20 条）：registerAutoLink 注册 'autolink'，
+   而序列化只认 'link' → auto-link 出来的链接往返即丢 href。
+
+5. **body 缺 display:flex; flex-direction:column**（第 3 条）
+   老项目 index.html:96 有，拆 font 简写时整条丢了 → 纵向布局链全断 →
+   编辑器不撑满、底部菜单栏随内容滚动。.shell 同步补 flex:1。
+
+6. **时间 chip 常驻空圆角矩形**（第 2 条）：buildChip 初始 class 缺 hidden。
+
+## 文案逐字对齐（第 7/11 条）
+
+- 新增 --dot-on(#2FA866)/--dot-idle(#C9C7BE) 令牌：.dot.on 此前接 var(--accent)（金色），
+  这就是用户看到的"黄色"；并删掉 .dot 上无出处的 margin-left:42px 硬偏移（第 4 条）。
+- 删除「还没有设置提醒」（老项目无此文案）+ 补 #remBoxList:empty{display:none}。
+- 「图片已复制，可直接粘贴」改回「可直接 Ctrl+V 粘贴」（老项目 :2915）；
+  EXPORT-14 测试原钉的"失败文案必须自带『图片未生成』"是上一轮自造，
+  已按老项目穷举翻案，理由写进注释防回潮。
+- 扫码换机按 bakMask 逐字：「生成备份码」「关 闭」、说明段含 <b>备份笔记</b>。
+- 补二维码配对引导段（老项目 :774）；关于页补 qr-box class。
+- 提醒滚轮：mask 摘 hidden 之后才 resetWheelScroll（老项目 v5.55 注释：
+  display:none 内 scrollTop 无效），修「值对显示不对」（第 6 条）。
+
+## 测试闸加固
+
+- harness 补 /api/note/:id/history 桩（三条契约：PUT / ts 由服务端生成 / {list:[...]}），
+  此前桩缺这条路由把"点新增历史版本列表空"伪装成应用 bug。
+- harness 加 openEditorAt(..., {iso})：用 Playwright page.clock 在页面外冻结时间。
+  VVW-12 原断言「徽章默认隐藏」在深夜必然不成立（老项目 nsBadgeAt 22:00-06:00 必显示），
+  白天恒绿深夜恒红 —— 与「测试写死日历日期」同源的定时炸弹，这次写死的是时刻。
+
+## 测试数
+
+单测 42 + 347 + 28 + 27 = 444 全绿；e2e 138/138 全绿；typecheck rc=0。
+构建产物：app.js 582.2 KB sha256:5c3e7e39ad8ef623 / index.html 84702 字节。

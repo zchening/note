@@ -30,7 +30,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installHarness, openEditor, withTimeout } from './harness.mjs';
+import { installHarness, openEditor, openEditorAt, withTimeout } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 🔴 路径纪律：必须 4 级（e2e → test → client → packages → 仓库根）。
@@ -985,7 +985,16 @@ test('VVW-11 🔴🔴 查看器与长按菜单 CSS 变量必须已定义（功�
 
 test('VVW-12 🔴🔴 彩蛋徽章必须在顶栏品牌内联（不是 fixed 浮在右上角），窄屏只留图标', async () => {
   // 老项目 index.html:653（挂点在 header .brand 里）/ :298-302（胶囊样式）/ :321（560px 只留裸 emoji）
-  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw12', 'pw');
+  //
+  // 🔴🔴🔴 本条曾断言「徽章默认 display:none」，而它**长期是条定时炸弹**：
+  //   老项目 index.html:6574 `nsBadgeAt` —— 深夜（22:00–06:00）或节日**必然显示**徽章。
+  //   这条用例一旦在深夜跑，"默认隐藏"就必然不成立；白天跑又恒绿。
+  //   同一个断言在两个时刻得到两个结论，而它自己不知道自己依赖了时钟。
+  //   （与项目记过的「测试里写死日历日期 = 定时炸弹」同源，只是这次写死的是**时刻**。）
+  // 修法：把页面时钟**固定**在下午 2 点（既非深夜也非节日），两个断言都成立。
+  const page = await openEditorAt(h.browser(), h.baseUrl(), 'vvw12', 'pw', {
+    iso: '2026-10-05T14:00:00',
+  });
   try {
     const m = await page.evaluate(() => {
       const b = document.getElementById('nsBadge');
