@@ -70,6 +70,13 @@ export const COPY = {
   linkBrowser: '系统浏览器',
   linkHint: '笔记里的网址默认打开方式，仅对本机生效。',
 
+  /* 冲突裁决（老项目底部状态栏给提示，裁决入口在这里） */
+  conflictTitle: '同步冲突',
+  conflictKicker: '两台设备同时改了同一处，请选保留哪一份：',
+  conflictKeepLocal: '保留这台设备的',
+  conflictKeepRemote: '保留云端的',
+  conflictEmpty: '当前没有冲突',
+
   /* 顶栏 title（老项目原文，含全角括号） */
   titleStrike: '删除线',
   titleRemind: '提醒（到点通知或下次打开提示）',

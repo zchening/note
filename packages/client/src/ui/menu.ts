@@ -13,6 +13,7 @@
  */
 
 import { COPY, MENU_ITEM_IDS } from './copy.ts';
+import { escapeTrunc } from './escape.ts';
 import {
   ICON_BACK,
   ICON_CLOCK,
@@ -30,7 +31,7 @@ import {
   ICON_X,
 } from './icons.ts';
 
-export type MenuView = 'main' | 'fav' | 'hist' | 'link';
+export type MenuView = 'main' | 'fav' | 'hist' | 'link' | 'conflict';
 
 export interface MenuState {
   /** 当前笔记是否已收藏（决定收藏项文案与星标实心）。 */
@@ -43,6 +44,12 @@ export interface MenuState {
   favList: Array<{ name: string }>;
   /** 历史版本列表。S5 之后由真源喂进来。 */
   histList: Array<{ at: string; label: string }>;
+  /**
+   * 同步冲突条目。空数组 = 无冲突。
+   * 🔴 状态里放的是**已经算好的文案**，不是原始 diff。菜单只负责显示，
+   *   让它自己去理解 base/left/right 就会有两套"怎么算冲突"的理解。
+   */
+  conflicts: Array<{ at: string; label: string }>;
 }
 
 export interface MenuCallbacks {
@@ -59,6 +66,9 @@ export interface MenuCallbacks {
   onChangePass: () => void;
   onLock: () => void;
   onAbout: () => void;
+  /** 冲突裁决：保留本机 / 保留云端 */
+  onKeepLocal: () => void;
+  onKeepRemote: () => void;
 }
 
 /** 11 项的图标与文案解析。**顺序即菜单显示顺序**（老项目从上到下）。 */
@@ -87,6 +97,13 @@ export interface Menu {
   render: () => void;
   close: () => void;
   isOpen: () => boolean;
+  /**
+   * 打开面板并**直接落到指定视图**。
+   * 🔴 不这么设计的话，调用方只能 open() 之后再想办法切视图 ——
+   *   而 view 是模块内私有变量，外部改不了。绕开的结果通常是
+   *   "先 open 主视图，用户自己点三下才看到冲突" —— 冲突不等人。
+   */
+  openView: (v: MenuView) => void;
 }
 
 export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): Menu {
@@ -108,7 +125,15 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     }
     el.classList.remove('hidden');
     const body =
-      view === 'main' ? renderMain() : view === 'fav' ? renderFav() : view === 'hist' ? renderHist() : renderLink();
+      view === 'main'
+        ? renderMain()
+        : view === 'fav'
+          ? renderFav()
+          : view === 'hist'
+            ? renderHist()
+            : view === 'conflict'
+              ? renderConflict()
+              : renderLink();
     el.innerHTML = `<div class="box menu-box"><button type="button" id="menuClose" class="box-x" title="${COPY.back}" aria-label="${COPY.back}">${ICON_X()}</button>${body}</div>`;
     el.querySelector<HTMLButtonElement>('#menuClose')?.addEventListener('click', () => close());
     wire();
@@ -134,8 +159,8 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       ? st.favList
           .map(
             (f) =>
-              `<div class="list-row" data-name="${f.name}" role="button" tabindex="0">` +
-              `<span class="grow">${f.name}</span></div>`,
+              `<div class="list-row" data-name="${escapeTrunc(f.name)}" role="button" tabindex="0">` +
+              `<span class="grow">${escapeTrunc(f.name)}</span></div>`,
           )
           .join('')
       : `<div class="empty">${COPY.favEmpty}</div>`;
@@ -147,12 +172,32 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       ? st.histList
           .map(
             (h) =>
-              `<div class="list-row" data-at="${h.at}" role="button" tabindex="0">` +
-              `<span class="grow">${h.label}</span></div>`,
+              `<div class="list-row" data-at="${escapeTrunc(h.at, 30)}" role="button" tabindex="0">` +
+              `<span class="grow">${escapeTrunc(h.label)}</span></div>`,
           )
           .join('')
       : `<div class="empty">${COPY.histEmpty}</div>`;
     return `${head(COPY.menuHistEntry, `<span class="sp"></span><button type="button" id="histSave" class="row-btn">${COPY.histSave}</button>`)}<div class="menu-view">${rows}</div>`;
+  };
+
+  const renderConflict = (): string => {
+    if (st.conflicts.length === 0) {
+      return `${head(COPY.conflictTitle)}<div class="menu-view"><div class="empty">${COPY.conflictEmpty}</div></div>`;
+    }
+    const rows = st.conflicts
+      .map(
+        (c) =>
+          `<div class="list-row"><span class="grow">${escapeTrunc(c.label)}</span></div>`,
+      )
+      .join('');
+    const picks =
+      `<div class="menu-view">` +
+      `<div class="menu-item" id="cfKeepLocal" role="radio" aria-checked="false" tabindex="0">` +
+      `<span class="ic"></span><span class="mi-l">${COPY.conflictKeepLocal}</span></div>` +
+      `<div class="menu-item" id="cfKeepRemote" role="radio" aria-checked="false" tabindex="0">` +
+      `<span class="ic"></span><span class="mi-l">${COPY.conflictKeepRemote}</span></div>` +
+      `</div>`;
+    return `${head(COPY.conflictTitle)}<div class="list-kicker">${COPY.conflictKicker}</div>${rows}${picks}`;
   };
 
   const renderLink = (): string => {
@@ -223,6 +268,15 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       cb.onLinkMode(false);
       render();
     });
+    // 冲突裁决
+    bind(el.querySelector<HTMLElement>('#cfKeepLocal'), () => {
+      close();
+      cb.onKeepLocal();
+    });
+    bind(el.querySelector<HTMLElement>('#cfKeepRemote'), () => {
+      close();
+      cb.onKeepRemote();
+    });
   };
 
   /**
@@ -265,6 +319,11 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     open: () => {
       open = true;
       view = 'main';
+      render();
+    },
+    openView: (v: MenuView) => {
+      open = true;
+      view = v;
       render();
     },
   };

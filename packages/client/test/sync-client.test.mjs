@@ -21,8 +21,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, parseDoc } from '../../shared-schema/src/index.ts';
-import { SyncClient } from '../src/sync/client.ts';
+// 🔴 必须先装垫片再import 被测模块：writeCache 在 push 成功后会碰 localStorage，
+//   没有它就是 ReferenceError，症状是"S5-N5 去抖用例莫名红了"，与去抖无关。
+import { installBrowserShims } from './dom-shims.mjs';
+installBrowserShims();
+
+const { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, parseDoc } = await import('../../shared-schema/src/index.ts');
+const { SyncClient } = await import('../src/sync/client.ts');
+const { readCache, clearCache } = await import('../src/sync/local-cache.ts');
 
 const PASS = 'pw';
 
@@ -99,7 +105,9 @@ async function mkClient(handlers, opts = {}) {
   const errs = [];
   const dk = opts.dk ?? SHARED_DK;
   const c = new SyncClient({
-    noteId: 'n1',
+    // 🔴 noteId 必须可注入：缓存类用例要拿独立 noteId，
+    //   否则三条用例共用 'n1' 的缓存，后一条测的就不是自己的前置状态了。
+    noteId: opts.noteId ?? 'n1',
     key: dk.key,
     dk,
     getDoc: () => holder.doc,
@@ -305,3 +313,89 @@ test('S5-E2 AAD 域分离：note 密文不能用 meta 域解开', async () => {
     'AAD 不匹配的密文竟然解开了，域分离失效',
   );
 });
+
+/* ======================================================================
+ * 下面三条针对「推送成功后的本地缓存」。
+ *
+ * 🔴🔴 这组是实测才发现的缺陷的钉子：
+ *   原来只有「解锁时写缓存」，推送成功后不写。症状是云端已是新内容、
+ *   本机缓存还是旧的，用户一断网就看到旧正文，且**界面上没有任何报错**。
+ *   每个单独环节都成功，合起来给出一个错的结果 —— 静默降级的教科书形态。
+ *   没有测试钉住它，下一个人做"重构"时会理所当然地把它删掉。
+ * ====================================================================== */
+
+test('S5-C1 推送成功后本地缓存必须更新（断网时不回退到旧内容）', async () => {
+  const NOTE = 'cache-note';
+  clearCache(NOTE);
+  const h = fakeFetch([ok(''), ok({ ok: true })]);
+  globalThis.fetch = h;
+  const t = await mkClient([], { noteId: NOTE });
+  t.setDoc(docOf('第一版'));
+  await t.c.start();
+  t.c.noteEdit();
+  await settle();
+  // 推送成功了，缓存里就该有第一版
+  const c1 = readCache(NOTE);
+  assert.ok(c1, '推送成功后本地缓存为空 → 断网会看到旧内容');
+  assert.deepEqual(parseDoc(await decryptString(toEnv(c1), SHARED_DK.key, 'note')), docOf('第一版'));
+
+  // 第二版：再推一次，缓存必须跟着变
+  const h2 = fakeFetch([ok(''), ok({ ok: true })]);
+  globalThis.fetch = h2;
+  t.setDoc(docOf('第二版'));
+  t.c.noteEdit();
+  await settle();
+  const c2 = readCache(NOTE);
+  assert.deepEqual(parseDoc(await decryptString(toEnv(c2), SHARED_DK.key, 'note')), docOf('第二版'),
+    '🔴 缓存还停在第一版：断网后用户会看到自己已经改掉的内容');
+  clearCache(NOTE);
+});
+
+test('S5-C2 推送失败时缓存**不许**更新（否则以为存上了）', async () => {
+  const NOTE = 'cache-fail';
+  clearCache(NOTE);
+  // 先成功推一版，让缓存有内容
+  const h1 = fakeFetch([ok(''), ok({ ok: true })]);
+  globalThis.fetch = h1;
+  const t = await mkClient([], { noteId: NOTE });
+  t.setDoc(docOf('已存'));
+  await t.c.start();
+  t.c.noteEdit();
+  await settle();
+  const before = readCache(NOTE);
+  assert.ok(before);
+
+  // 再推一版，但 POST 失败。
+  // 🔴 这里**不能**多给一个 ok('')：fakeFetch 是按调用序号取响应的，
+  //   多一个就变成 POST 拿到 ok → 推送"成功"→ 缓存合法更新 → 用例测的其实不是失败路径。
+  //   第二个 h2 的第 0 次调用就是 POST（没有再调 start()，所以没有 GET）。
+  const h2 = fakeFetch([new Error('post failed')]);
+  globalThis.fetch = h2;
+  t.setDoc(docOf('没存上'));
+  t.c.noteEdit();
+  await settle();
+  const after = readCache(NOTE);
+  assert.equal(after.ct, before.ct, '🔴 推送失败了缓存却更新了 = 断网后看到没存上的内容');
+  clearCache(NOTE);
+});
+
+test('S5-C3 缓存信封的盐与信封一致（换会话能解开自己写的密文）', async () => {
+  const NOTE = 'cache-salt';
+  clearCache(NOTE);
+  const h = fakeFetch([ok(''), ok({ ok: true })]);
+  globalThis.fetch = h;
+  const t = await mkClient([], { noteId: NOTE });
+  t.setDoc(docOf('盐要对'));
+  await t.c.start();
+  t.c.noteEdit();
+  await settle();
+  const c = readCache(NOTE);
+  assert.equal(c.salt, SHARED_DK.saltB64, '缓存里的盐与实际用的钥匙不配对');
+  assert.equal(c.iter, SHARED_DK.iter, '缓存里必须存KDF 迭代数，否则将来调高迭代后老缓存全废');
+  clearCache(NOTE);
+});
+
+/** 缓存 → 信封（测试侧还原，供 decryptString 用） */
+function toEnv(c) {
+  return { v: 1, alg: 'AES-256-GCM', kdf: { name: 'PBKDF2-HMAC-SHA256', iter: c.iter, salt: c.salt }, iv: c.iv, ct: c.ct };
+}

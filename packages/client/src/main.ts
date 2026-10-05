@@ -27,7 +27,10 @@ import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc } from './serialize.ts';
-import { emptyDoc, normalize, type Doc } from '@bj/shared-schema';
+import { canonicalize, emptyDoc, normalize, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
+import { SyncClient } from './sync/client.ts';
+import type { SyncState } from './sync/fsm.ts';
+import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
@@ -111,31 +114,7 @@ function noteNameFromPath(): string {
   }
 }
 
-/* ---------------- 口令记忆 ---------------- */
-
-/**
- * 本机是否已记住某笔记的口令。
- *
- * 🔴 S4 只落"记住与否"这一个比特，真正的密钥存取在 S5 的 crypto 层接手
- *   （CryptoKey 存 IndexedDB，extractable:false）。这里刻意**不假装**已经有密钥 ——
- *   一个"看起来解锁了其实没解"的假成功，比明确要求输入口令糟糕得多。
- */
-const passKey = (name: string): string => `notesync_bj_has_${name}`;
-function hasPass(name: string): boolean {
-  try {
-    return localStorage.getItem(passKey(name)) === '1';
-  } catch {
-    // 隐私模式 / 存储被禁用：当作没记住，退回要求输入
-    return false;
-  }
-}
-function rememberPass(name: string): void {
-  try {
-    localStorage.setItem(passKey(name), '1');
-  } catch {
-    /* 存不下就本次会话内有效，不打扰用户 */
-  }
-}
+/* ---------------- 路由 ---------------- */
 
 /* ---------------- 应用装配 ---------------- */
 
@@ -146,6 +125,8 @@ if (!appEl) throw new Error('#app 不存在：index.html 与本文件不同源')
 const app: HTMLElement = appEl;
 
 let editor: LexicalEditor | undefined;
+/** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
+let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
 let currentPage = 'boot';
 let currentNote = '';
@@ -172,6 +153,7 @@ const menuState: MenuState = {
   linkInApp: readPref('linkInApp', '1') === '1',
   favList: [],
   histList: [],
+  conflicts: [],
 };
 
 let menuRef: ReturnType<typeof buildMenu> | undefined;
@@ -212,8 +194,14 @@ function onTopbar(act: TopbarAction): void {
   }
 }
 
-function mountEditor(name: string): void {
-  const initial: Doc = emptyDoc();
+/**
+ * 挂载编辑器。
+ * 🔴 `initial` 必须由调用方给**已解密**的文档，绝不能在这里再自己去拉 ——
+ *   解密是异步的，在 mountEditor 内部拉会出现"编辑器先显示空的，
+ *   稍后内容才闪进来"的中间态，而用户在这半秒内打字就会被打断。
+ */
+function mountEditor(name: string, initialDoc?: Doc): void {
+  const initial: Doc = initialDoc ?? emptyDoc();
   currentNote = name;
 
   const shell = buildShell(app, {
@@ -270,31 +258,41 @@ function mountEditor(name: string): void {
       applyTheme();
     },
     onChangePass: () => {
-      // S5 接：重设口令要重新派生密钥。S4 先清记住标记，下次进来重新问口令
-      try {
-        localStorage.removeItem(passKey(currentNote));
-      } catch {
-        /* ignore */
-      }
+      // 重设口令：真走换密钥（解旧密文 → 用新口令重加密 → 推上去 → 换本机密钥）。
+      // 🔴 绝不能只清个"记住"标记了事 —— 那样用户下次进来会被要求输新口令，
+      //   而云端还是旧口令的密文，于是**这篇笔记从此再也解不开**。
+      void doChangePassphrase();
     },
     onLock: () => {
-      try {
-        localStorage.removeItem(passKey(currentNote));
-      } catch {
-        /* ignore */
-      }
-      location.reload();
+      // 锁定 = 只清本机密钥与缓存，云端数据不动（老项目行为）。
+      void lockNote(name).then(() => location.reload());
     },
     onAbout: () => {
       location.href = '/about';
     },
+    onKeepLocal: () => {
+      // 保留本机：把当前内容推上去，覆盖云端。
+      // 🔴 必须走 sync 客户端而不是直接 POST：它持有 base，
+      //   直接推会让下次三方合并的祖先错位。
+      syncRef?.resolveKeepLocal();
+    },
+    onKeepRemote: () => {
+      // 保留云端：丢弃本机改动。
+      //🔴 这一步是**破坏性**的（用户本机输入的字会消失），
+      //   所以必须由用户显式点选，不能由程序自动裁决。
+      syncRef?.resolveKeepRemote();
+    },
   });
 
-  const { root, editorHost } = shell;
-  root.dataset.note = name;
-  root.dataset.version = APP_VERSION;
-  root.dataset.schema = String(SCHEMA_VERSION);
-  root.dataset.build = BUILD_DATE;
+  const { root: shellRoot, editorHost } = shell;
+  shellRoot.dataset.note = name;
+  shellRoot.dataset.version = APP_VERSION;
+  shellRoot.dataset.schema = String(SCHEMA_VERSION);
+  shellRoot.dataset.build = BUILD_DATE;
+  // 🔴 root 提到模块级：同步状态的回调（onSnapshot）要写 root.dataset.syncState，
+  //   而那个回调在 mountEditor 之外触发。留在局部会直接 ReferenceError，
+  //   且只在这条路径上炸 —— 表现为"底栏不更新"，与状态机无关。
+  root = shellRoot;
 
   const ed = createEditor({
     namespace: 'NoteSyncBJ',
@@ -319,8 +317,14 @@ function mountEditor(name: string): void {
   //   否则首次 commit 之前 latest 停在空文档，e2e 读到的是"从未提交过"的假象。
   ed.registerUpdateListener(({ editorState }: { editorState: EditorState }) => {
     // 🔴 state.read() 回调外节点句柄失效 —— 整段导出必须在回调内部完成
+    const before = latest;
     latest = normalize(lexicalToDoc(editorState, initial.reminders));
-    root.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latest)).length);
+    shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latest)).length);
+    // 🔴 只有内容真变了才推。
+    //   少了这个判断：docToLexical 的首次 update、以及 merge 把远端内容写回来时，
+    //   都会触发一次"编辑"，于是**刚拉下来的内容立刻被推回去** ——
+    //   两台设备会互相回声，永不停歇，且服务端被打满。
+    if (canonicalize(latest) !== canonicalize(before)) syncRef?.noteEdit();
   });
 
   ed.update(() => docToLexical(initial), { discrete: true });
@@ -331,6 +335,104 @@ function mountEditor(name: string): void {
   window.__NOTESYNC_EDITOR__ = ed;
   editor = ed;
   goto('editor');
+
+  // 🔴🔴 同步在首次 update **之后**才启动。
+  //   顺序反了会怎样：start() 立刻 pull → setDoc(远端) → 触发 update → noteEdit()
+  //   → 把刚拉下来的内容当成"用户刚编辑的"推回去。两台设备互相回声，永不停歇。
+  //   这就是上面那个 canonicalize 比较存在的原因：即便顺序变了也不会误推。
+  void startSyncFor(name);
+}
+
+/** 当前笔记的同步实例。切笔记时必须先 stop()，否则旧实例的 SSE 还在跑。 */
+let syncRef: SyncClient | undefined;
+
+/**
+ * 同步状态（9 态）→ 底栏（3 态）。
+ * 🔴 这个映射必须**穷举**且有 default 兜底：状态机加了新状态而这里没跟上时，
+ *   TypeScript 会因为 switch 不完整而报错（好）；但如果这里改成 if 链或断言成any，
+ *   新状态就会静默落到"看起来正常"的分支上 —— 底栏显示"已同步"而实际正在推送。
+ *   所以：switch + 每个 case 显式 return + default 兜底成connecting（最保守）。
+ */
+function footFor(s: SyncState): { s: 'connecting' | 'synced' | 'offline'; d?: string } {
+  switch (s) {
+    case 'idle':
+      return { s: 'synced' };
+    case 'offline':
+      return { s: 'offline', d: '离线中，改动会在恢复后自动同步' };
+    case 'conflict':
+      return { s: 'offline', d: '两台设备改了同一处，正在等你选保留哪一份' };
+    case 'dirty':
+    case 'pushing':
+      return { s: 'connecting', d: '正在保存' };
+    default:
+      return { s: 'connecting' };
+  }
+}
+
+async function startSyncFor(name: string): Promise<void> {
+  syncRef?.stop();
+  syncRef = undefined;
+  const dk = await deriveKeyFor(name);
+  if (!dk) {
+    // 拿不到密钥（理论上不该发生：能进编辑器就说明解锁成功过）
+    setFootStatus?.('offline', '本机密钥不可用，请刷新页面');
+    return;
+  }
+  const c = new SyncClient({
+    noteId: name,
+    key: dk.key,
+    dk,
+    getDoc: () => window.__NOTESYNC_DOC__?.() ?? emptyDoc(),
+    setDoc: (d) => {
+      // 远端/合并结果写回编辑器。**必须包在 update 里**，
+      // 直接改 Lexical 内部状态会在渲染之外改文档，症状是"内容变了但重绘没跟上"。
+      editor?.update(() => {
+        docToLexical(d);
+      }, { discrete: true });
+    },
+    onSnapshot: (s) => {
+      const f = footFor(s.state);
+      setFootStatus?.(f.s, f.d);
+      if (root) root.dataset.syncState = s.state;
+      if (s.state === 'conflict') showConflictHint();
+    },
+    onError: (msg) => {
+      setFootStatus?.('offline', msg);
+    },
+  });
+  syncRef = c;
+  await c.start();
+  // 🔴 新笔记：解锁时拿到的是空文档且云端也没有，必须立刻推一次，
+  //   否则"这篇笔记存在"这件事只存在于本机 —— 换台设备输入同一口令，
+  //   服务端返回 200 空体，会被当成另一篇新笔记，用户以为自己记的两篇笔记丢了。
+  if (pendingFresh) {
+    pendingFresh = false;
+    c.noteEdit();
+  }
+}
+
+/** 本次解锁是否为首建（需要首推）。 */
+let pendingFresh = false;
+
+async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
+  const rec = await resolveKey(name);
+  if (!rec) return undefined;
+  return { key: rec.key, saltB64: rec.salt, iter: rec.iter };
+}
+
+/** 冲突提示。裁决入口在菜单里，这里只把冲突条目显示出来。 */
+function showConflictHint(): void {
+  const c = syncRef;
+  if (!c) return;
+  const list = c.getConflicts();
+  if (list.length === 0) return;
+  menuState.conflicts = list.map((x) => ({ at: x.at, label: x.right || x.left }));
+  menuRef?.render();
+  // 🔴 冲突必须**主动**把用户带到裁决处，不能只在下巴上写一行字。
+  //   底栏那行字会被滚动、被切页面、被时间规则重绘冲掉；
+  //   而冲突不裁决的后果是"两边内容反复互相覆盖"，用户还以为网络在抽风。
+  //   这里自动打开菜单的冲突视图 —— 一次交互就能改完，不打断编辑。
+  menuRef?.openView('conflict');
 }
 
 /** 口令错 / 数据坏 —— 同一句话，不区分（ARCH 安全不变量：区分开等于给暴力破解 oracle） */
@@ -363,11 +465,13 @@ function showHome(): void {
 function showPass(name: string): void {
   buildPass(app, {
     onSubmit: async (pass) => {
-      if (pass.length === 0) return PASS_ERROR;
-      // 🔴 S4 只校验"非空"并记住标记；真正的密钥派生 + 解密在 S5 接上。
-      //   这里绝不能先放行再补 —— 那会造成"解锁成功但正文是空的"这种静默故障。
-      rememberPass(name);
-      mountEditor(name);
+      // 🔴🔴 这里必须真解锁，**不能**先放行再补。
+      //   "解锁成功但正文是空的"是本项目最危险的故障形态：用户会以为云端没内容，
+      //   重写一遍推上去，把另一台设备上的正文覆盖掉 —— 静默的数据丢失。
+      const r = await unlock({ noteId: name, passphrase: pass });
+      if (!r.ok) return r.message;
+      pendingFresh = r.fresh;
+      mountEditor(name, r.doc);
       return null;
     },
     onClose: () => {
@@ -376,6 +480,29 @@ function showPass(name: string): void {
     },
   });
   goto('pass');
+}
+
+/** 改口令的完整流程：从提示页拿新口令 → 换密钥 → 落盘。 */
+async function doChangePassphrase(): Promise<void> {
+  const next = window.prompt('输入新的口令');
+  if (next === null) return;
+  if (next.length === 0) {
+    setFootStatus?.('offline', '新口令不能为空');
+    return;
+  }
+  // 🔴 必须先验老口令。changePassphrase 内部会解老密文来确认，
+  //   这里不需要重复问一次 —— 用户输错老口令时它会返回同一句文案。
+  const doc = window.__NOTESYNC_DOC__?.() ?? emptyDoc();
+  const old = window.prompt('再输入一次当前口令以确认');
+  if (old === null) return;
+  const r = await changePassphrase(currentNote, old, next, doc);
+  if (!r.ok) {
+    setFootStatus?.('offline', r.message);
+    return;
+  }
+  setFootStatus?.('synced', '口令已改，下次用新口令');
+  // 换完密钥必须重建同步实例：它持有的是旧密钥
+  await startSyncFor(currentNote);
 }
 
 function route(): void {
@@ -395,8 +522,18 @@ function route(): void {
     showHome();
     return;
   }
-  if (hasPass(name)) mountEditor(name);
-  else showPass(name);
+  // 🔴 "本机记不记得"由**能不能取到密钥**决定，不是 localStorage 里一个布尔标记。
+  //   老项目用标记当记忆，于是"标记在、密钥没了"时依然进编辑器 = 假成功。
+  //   resolveKey 走内存 → IndexedDB，都拿不到才要口令。
+  void (async () => {
+    const rec = await unlockIfRemembered(name);
+    if (rec && rec.ok) {
+      pendingFresh = false;
+      mountEditor(name, rec.doc);
+      return;
+    }
+    showPass(name);
+  })();
 }
 
 function boot(): void {

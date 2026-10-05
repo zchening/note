@@ -25,6 +25,7 @@ import type { Doc } from '@bj/shared-schema';
 import { canonicalize, decryptString, deriveKey, emptyDoc, encryptString, normalize, parseDoc } from '@bj/shared-schema';
 import type { DerivedKey, Envelope } from '@bj/shared-schema';
 import { mergeDocs } from '@bj/shared-schema';
+import { writeCache } from './local-cache.ts';
 import { snapshotOf, reduce, type SyncEvent, type SyncSnapshot, type SyncState } from './fsm.ts';
 
 /** 客户端与服务端之间的载荷：永远是**信封**，不是明文。 */
@@ -306,8 +307,12 @@ export class SyncClient {
     this.send('push');
     const doc = normalize(this.d.getDoc());
     let payload: NotePayload;
+    // 🔴 env 必须提到 try 外面：推送成功后要拿它写本地缓存。
+    //   声明在 try 块内的话，写缓存那行拿不到，编译期不报错（同一函数作用域内），
+    //   但运行时是 undefined —— 除非把类型标成 any 或非严格模式。
+    let env: Envelope;
     try {
-      const env = await encryptString(canonicalize(doc), this.d.key, 'note', this.d.dk);
+      env = await encryptString(canonicalize(doc), this.d.key, 'note', this.d.dk);
       payload = { ...env, n: canonicalize(doc).length };
     } catch {
       this.d.onError('加密失败');
@@ -338,6 +343,12 @@ export class SyncClient {
     // 🔴 只有确认成功才推进 base —— 失败时 base 保持旧值，
     //   下次合并的"祖先"才不会错位。
     this.base = doc;
+    // 🔴🔴 推送成功后**必须**更新本地缓存。
+    //   漏了这一步的症状：云端是新内容，本机缓存还是旧的 —— 用户一断网就看到旧正文，
+    //   而且**没有任何报错**。这正是"静默降级"最典型的形态：
+    //   每个单独环节都成功，合起来给出一个错的结果。
+    //   （这条是实测发现的：解锁时写缓存、推送时不写，两处不一致。）
+    writeCache(this.d.noteId, env);
     this.send('pushed');
   }
 
