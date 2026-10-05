@@ -1,6 +1,6 @@
 {
   "name": "@bj/mcp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "MCP stdio 服务端：让 AI 直接读写 bj.xuyinji.com.cn 的加密笔记。零第三方依赖。",
   "type": "module",

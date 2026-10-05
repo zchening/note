@@ -1,6 +1,6 @@
 {
   "name": "notesync-bj",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "NoteSync bj — 端到端加密笔记 PWA（模型 JSON 真源 + Lexical）",
   "license": "UNLICENSED",
@@ -21,6 +21,7 @@
     "test:mcp": "npm run test --workspace @bj/mcp",
     "test": "npm run test:schema && npm run test:client && npm run test:server && npm run test:mcp",
     "test:e2e": "npm run test:e2e --workspace @bj/client",
+    "test:e2e:live": "node --test --test-concurrency=1 packages/client/test/e2e-live/00-live.test.js 2>&1 | node tools/check-live-e2e.mjs",
     "build": "npm run build --workspace @bj/client",
     "verify": "npm run typecheck && npm run test && npm run build"
   },

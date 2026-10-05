@@ -1,6 +1,6 @@
 {
   "name": "@bj/shared-schema",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "真源层：模型 JSON + canonical 序列化 + 手写 validator + 两层合并 + 加密信封。零运行时依赖。",
   "type": "module",

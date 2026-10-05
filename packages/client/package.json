@@ -1,6 +1,6 @@
 {
   "name": "@bj/client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "浏览器端：Lexical 编辑器 + 同步状态机 + UI 外壳。构建产物为 esbuild 单文件。",
   "type": "module",

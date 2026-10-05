@@ -1,0 +1,15 @@
+{
+  "appId": "cn.xuyinji.bj",
+  "appName": "NoteSync BJ",
+  "webDir": "www",
+  "loggingEnabled": false,
+  "android": {
+    "cleartext": false,
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "url": "https://bj.xuyinji.com.cn",
+    "androidScheme": "https"
+  }
+}
