@@ -128,6 +128,11 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
   editorHost.setAttribute('role', 'textbox');
   editorHost.setAttribute('aria-label', COPY.editorAria);
   editorHost.setAttribute('aria-multiline', 'true');
+  // 🔴 空态占位符（老项目 index.html:341 读 data-ph，:746 写这个字面量）。
+  //   少了它，空编辑器是一片空白 —— 用户不知道这里能不能点、能不能打字。
+  //   注意 CSS 侧不能照抄老项目的 `:empty`：Lexical 永远至少留一个
+  //   <p class="ns-p"><br></p>，:empty 恒不成立（详见 styles.css 里的注释）。
+  editorHost.setAttribute('data-ph', COPY.editorPlaceholder);
   editorHost.spellcheck = false;
   editorHost.className = 'ns-editor';
   main.appendChild(editorHost);

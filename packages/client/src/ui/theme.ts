@@ -28,6 +28,23 @@ export interface ThemeTokens {
   uploadBg: string;
   hover: string;
   danger: string;
+  /**
+   * 删除线线色（老项目 index.html:424 `rgba(152,149,138,.7)`）。
+   * 🔴 老项目**只写了这一处**、没有夜间覆写 —— 它的夜间值就等于日间值。
+   *   照实抄，不要"顺手给夜间换个深一档的"：那会让夜间正文里的删除线
+   *   与老项目不一致，而这类差异并排才看得出。
+   */
+  delLine: string;
+  /**
+   * 链接下划线色（老项目 index.html:380 `rgba(169,134,60,.35)`，hover 转实`var(--accent)`）。
+   * 🔴 同样只有单值，老项目夜间不改这一行。
+   */
+  linkLine: string;
+  /**
+   * 选中态底色（老项目 index.html:97 `rgba(169,134,60,.22)`）。
+   * 🔴 同上：老项目是**全局单值**，夜间不覆写。
+   */
+  selection: string;
 }
 
 /**
@@ -47,6 +64,9 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     uploadBg: '#1C1C1A',
     hover: 'rgba(28,28,26,.05)',
     danger: '#C0453E',
+    delLine: 'rgba(152,149,138,.7)',
+    linkLine: 'rgba(169,134,60,.35)',
+    selection: 'rgba(169,134,60,.22)',
   },
   dark: {
     bg: '#0F0F11',
@@ -60,6 +80,12 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     uploadBg: '#E9E8E3',
     hover: 'rgba(233,232,227,.07)',
     danger: '#C0453E',
+    // 🔴 三个值与浅色**逐字节相同**：老项目这三处根本不是令牌，是硬编码单值，
+    //   夜间不覆写（已在 index.html 里grep 确认每处只出现一次）。
+    //   写成"夜间更深的档"就是自造，判红。
+    delLine: 'rgba(152,149,138,.7)',
+    linkLine: 'rgba(169,134,60,.35)',
+    selection: 'rgba(169,134,60,.22)',
   },
 } as const;
 
@@ -96,6 +122,31 @@ export const OVERLAY = {
    */
   shadowChip: '0 14px 36px rgba(0,0,0,.16)',
   shadowCard: '0 18px 48px rgba(0,0,0,.2)',
+  /**
+   * 弹窗/响铃卡级浮起投影（老项目 index.html:189 与 :509 是**同一个值**）。
+   * 🔴 原先 `.box` 用的是 `0 10px 40px var(--ring)` —— 那是"聚焦光圈"的量级，
+   *   拿来做弹窗投影等于浮层没有高度感（弹窗贴在纸上而不是浮起来）。
+   *   老项目 .box 与 #remCard 同为 `0 24px 70px rgba(20,20,18,.16)`，故合并成一档。
+   */
+  shadowBox: '0 24px 70px rgba(20,20,18,.16)',
+  /**
+   * 底部上传状态条投影（老项目 index.html:598 `0 10px 30px rgba(20,20,18,.2)`）。
+   * 🔴 与浮层档分开：状态条是**贴在底栏上方**的小胶囊，投影更紧更实，
+   *   和弹窗共用一档会让它看起来像个大浮层。
+   */
+  shadowUpload: '0 10px 30px rgba(20,20,18,.2)',
+  /**
+   * 提醒滚轮的上下渐隐遮罩（老项目 index.html:235 `-webkit-mask-image:
+   * linear-gradient(transparent,#000 32%,#000 68%,transparent)`）。
+   *
+   * 🔴🔴 为什么整条渐变进theme.ts 而不是只把 `#000` 换成变量：
+   *   `#000` 是 mask 的**不透明挡位**标记（alpha=1），不是"黑色"——
+   *   写成 `var(--wheel-mask-ink)` 之类的新令牌会让人误以为可以给渐变调色，
+   *   而 mask 的语义恰恰是"这里完全不透明"。整条搬进来既过得了颜色扫描闸，
+   *   又不会给后人留一个"看起来能改色"的假旋钮。
+   */
+  wheelFadeMask:
+    'linear-gradient(transparent,#000 32%,#000 68%,transparent)',
   // 二维码纸：必须始终是白纸 + 深色码，与主题无关（见 applyThemeVars 处注释）
   qrPaper: '#FFFFFF',
   // 取景台径向渐变两色：比任何相机画面都深，保证取景框永远看得见
@@ -177,6 +228,10 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--upload-bg', p.uploadBg);
   s.setProperty('--hover', p.hover);
   s.setProperty('--danger', p.danger);
+  // 🔴 删除线/链接下划线/选中态三档：老项目是硬编码单值，两档同值（见 PALETTE 注释）。
+  s.setProperty('--del-line', p.delLine);
+  s.setProperty('--link-line', p.linkLine);
+  s.setProperty('--selection', p.selection);
   s.setProperty('--serif', FONTS.serif);
   s.setProperty('--mono', FONTS.mono);
   s.setProperty('--mask-bg', theme === 'dark' ? OVERLAY.maskDark : OVERLAY.maskLight);
@@ -184,6 +239,9 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   //   而投影本质是颜色，所以必须在这里注入而不是写在 styles.css。
   s.setProperty('--shadow-chip', OVERLAY.shadowChip);
   s.setProperty('--shadow-card', OVERLAY.shadowCard);
+  s.setProperty('--shadow-box', OVERLAY.shadowBox);
+  s.setProperty('--shadow-upload', OVERLAY.shadowUpload);
+  s.setProperty('--wheel-fade-mask', OVERLAY.wheelFadeMask);
   // 🔴 二维码纸与取景台是**两套与主题无关的固定色**，但仍由这里注入：
   //   S4-T7 纪律闸禁止 styles.css 出现颜色字面量，就地写 rgba/hex 会绕过色板，
   //   症状是"以后调深浅色时这两块忘了改"。

@@ -16,6 +16,7 @@
  */
 
 import { COPY } from '../ui/copy.ts';
+import { ICON_X } from '../ui/icons.ts';
 import type { LatestRelease } from './ota.ts';
 import type { CheckResult, NativeDeps, ProgressFn } from './ota-native.ts';
 import { appVersionLine, checkUpdate, runUpdate } from './ota-native.ts';
@@ -63,7 +64,12 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   x.type = 'button';
   x.title = COPY.close;
   x.setAttribute('aria-label', COPY.close);
-  x.textContent = '×';
+  // 🔴🔴 用 ICON_X 的 SVG，不要 textContent='×'：
+  //   字形 × 的 optical size / 笔画粗细由系统字体决定（各机型不一致），
+  //   而老项目全站关闭键都是 24 视框、描边 2 的同一枚路径（index.html:667/679），
+  //   并排看时字形 × 明显比旁边的 SVG 图标"轻一号、偏一号"。
+  //   走 innerHTML 是安全的：ICON_X 是本项目自产的常量字符串，无外部输入。
+  x.innerHTML = ICON_X();
   head.append(h1, x);
 
   const body = document.createElement('div');

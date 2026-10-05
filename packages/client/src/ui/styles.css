@@ -30,6 +30,12 @@ button, input { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; padding: 0; }
 svg.ic { display: block; }
 
+/* 🔴🔴 选中态（老项目 index.html:97 `::selection{background:rgba(169,134,60,.22)}`）。
+   原先整个项目**没有这条规则** —— 于是选中文字落进浏览器默认的亮蓝 system color，
+   蓝底 + 暖白正文是全站唯一一处"不像本App"的颜色，并排看正文与弹窗时最先刺眼。
+   值走令牌（老项目是硬编码单值，日夜同档，见 theme.ts PALETTE 注释）。 */
+::selection { background: var(--selection); }
+
 /* 🔴🔴🔴 图标次级描边必须复刻老项目的**金色高亮语义**（老项目 index.html:588-589）：
  *     svg .g  { stroke: var(--accent) }
  *     svg .gf { fill: var(--accent); stroke: none }
@@ -62,20 +68,50 @@ svg .gf { fill: var(--accent); stroke: none; }
   backdrop-filter: blur(10px);
 }
 .mask.hidden { display: none; }
+/* 🔴🔴 菜单遮罩必须**独立压过所有浮层**（老项目 index.html:506 `#menuMask{z-index:90}`）。
+   老项目在这条上面有专门的注释：菜单是模态独占交互，实测"点了没反应" ——
+   根因就是遮罩层叠上下文比提醒卡(58)/时间chip(57) 低，浮卡的 pointer-events
+   物理挡在菜单前面，用户的点击压根没落到菜单上。
+   本项目原先完全没写这条，.mask 通盘z40：提醒卡 58、时间 chip 57、
+   上传条 57 全都浮在菜单遮罩之上。 */
+#menuMask { z-index: 90; }
+/* 🔴 弹窗入场（老项目 index.html:509 `animation:rise .5s cubic-bezier(.2,.7,.3,1) both`）。
+   原先**整条动画缺失** —— 所有弹窗是"啪"一下出现的，没有老项目那种
+   "从下方 10px 升上来"的入场，浮层的"浮起"感全靠这一下。
+   🔴🔴 to 帧必须显式写全 transform：老项目 index.html:590 的 rise 是
+     `to{opacity:1;transform:none}`，而 fill-mode:both 会在动画结束后
+     **永久接管 transform**。.box 自身没有居中用的 transform（居中靠 .mask 的
+     flex），所以这里写 none 是安全的 —— 但仍要显式写出来，不能依赖默认。
+   🔴 名字加 ns 前缀：老项目已占用 rise / remRise / chipRise / drawRise 等全局名，
+     styles.css 是 inline 进单页的，撞名会互相覆盖（老项目 v5.44 的事故同源）。 */
+@keyframes nsRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
 .box {
   width: 100%; max-width: min(90vw, 380px);
   background: var(--box-bg);
   border: 1px solid var(--line);
   border-radius: 18px;
   padding: 34px 30px 28px;
-  box-shadow: 0 10px 40px var(--ring);
+  /* 🔴 阴影换 --shadow-box（老项目 0 24px 70px rgba(20,20,18,.16)）。
+     原先是 `0 10px 40px var(--ring)` —— 那是聚焦光圈的量级，
+     拿来做弹窗投影等于浮层贴在纸上，没有高度感。 */
+  box-shadow: var(--shadow-box);
+  transition: background-color .3s ease;
+  animation: nsRise .5s cubic-bezier(.2,.7,.3,1) both;
   max-height: 86vh; overflow-y: auto;
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .modal-head h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: .02em; }
-.box-x { width: 32px; height: 32px; display: grid; place-items: center;
-         border-radius: 8px; color: var(--muted); }
+/* 🔴 关闭键36×36 / 圆角 10（老项目 index.html:487）。原先 32px/8px —— 比老项目小一号。 */
+.box-x { width: 36px; height: 36px; display: grid; place-items: center;
+         border-radius: 10px; color: var(--muted); flex: none;
+         touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .box-x:hover { background: var(--hover); color: var(--fg); }
+/* 🔴 关闭图标 20×20（老项目 index.html:489 `.box-x svg{width:20px;height:20px}`）。
+   没有这条时 svg 落到 svg 默认尺寸，与 36px 盒子不配比。 */
+.box-x svg { width: 20px; height: 20px; }
 
 /* ---------- 落地页 ---------- */
 .landing {
@@ -163,18 +199,27 @@ svg .gf { fill: var(--accent); stroke: none; }
 
 /* ---------- 口令页 / 首页 ---------- */
 .box .hint { font-size: 12.5px; line-height: 1.7; color: var(--muted); margin: 10px 0 14px; }
+/* 🔴 口令框：老项目 index.html:513 `.box input{width:100%;padding:0 14px;height:46px;...}`。
+   原先 padding:11px 12px（高约 41px），比老项目矮 5px、左右内边距也差 2px。 */
 .box input[type="password"] {
   width: 100%; background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px;
-  padding: 11px 12px; font-size: 15px; outline: none;
+  height: 46px; padding: 0 14px; font-size: 15px; outline: none;
 }
 .box input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 .err { min-height: 1.2em; margin-top: 8px; font-size: 12.5px; color: var(--danger); }
+/* 🔴 主按钮：老项目 index.html:516 `.box button:not(.box-x){width:100%;height:46px;...;
+   letter-spacing:.08em}`。原先 padding:11px + `letter-spacing:4px`。
+   4px 是**绝对值**：老项目 .08em 会随字号缩放，而 4px 在 15px 字号下
+   等于 .267em —— 字距宽到「解 锁」两个字被拉散，是那种并排才看出来的松散感。 */
 .box > button#ok {
-  width: 100%; margin-top: 6px; padding: 11px;
+  width: 100%; height: 46px; margin-top: 6px; padding: 0 14px;
   border-radius: 10px; background: var(--upload-bg); color: var(--bg);
-  font-size: 15px; font-weight: 500; letter-spacing: 4px;
+  font-size: 15px; font-weight: 500; letter-spacing: .08em;
+  transition: opacity .2s ease;
 }
+.box > button#ok:hover { opacity: .85; }
+.box > button#ok:active { opacity: .75; }
 .box > button#ok:disabled { opacity: .35; cursor: not-allowed; }
 .home { min-height: 100%; display: flex; flex-direction: column;
         align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; }
@@ -248,56 +293,199 @@ header.ns-top {
   .ns-editor { padding: 24px 18px 100px; font-size: 16px; }
 }
 .ns-p { margin: 0; min-height: 1.85em; }
-.ns-h1, .ns-h2, .ns-h3 { font-family: var(--serif); font-weight: 600; margin: 1em 0 .4em; }
-.ns-h1 { font-size: 1.5em; } .ns-h2 { font-size: 1.28em; } .ns-h3 { font-size: 1.1em; }
-.ns-quote { margin: .6em 0; padding-left: 12px; border-left: 2px solid var(--accent);
-           color: var(--muted); }
-.ns-ul, .ns-ol { margin: .5em 0; padding-left: 1.6em; }
-.ns-li { margin: .2em 0; }
-.ns-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-.ns-b { font-weight: 700; } .ns-i { font-style: italic; } .ns-u { text-decoration: underline; }
-.ns-s { text-decoration: line-through; }
-.ns-c { font-family: var(--mono); font-size: .92em; background: var(--accent-soft);
-       padding: 1px 5px; border-radius: 4px; }
+
+/* 🔴🔴🔴 第 4 条核实结论：老项目对 h1/h2/h3/blockquote/ul/ol/li/代码**零样式**。
+ *
+ *   核实方式（不是凭印象）：把老项目 index.html 第 58-616 行的整个 <style> 块
+ *   捞出来 grep `h1|h2|h3|h4|blockquote|code|pre|li|ul|ol`，命中的 5 条**全部**
+ *   落在 .modal-head / .box / .home / #landing 之下（弹窗与落地页），
+ *   **没有一条在 #editor 之下**。也就是说正文里这几个标签完全没有样式：
+ *   老项目是 contenteditable 纯文本，压根不产生这些标签
+ *   （全文件 `<h1>`/`<pre>` 只出现在弹窗/落地页/彩蛋面板里，见 :632/:678/:755）。
+ *
+ *   而新项目（Lexical）凭空给它们加了一整套：衬线标题 1.5em/600、
+ *   金色左边框引用、accent-soft 底的等宽行内代码。
+ *   ⇒ 那是**另画的一套**，与老项目不一致，必须退回继承正文字体。
+ *   保留 Lexical 的 class 名（nodes.ts 依赖它们挂节点），但样式一律继承。
+ */
+.ns-h1, .ns-h2, .ns-h3 { font: inherit; margin: 0; }
+.ns-quote { margin: 0; padding: 0; border-left: 0; color: inherit; }
+.ns-ul, .ns-ol { margin: 0; padding-left: 1em; }
+.ns-li { margin: 0; }
+.ns-li-nested { margin: 0; }
 .ns-list-body { display: block; }
 
-/* 提醒标记：对应老项目 <u class="rem-mark">；到点后加 .rem-done 变删除线 */
-.ns-rem { text-decoration: none; border-bottom: 1.5px solid var(--accent);
-          cursor: pointer; }
-.ns-rem-done { text-decoration: line-through; color: var(--muted); border-bottom-color: var(--line); }
-/* 折叠块：手风琴把手 + 折叠体。open 状态是 ephemeral UI 态，不进真源。
+/* 链接：老项目 index.html:380-381
+   `color:var(--accent); text-decoration:underline; text-underline-offset:3px;
+    text-decoration-color:rgba(169,134,60,.35); transition:text-decoration-color .2s`
+   hover 变实色 `var(--accent)`。
+   🔴 原先只写了 offset:2px 且**完全没有线色** —— 用的是浏览器默认线色，
+     于是"悬停变实色"这个老项目特意做的反馈在新项目里也一并丢了。 */
+.ns-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--link-line);
+  transition: text-decoration-color .2s ease;
+  word-break: break-all; overflow-wrap: break-word;
+}
+.ns-link:hover { text-decoration-color: var(--accent); }
+.ns-b { font-weight: 700; } .ns-i { font-style: italic; } .ns-u { text-decoration: underline; }
+/* 删除线：老项目 index.html:424
+   `text-decoration-color:rgba(152,149,138,.7); color:var(--muted)`。
+   🔴 原先只有 `line-through` —— 线色与字色都退回浏览器默认，
+     表现为"黑灰细线 + 正常字色"，而老项目是"浅灰线 + muted 字"，整体更轻。 */
+.ns-s { text-decoration: line-through; text-decoration-color: var(--del-line); color: var(--muted); }
+/* 行内代码：老项目正文零样式（见上），故退回继承，不加等宽/底色。 */
+.ns-c { font: inherit; background: none; padding: 0; border-radius: 0; }
+
+/* 🔴🔴 提醒标记：对应老项目 `<u class="rem-mark">`（老项目 index.html:247）。
+ *
+ *   两个错一起修：
+ *   1. **类名写错了**：nodes.ts:89 造的是 `dom.className = 'rem-mark'`，
+ *      而这里原先写的是 `.ns-rem` —— 选择器命中不到任何元素，属静默失效。
+ *      症状是"提醒的下划线怎么没了"，但 DOM 里 class 明明在，极难自查。
+ *   2. **实现方式错了**：原先用 `border-bottom:1.5px solid var(--accent)`，
+ *      那是**金色实底方边框**，而老项目是 `text-decoration:underline`
+ *      （与正文同一套下划线机制，offset 3px、thickness 1.5px）。
+ *      两者并排看差别很明显：金色 1.5px 实边 vs 细下划线。
+ *
+ *   老项目为什么坚持 text-decoration：主题切换不反色，且底边距可精确控制。 */
+.rem-mark {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+  cursor: pointer;
+}
+/* 到点已推送：整段删除线 + 降透明（老项目 index.html:250 `s.rem-done`）。
+   🔴 原先 `.ns-rem-done` 同样命中不到（且把 border-bottom 改成line 色，
+     属"改错对象"）；这里同时补 thickness 与 opacity 两项。 */
+.rem-done {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--del-line);
+  opacity: .62;
+}
+/* 🔴🔴 折叠块：手风琴把手 + 折叠体。open 状态是 ephemeral UI 态，不进真源。
    🔴 结构是**单层**：标题 = children[0]（第一个子段落），其余children 是正文。
      DOM 树是 .ns-fold > (标题段落 | 正文段落…)，没有额外的 head/body 壳
      —— 原因见 nodes.ts FoldNode.createDOM 的注释（ElementDOMSlot 不可导出）。
      下面的选择器与 behaviors.ts 的点击判据、serialize.ts 的导入导出切法
-     **三处必须一致**，改任一处都要同步另两处。 */
+     **三处必须一致**，改任一处都要同步另两处。
+ *
+ * 🔴🔴 把手退回到老项目的「行内 muted 把手」（老项目 index.html:386-400）：
+ *   老项目是 `span.ns-fold-mark{font-size:0;padding:0 3px;margin-right:2px;
+ *   border-radius:6px;color:var(--muted)}` —— 一个**行内小块**，
+ *   三角与标题文字同处一行，标题本身是正常字色。
+ *   原先这里是 `display:flex` 的**整行金色块**（accent 字色 + gap 6px + padding 5px 0），
+ *   整篇折叠标题全变金、并被撑成一整条可点区域 —— 与老项目并排看，
+ *   正文里一出现折叠就"跳"出整块金色，是这批差异里最刺眼的一条。 */
 .ns-fold > :first-child {
-  display: flex; align-items: center; gap: 6px; cursor: pointer;
-  padding: 5px 0; color: var(--accent);
+  cursor: pointer; color: inherit;
   touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 /* 三角用边框画，不用"▸"字形：字形比汉字小一圈，行高加再大也追不上图标。
-   两态必须同盒全等（收起 8w×8h/展开 8w×8h），否则两态行盒占宽不同会跳行。 */
+   两态必须同盒全等（收起 8w×8h/展开 8w×8h），否则两态行盒占宽不同会跳行。
+   🔴 currentColor 取自把手自己的 muted（见下），不再吃标题的 accent。 */
 .ns-fold > :first-child::before {
-  content: ""; display: inline-block; flex: none;
+  content: ""; display: inline-block;
   width: 0; height: 0;
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
-  border-left: 8px solid currentColor;
+  border-left: 8px solid var(--muted);
   vertical-align: middle; position: relative; top: -6px;
+  /* 老项目把手是 `padding:0 3px` + `margin-right:2px` 的行内小块（index.html:386）。
+     三角本身是 0×0 盒（视觉全由边框构成），**不能加 padding** ——
+     那会把上下 transparent 边从 4px 撑成 4+2×padding，三角直接变形。
+     所以用 margin 等效复刻那6px 让位：左 3px（=padding-left）+ 右 5px（=padding-right 3 + margin-right 2）。 */
+  margin: 0 5px 0 3px;
 }
 .ns-fold[data-open="true"] > :first-child::before {
-  border-top: 8px solid currentColor;
+  border-top: 8px solid var(--muted);
   border-bottom: 0;
   border-left: 4px solid transparent;
   border-right: 4px solid transparent;
-  top: -8px;
+  top: -6px;
 }
-/* 正文：往里缩进 + 左侧引导线（--line 令牌，非新色；老项目 v9.1.1 同款） */
-.ns-fold > :not(:first-child) { padding-left: 14px; border-left: 2px solid var(--line); margin-left: .5em; }
+/* 把手 hover 底：老项目是 `span.ns-fold-mark:hover{background:var(--hover)}`，
+   底色只盖住 14×0 的小把手盒（index.html:400）。
+   🔴 本项目的把手是 0×0 的 ::before，直接 background 什么都画不出来
+     （内容盒面积为 0），故用 spread 阴影把一小块圆角底补在三角周围。
+     spread 7 + 4px 偏移 ⇒ 约14×14 的圆角块，与老项目把手盒同量级。 */
+.ns-fold > :first-child:hover::before {
+  border-radius: 7px;
+  box-shadow: 4px 0 0 7px var(--hover);
+}
+/* 命中区放大：老项目 index.html:399 在把手上挂一枚absolute 的透明 ::after
+   （18×20）——因为三角改用边框画之后 span 自身盒高恒为 0，桌面唯一命中面
+   就是 ::before 的边框盒（实测掉到 63px²），点偏就落进正文。
+   本项目把手盒同理是 0 高，故必须补这一枚。 */
+.ns-fold > :first-child { position: relative; }
+.ns-fold > :first-child::after {
+  content: ""; position: absolute; left: -4px; top: -15px; width: 18px; height: 20px;
+}
+/* 正文：往里缩进 + 左侧引导线（--line 令牌，非新色；老项目 v9.1.1 同款）。
+   🔴 缩进必须是 1em 不是 14px：老项目 index.html:402 是
+     `margin-left:.5em;padding-left:1em` —— 用 em 是因为字号会随
+     ≤560px 媒体查询从 17px 掉到 16px，写死 px 会让窄屏的引导线内缩量对不上。 */
+.ns-fold > :not(:first-child) { padding-left: 1em; border-left: 2px solid var(--line); margin-left: .5em; }
 /* 收起态：藏掉除标题外的全部子块。标题恒可见（老项目铁律：收起后仍要能看见并再展开） */
 .ns-fold[data-open="false"] > :not(:first-child) { display: none; }
-.ns-img { display: block; max-width: 100%; border-radius: 8px; margin: 6px 0; }
+
+/* 🔴 窄屏（≤560px）把手命中区 44×44（老项目 index.html:418）。
+   老项目是把span 本体改成 44×44 的 inline-flex，本项目把手是 ::before、
+   改它会破坏三角几何，故由 ::after 承担这块 44×44 感应区。
+   三角同时按老项目 v10.0.4 放大一档（长边 8→9px、上下 4→5px），手指更容易点中。 */
+@media (max-width: 560px) {
+  .ns-fold > :first-child::before {
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 9px solid var(--muted);
+    top: 0;
+  }
+  .ns-fold[data-open="true"] > :first-child::before {
+    border-top: 9px solid var(--muted);
+    border-bottom: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    top: 0;
+  }
+  .ns-fold > :first-child::after { left: -8px; top: -12px; width: 44px; height: 44px; }
+}
+
+/* 🔴 打印时展开全部折叠（老项目 index.html:423，浏览器 Ctrl+P 直打活的编辑器，
+   收起态正文会整段丢在纸外）。三角是用边框画的，所以"去三角"必须连边框一起清零 ——
+   只清 content 会留下一枚画出来的三角。 */
+@media print {
+  .ns-fold[data-open="false"] > :not(:first-child) { display: block; }
+  .ns-fold > :first-child::before {
+    content: ""; display: none; border: 0; width: 0; height: 0; top: 0;
+  }
+}
+
+/* 🔴 空态占位符（老项目 index.html:341 + :746 `data-ph="开始输入，自动同步到所有设备…"`）。
+   原先**整条规则缺失** —— 空编辑器是一片纯白，用户不知道能不能点、能不能打字。
+   🔴🔴 判据不能照抄老项目的 `#editor:empty:before`：老项目编辑器是**裸
+     contenteditable div**，空了就是真空；本项目是 Lexical，**永远**至少有一个
+     `<p class="ns-p"><br></p>`（实测 :empty恒不成立，见 15-visual-editor 的探针断言）。
+     照抄的结果是规则在、但永远不命中 —— 又是那种"代码写了、界面没变"的静默失效。
+     ⇒ 改判"唯一子元素且它里面只有 Lexical 托管的占位 br"。 */
+.ns-editor:has(> .ns-p:only-child > br:only-child)::before {
+  content: attr(data-ph);
+  color: var(--muted); opacity: .75;
+  pointer-events: none;
+}
+
+/* 正文图片：老项目 index.html:343
+   `border-radius:10px; border:1px solid var(--line); cursor:zoom-in`。
+   🔴 原先圆角 8px、无描边、无 zoom-in 光标。 */
+.ns-img { display: block; max-width: 100%; margin: 6px 0; }
+.ns-img img {
+  display: block; max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  cursor: zoom-in;
+}
 
 footer.ns-foot {
   display: flex; align-items: center; justify-content: center; gap: 7px;
@@ -419,82 +607,191 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   background: var(--box-bg); border: 1px solid var(--line); border-radius: 16px;
   box-shadow: var(--shadow-chip); cursor: pointer; user-select: none;
   -webkit-user-select: none; touch-action: manipulation; animation: chipRise .28s cubic-bezier(.2,.7,.3,1) both; }
-@keyframes chipRise { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } }
+/* 🔴🔴 to 帧必须显式写全transform：fill-mode:both 会在动画结束后永久接管
+   transform，缺 to 帧时用的是「无动画时的计算值」，一旦基座换定位方式
+   （如改成 bottom 锚点）居中偏移会被抹掉。旧写法只给了 from帧。 */
+@keyframes chipRise {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to   { opacity: 1; transform: translateX(-50%); }
+}
 #timeChip .ns-chip-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-#timeChip .ns-chip-rel { flex: none; font-size: 12.5px; color: var(--muted); }
-#timeChip .ns-chip-clock { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
-#timeChip .ns-chip-item { font-size: 13.5px; color: var(--fg); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-#timeChip .ns-chip-cta { align-self: flex-start; padding: 7px 14px; border-radius: 9px;
-  font-size: 13px; font-weight: 600; color: var(--bg); background: var(--fg);
-  border: none; display: inline-block; }
-#timeChip .ns-chip-done { color: var(--accent); background: none; padding-left: 0; }
+/* 🔴 相对日11px + .08em 字距（老项目 index.html:218 `.chip-day{font-size:11px;...;letter-spacing:.08em}`）。
+   原先 12.5px 无字距 —— 与右侧 16px 的时钟并排时左边那块明显偏大偏松。 */
+#timeChip .ns-chip-rel { flex: none; font-size: 11px; color: var(--muted); letter-spacing: .08em; }
+#timeChip .ns-chip-clock { font-size: 16px; font-weight: 600; line-height: 1.35;
+  font-variant-numeric: tabular-nums; }
+/* 🔴 事项行字色 muted（老项目 index.html:219 `.chip-what{color:var(--muted)}`）。
+   原先是 fg —— 事项与时间同色同重，读起来像两句并列的标题，而不是"主时间 + 次事项"。 */
+#timeChip .ns-chip-item { font-size: 13px; line-height: 1.5; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 🔴 分隔线（老项目 index.html:220 `.chip-sep{height:1px;margin:1px -15px 2px;background:var(--line)}`）。
+   负margin 让线**通栏**抵到卡片左右内边距（老项目原值），不是缩在内容列里。 */
+#timeChip .ns-chip-sep { height: 1px; margin: 1px -15px 2px; background: var(--line); }
+/* 🔴 CTA 回到老项目的**通栏居中 42px**（老项目 index.html:221
+   `.chip-cta{display:flex;align-items:center;justify-content:center;min-height:42px;...}`）。
+   原先是 `align-self:flex-start` 的小钮 —— 左对齐、贴着事项行，
+   与"通栏按钮"的语言完全不同（老项目全站主按钮一律通栏反色）。 */
+#timeChip .ns-chip-cta { align-self: stretch; display: flex; align-items: center;
+  justify-content: center; min-height: 42px; padding: 0; border-radius: 11px;
+  font-size: 14.5px; font-weight: 600; letter-spacing: .02em;
+  color: var(--bg); background: var(--fg); }
+#timeChip .ns-chip-cta:active { opacity: .82; }
+/* 已添加的两行确认卡：不是按钮，不吃通栏反色（老项目 index.html:229-230） */
+#timeChip .ns-chip-done { background: none; color: var(--accent); font-weight: 600;
+  justify-content: flex-start; }
+#timeChip .ns-chip-done:active { opacity: 1; }
 
 /* ---- 上传状态条 #uploadNote：老项目 showUploadStatus 同款 ----
-   🔴 失败态必须比成功态停留更久（4500 vs 2000，见 copy.ts）：
-   老项目 v10.0.0 关键路径止血 —— 2 秒在手机上根本来不及看清一次失败原因，
-   用户只看到图片没出来，以为功能坏了。静默失败比报错更伤信任。
-   零颜色字面量：ok / bad 都走 var() 令牌（有 S4-T7 机械扫描守护）。 */
-#uploadNote { position: fixed; top: 54px; left: 50%; transform: translateX(-50%);
-  z-index: 57; max-width: 88vw; padding: 9px 15px; font-size: 13.5px; line-height: 1.5;
-  color: var(--fg); background: var(--box-bg); border: 1px solid var(--line);
-  border-radius: 12px; box-shadow: var(--shadow-chip); pointer-events: none;
-  animation: chipRise .22s cubic-bezier(.2,.7,.3,1) both; }
-#uploadNote[data-kind="ok"] { color: var(--accent); }
-#uploadNote[data-kind="bad"] { color: var(--danger); }
+   🔴🔴 位置与配色整体退回老项目（index.html:598 `.upload-status`）：
+     老项目是**贴底黑色胶囊** —— `position:fixed; bottom:44px; z-index:89;
+     background:var(--upload-bg); color:var(--bg); padding:10px 20px;
+     border-radius:999px`，靠 opacity 进出，不是白卡。
+     原先是 `top:54px` 的**白卡**（--box-bg + 1px 描边 + 12px 圆角）——
+     而top:54px 正是时间 chip 与提醒卡的锚点那条线，三者叠在同一条竖直轴上
+     互相打架。贴底则与底栏成一条"状态带"，bottom:44px 正好坐在 44px 底栏之上。
+   🔴 状态色：老项目**只有一种外观**（黑底反色），成功/失败全靠文案区分
+     （index.html:2412「上传成功」/ :2416「上传失败：…，图片未插入，请重试」）。
+     所以这里不再给 [data-kind] 染色：失败文案本身已含"未插入/请重试"，
+     而染色会与 06/09/13/14 四支 e2e 依赖的 data-kind 语义脱钩
+     （它们断言的是文案与 kind，不是颜色）。
+   🔴 入场动画刻意不加：老项目这条只有 opacity 过渡（`.upload-status{transition:opacity .3s}`
+     + `.show{opacity:1}`），没有位移入场。 */
+#uploadNote { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  z-index: 89; max-width: 88vw; padding: 10px 20px; font-size: 13px; line-height: 1.5;
+  letter-spacing: .03em; color: var(--bg); background: var(--upload-bg);
+  border-radius: 999px; box-shadow: var(--shadow-upload); pointer-events: none; }
 
-/* ---- 响铃卡 remCard：页内主通道，无论通知权限如何都弹 ---- */.ns-remcard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
-  z-index: 58; width: min(90vw, 360px); padding: 20px 18px 16px; color: var(--fg);
-  background: var(--box-bg); border: 1px solid var(--line); border-radius: 16px;
-  box-shadow: var(--shadow-card); }
-.ns-remcard .box-x { position: absolute; top: 10px; right: 10px; }
-.ns-remcard-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
-.ns-remcard-list { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px;
-  max-height: 46vh; overflow-y: auto; }
-.ns-rem-item { display: flex; flex-direction: column; gap: 3px; }
-.ns-rem-when { font-size: 14px; line-height: 1.55; overflow: hidden;
-  text-overflow: ellipsis; }
-.ns-rem-late { font-size: 11.5px; color: var(--muted); }
-.ns-remcard-ack { display: block; width: 100%; padding: 11px; text-align: center;
-  font-size: 14px; font-weight: 600; color: var(--bg); background: var(--fg);
-  border-radius: 11px; cursor: pointer; }
+/* ---- 响铃卡 remCard：页内主通道，无论通知权限如何都弹 ---- */
+/* 🔴🔴 几何整体对齐老项目 index.html:189-206：
+     padding 20/18/16 → 30/30/26、圆角 16 → 18、宽 360 → 380、
+     z-index 58 → 80、补 remRise 入场。原先那张卡又扁又窄、层级还压在
+     时间 chip 下面，而它是"到点提醒"这个最高优先级的事件。 */
+.ns-remcard { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  z-index: 80; width: min(90vw, 380px); max-width: 86vw;
+  padding: 30px 30px 26px; color: var(--fg);
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 18px;
+  box-shadow: var(--shadow-box);
+  display: flex; flex-direction: column; gap: 14px; text-align: center;
+  animation: nsRemRise .5s cubic-bezier(.2,.7,.3,1) both; }
+/* 🔴🔴🔴 to 帧**必须自带 translate(-50%,-50%)** —— 这是老项目明确记过的事故
+   （index.html:186-188 与 v5.44）：通用 rise 的 to 帧是 transform:none，
+   而 fill-mode:both 会在动画结束后**永久接管 transform**，
+   于是基座那半屏宽的居中偏移被抹掉，卡片左上角钉在屏幕中心点
+   （用户看到的现象是"卡片不在正中心"，偏出去半个卡宽）。
+   两个帧都写全居中位移，这个坑就绕过去了。 */
+@keyframes nsRemRise {
+  from { opacity: 0; transform: translate(-50%,-50%) translateY(14px); }
+  to   { opacity: 1; transform: translate(-50%,-50%); }
+}
+.ns-remcard .box-x { position: absolute; top: 14px; right: 14px; }
+/* 标题 18px（老项目 index.html:191 `.remCardTitle{font-size:18px}`）。原先 15px。 */
+.ns-remcard-title { font-size: 18px; font-weight: 600; letter-spacing: .02em; }
+/* 列表 gap 6px（老项目 index.html:195，v7.1.0 由 10 收到 6：用户反馈行距过大）。
+   限高内滚 + overscroll 防滚动穿透（长列表顶爆卡片）。 */
+.ns-remcard-list { display: flex; flex-direction: column; gap: 6px;
+  font-size: 13.5px; line-height: 1.4;
+  max-height: min(60vh, 440px); overflow-y: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+/* 条目 min-height 40px 保可点热区（老项目 index.html:196）。 */
+.ns-rem-item { display: flex; flex-direction: column; gap: 2px;
+  min-height: 40px; justify-content: center; }
+.ns-rem-when { font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+.ns-rem-late { color: var(--muted); font-size: 11.5px; }
+/* 「知道了」：老项目 index.html:201 是 height:46px 通栏、字距 .08em。
+   原先是 padding:11px（高约 41px）且字距没有 —— 与老项目 .box 主按钮
+   同一套外观是v5.40 定的对齐关系，两处不一致就散了。 */
+.ns-remcard-ack { display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 46px; margin-top: 4px; padding: 0; text-align: center;
+  font-size: 15px; font-weight: 500; letter-spacing: .08em;
+  color: var(--bg); background: var(--fg);
+  border-radius: 10px; cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.ns-remcard-ack:hover { opacity: .85; }
+.ns-remcard-ack:active { opacity: .75; }
 
 /* ---- 提醒面板 remPanel：时/分滚轮 ---- */
-/* 🔴 滚轮值以 dataset.val 为唯一事实源，jsdom 无布局也能读写与测试。 */
+/* 🔴 滚轮值以dataset.val 为唯一事实源，jsdom 无布局也能读写与测试。 */
 .ns-rembox { width: min(92vw, 380px); max-height: 86vh; overflow-y: auto; }
 .ns-rem-form { display: flex; flex-direction: column; gap: 11px; }
-.ns-rem-time-row { display: flex; align-items: center; gap: 8px; }
+.ns-rem-time-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .ns-rem-time-row input[type="date"] { flex: 1; min-width: 0; padding: 9px 10px;
   font-size: 14px; color: var(--fg); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; }
-.ns-rem-colon { font-size: 17px; color: var(--muted); }
-.ns-rem-wheel-wrap { position: relative; flex: none; }
-.ns-rem-wheel { width: 62px; height: 132px; overflow-y: auto; scroll-snap-type: y mandatory;
-  text-align: center; scrollbar-width: none; }
+.ns-rem-colon { color: var(--muted); font-weight: 600; flex: none; }
+/* 🔴 滚轮盒几何回老项目 index.html:235-242：
+     外层 54×150、1px 描边、圆角 12、盒内上下渐隐mask；
+     内层 15px 字号、50px 行高、cur 为 fg + 500。原先 62×132、无描边无渐隐。
+   🔴 渐隐渐变整条来自 theme.ts 的 --wheel-fade-mask（含那个 #000 不透明挡位），
+     本文件不出现颜色字面量 —— S4-T7 机械扫描闸守着这条。 */
+.ns-rem-wheel-wrap { position: relative; width: 54px; height: 150px; flex: none;
+  overflow: hidden; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--box-bg);
+  -webkit-mask-image: var(--wheel-fade-mask);
+  mask-image: var(--wheel-fade-mask); }
+/* 🔴🔴🔴 内层高必须**写死 150px**，不能写 height:100%。
+ *
+ *   踩坑实录：外层 wrap 是 150px 且带 1px 描边 + box-sizing:border-box，
+ *   于是 `height:100%` 解析成 150 − 1 − 1 = **148px**。
+ *   而滚轮的行高是 50px、scroll-snap 吃的是"行高整数倍"，
+ *   148 不是 50 的整数倍 ⇒ 吸附点算出来是 1px、51px…
+ *   浏览器开局就把 scrollTop 拉到最近的吸附点**并触发一次 scroll 事件**，
+ *   而 ui.ts 的 scroll 回调是 `val = round(scrollTop / 50)` ⇒ 默认小时被改写成 0。
+ *   症状是"打开提醒面板，时间默认成了 00:00"，且只在加了描边之后出现 ——
+ *   极像"snapping 坏了"，实际是一行 height:100%。
+ *
+ *   老项目没这个坑：它的 .rem-wheel 同样写在 150px 高的 wrap 里，
+ *   但那时候还没有那条 1px 描边（描边是这一批按 index.html:235 复刻进来的）。
+ *   行高 50px × 3 = 150 ⇒ 吸附点正好落在行边界上，scrollTop 开局为 0。 */
+.ns-rem-wheel { width: 100%; height: 150px; overflow-y: auto;
+  scroll-snap-type: y mandatory; scrollbar-width: none; outline: none;
+  -webkit-overflow-scrolling: touch; }
 .ns-rem-wheel::-webkit-scrollbar { display: none; }
-.ns-rem-wheel-pad { height: 41px; }
-.ns-rem-wheel-it { height: 50px; line-height: 50px; font-size: 16px; color: var(--muted);
-  scroll-snap-align: center; font-variant-numeric: tabular-nums; }
-.ns-rem-wheel-it.cur { color: var(--fg); font-weight: 600; }
-.ns-rem-wheel-mid { position: absolute; left: 0; right: 0; top: 50%; height: 50px;
-  transform: translateY(-50%); border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line); pointer-events: none; }
+.ns-rem-wheel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ns-rem-wheel-pad { height: 50px; }
+.ns-rem-wheel-it { height: 50px; line-height: 50px; text-align: center;
+  font-size: 15px; color: var(--muted); scroll-snap-align: center;
+  cursor: pointer; user-select: none; -webkit-user-select: none;
+  font-variant-numeric: tabular-nums; }
+.ns-rem-wheel-it.cur { color: var(--fg); font-weight: 500; }
+/* 🔴🔴 选中线回到**金色 1.5px 上下双线**（老项目 index.html:242
+   `.rem-wheel-mid{border-top:1.5px solid var(--accent);border-bottom:1.5px solid var(--accent)}`）。
+   原先是 `1px solid var(--line)` 的中性灰细线 —— 那是"两条淡淡的分隔线"，
+   看不出"当前选中的是这一格"；金色双线才是"选择器"该有的样子。 */
+.ns-rem-wheel-mid { position: absolute; left: 5px; right: 5px; top: 50%; height: 50px;
+  transform: translateY(-50%);
+  border-top: 1.5px solid var(--accent); border-bottom: 1.5px solid var(--accent);
+  border-radius: 2px; pointer-events: none; }
 .ns-rem-input { width: 100%; padding: 10px 11px; font-size: 14px; color: var(--fg);
   background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
 .ns-rem-add { width: 100%; padding: 11px; font-size: 14px; font-weight: 600;
   color: var(--bg); background: var(--fg); border: none; border-radius: 11px; cursor: pointer; }
 .ns-rem-tip { font-size: 12px; color: var(--accent); }
 .ns-bad { border-color: var(--accent) !important; }
+/* 🔴🔴 已设提醒列表回到老项目的**裸行 + 顶部一条分隔线**（老项目 index.html:280-284）：
+     容器 `border-top:1px solid var(--line); padding-top:14px`，
+     行本身 `background:none`、**无描边无圆角**。
+   原先是每行一个胶囊卡片（1px 描边 + 10px 圆角 + --box-bg 实底+ padding 10px 11px），
+   于是这一段与上方"通栏反色"的添加按钮完全同构 —— 列表看起来像一摞按钮，
+   而老项目那里是"一行行文字 + 右侧一个描边小×"，层级完全不同。 */
+.ns-rem-list { display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 14px;
+  max-height: min(60vh,440px); overflow-y: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 /* 老项目 v5.42：行内容用裸文本节点，span 元素盒被国产浏览器夜间模块吃字。
    颜色由行容器锁定继承，布局用 grid(1fr auto)。 */
-.ns-rem-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .ns-rem-row { display: grid; grid-template-columns: 1fr auto; align-items: center;
-  gap: 10px; padding: 10px 11px; font-size: 13.5px; text-align: left; color: var(--fg);
-  border: 1px solid var(--line); border-radius: 10px; background: var(--box-bg); }
-.ns-rem-off { flex: none; width: 26px; height: 26px; font-size: 16px; line-height: 1;
-  color: var(--muted); background: none; border: 1px solid var(--line);
-  border-radius: 8px; cursor: pointer; }
-.ns-rem-off:hover { color: var(--fg); background: var(--hover); }
+  gap: 10px; font-size: 13px; line-height: 1.5; text-align: left; color: var(--fg);
+  background: none; border: 0; border-radius: 0; padding: 0; }
+/* 行内取消键：老项目 index.html:283 `padding:4px 12px;font-size:12px;
+   border:1px solid var(--line);border-radius:8px`（描边小钮，非实心方块）。 */
+.ns-rem-off { flex: none; padding: 4px 12px; font-size: 12px; line-height: 1.5;
+  color: var(--fg); background: none; border: 1px solid var(--line);
+  border-radius: 8px; cursor: pointer;
+  transition: border-color .2s ease;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.ns-rem-off:hover { border-color: var(--muted); }
+.ns-rem-off:active { opacity: .7; }
 .ns-rem-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--muted); }
 
 /* ══════════════════════════════════════════════════════════════════
