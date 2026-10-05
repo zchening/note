@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v8.1.0 应用内打开链接的子 WebView 页：顶栏（‹ 返回 + host 标题）+ WebView。
+     颜色全走系统主题属性，日/夜间自动适配，不硬编码。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?android:attr/windowBackground">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/linkBack"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:minWidth="52dp"
+            android:paddingStart="16dp"
+            android:paddingEnd="12dp"
+            android:gravity="center"
+            android:text="‹"
+            android:textSize="26sp"
+            android:textColor="?android:attr/textColorPrimary"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?android:attr/selectableItemBackground" />
+
+        <TextView
+            android:id="@+id/linkTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingEnd="16dp"
+            android:singleLine="true"
+            android:ellipsize="middle"
+            android:textSize="15sp"
+            android:textColor="?android:attr/textColorPrimary" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="?android:attr/listDivider" />
+
+    <WebView
+        android:id="@+id/linkWv"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+</LinearLayout>

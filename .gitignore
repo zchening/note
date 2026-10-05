@@ -14,10 +14,26 @@ data-bj/
 
 # 构建产物（由 CI / 构建脚本物化）
 www/
-android/
 dist/
 *.apk
 *.aab
+
+# 🔴 android/ **不入库忽略**：壳工程（含 9 个原生桥源）必须入库。
+#   GitHub Actions 要靠仓库里的 android/ 出包；本机 `npx cap add android`
+#   生成的是骨架，缺 Rem/ImgSave/ImgClip/LinkOpen/Update 五个桥与 MainActivity，
+#   骨架编出来的 APK 能装能开，但提醒、存图、扫码原生加速、应用内升级全部失灵。
+#   只忽略构建产物与本地签名材料。
+android/build/
+android/app/build/
+android/.gradle/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/local.properties
+android/app/*.p12
+android/app/*.jks
+android/app/*.keystore
+android/captures/
 
 # 依赖与缓存
 node_modules/

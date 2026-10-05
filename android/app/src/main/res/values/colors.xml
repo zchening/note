@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- v9.5.6 启动页：与 WebView  THEME_PALETTE 同源色值（原生层够不着 CSS，只能落资源）。
+         日夜规则=时间制（<07:00 或 >=19:00 夜）， MainActivity 按规则 setTheme 切换，勿改跟随系统。 -->
+    <color name="splash_bg_day">#FBFBF8</color>
+    <color name="splash_bg_night">#0F0F11</color>
+    <color name="splash_fg_day">#1C1C1A</color>
+    <color name="splash_fg_night">#E9E8E3</color>
+    <color name="splash_muted_day">#98958A</color>
+    <color name="splash_muted_night">#7A786F</color>
+    <color name="splash_accent_day">#8F7126</color>
+    <color name="splash_accent_night">#D4B068</color>
+</resources>

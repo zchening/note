@@ -1,0 +1,137 @@
+name: build-apk
+
+# NoteSync BJ（cn.xuyinji.bj）APK 云构建。本机零 Android 依赖。
+#
+# 🔴 发版铁律：**单测不绿就不出包**。
+#   老项目栽过：CI 只编译签名出包、不跑任何测试，"四层测试闸"全靠本地手动执行，
+#   手滑或换机就能把红版推到手机上。
+#   现在 test 作业不绿 → build 作业不执行 → 不出包、不打 Release。
+#
+# 🔴 e2e 为什么不在 CI：它需要真浏览器（Playwright 装 Chromium 约 300MB）
+#   且要起本地 HTTP 服务，CI 上慢且脆。e2e 留在本地闸内跑
+#   （npm run test:e2e 与 npm run test:e2e:live），推 tag 前必须已绿。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 创建 Release 需要
+  actions: read
+
+jobs:
+  test:
+    name: 单元测试闸
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install
+        # 🔴 --ignore-scripts：跳过 playwright 的浏览器下载（单测只要 jsdom 那层，
+        #   e2e 不在 CI 跑）。不省这一步每次 CI 多下 300MB。
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 全量单元测试（真源层 + 客户端 + 服务端 + MCP）
+        # 任一红 → 本作业失败 → build 不执行 → 不出包
+        run: npm test
+
+      - name: 构建（顺带验证 esbuild 产物能出）
+        run: npm run build
+
+  build:
+    name: 构建并签名 APK
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        # Capacitor 7 硬要求：capacitor-android 源级别 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: 构建前端并同步进壳
+        # 🔴 顺序不能颠倒：先 build 出 www/，再 cap sync 把 www/ 拷进
+        #   android/app/src/main/assets/public。颠倒的话同步的是上一份（或没有）。
+        # 🔴 app.js 是单文件（CSS inline 进 index.html），所以 assets 里
+        #   index.html + app.js 必须是**同一版** —— 拆开发就会半夜白屏。
+        run: |
+          npm run build
+          npx cap sync android
+          # 🔴 物化自检：assets 少一个文件，APK 能装能开但对应功能静默失灵
+          #   （老项目栽过：sw.js / html2canvas.min.js 漏进包，
+          #   离线能力与导出长图整体不可用，而构建日志一片绿）。
+          ls -l android/app/src/main/assets/public/
+          for f in index.html app.js sw.js html2canvas.min.js jsQR.js qrcode-generator.js; do
+            test -s "android/app/src/main/assets/public/$f" \
+              || { echo "❌ 缺必需静态资源 $f（对应功能在 App 内直接不可用）"; exit 1; }
+          done
+
+      - name: 从 tag 注入安卓版本号
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          # 🔴 versionName 必须等于 tag 去掉 v —— 老项目 v5.55 出的 APK 自报 5.54，
+          #   用户看到"已经是最新版"却拿到旧版逻辑，是这一条漏改造成的。
+          #   versionCode 用去点拼接（v1.0.0 → 100），Android 要求它单调递增，
+          #   覆盖安装时系统靠它判断"是不是更新"。1.0.0 → 100，1.0.1 → 101。
+          CODE=$(echo "$VER" | tr -d '.')
+          sed -i "s/versionCode [0-9]\+/versionCode $CODE/; s/versionName \"[^\"]*\"/versionName \"$VER\"/" android/app/build.gradle
+          grep -n "versionCode\|versionName" android/app/build.gradle
+
+      - name: 解码签名密钥库
+        env:
+          B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$B64" | base64 -d > android/notesync-release.p12
+          test -s android/notesync-release.p12 || { echo "❌ 密钥库解码为空（secret 配错？）"; exit 1; }
+
+      - name: 构建 release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew   # 兜底：Windows 提交可能丢可执行位
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/notesync-release.p12 \
+            -Pandroid.injected.signing.store.password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            -Pandroid.injected.signing.key.alias=${{ secrets.ANDROID_KEY_ALIAS }} \
+            -Pandroid.injected.signing.key.password=${{ secrets.ANDROID_KEY_PASSWORD }} \
+            --no-daemon
+
+      - name: 上传 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoteSyncBJ-${{ github.ref_name }}.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建 GitHub Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: android/app/build/outputs/apk/release/app-release.apk

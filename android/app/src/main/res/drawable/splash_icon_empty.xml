@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v9.5.8 系统闪屏改纯纸底（甲案）：品牌只由幕布呈现一次，杜绝「系统环↔幕布环」双源位置跳动。
+     必须显式给一个空图标：windowSplashScreenAnimatedIcon 缺省时 A12+ 会回落到 Launcher 图标（更糟）。
+     144dp 透明矢量，无任何 path。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="144dp"
+    android:height="144dp"
+    android:viewportWidth="144"
+    android:viewportHeight="144" />

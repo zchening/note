@@ -60,6 +60,38 @@ export const COPY = {
   menuLock: '退出锁定',
   menuAbout: '关于 NoteSync',
 
+  /* 关于页 */
+  aboutTitle: '关于 NoteSync',
+  close: '关闭',
+  aboutWeb: '网页',
+  /** App 版本行的键；整行仅在 App 壳内显示 */
+  aboutApp: 'App',
+  aboutAuthor: '作者',
+  aboutAuthorName: '@zchening',
+  aboutUpdate: '更新',
+
+  /* App 在线升级（仅壳内可见；网页版 F5 即最新） */
+  upd: {
+    checkBtn: '检查更新',
+    checking: '检查中…',
+    alreadyLatest: '已是最新版本',
+    /** 服务端还没发过版（/api/latest 404）——正常状态，不是故障 */
+    noRelease: '还没有可安装的新版本',
+    /** 🔴 服务端发了版但 Release 里没挂 APK ——这是部署漏了，必须说清，
+     *   否则用户只会看到"检查了但永远没结果"。 */
+    noApk: '发现新版本，但下载包还没挂上，请稍后再试',
+    fail: '检查失败，稍后再试',
+    webNoUpdate: '网页版无需更新，刷新页面即可',
+    newVersion: (v: string): string => `新版本：v${v}`,
+    /** 括号里的包大小 */
+    size: (m: string): string => `（${m}M）`,
+    now: '立即更新',
+    later: '以后再说',
+    retry: '重试',
+    preparing: '准备下载…',
+    downloading: (p: number): string => `正在下载 ${p}%`,
+  },
+
   /* 菜单：二级视图 */
   back: '返回',
   favEmpty: '暂无收藏',

@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      🔴 S8 Android 壳 manifest。骨架由 `npx cap add android` 生成（只有 INTERNET 权限），
+         本文件在其上补齐原生插件所需声明。逐条都写了「缺了会怎样」——
+         manifest 少一条声明的症状永远是"功能静默失灵"，不报错、不崩溃。
+
+         🔴 usesCleartextTraffic=false 是硬要求：新项目 CSP 与 server.url 都是 https，
+            放开明文等于给中间人递刀。e2e 的 LIVE-01 也判 CSP 不含外部域。
+    -->
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="false">
+
+        <!--
+          launchMode：老项目是 singleTop，新项目用 singleTask。
+          🔴 差异不是随手改的：singleTask 会把已有实例带到前台而**清掉栈里其上的 Activity**。
+            对本项目是想要的 —— 点通知 / 点链接从任意页进来都直达目标笔记，
+            不会留下一串"打开又退"的历史页。
+          windowSoftInputMode=stateHidden|adjustResize：
+            stateHidden 回前台不自动弹键盘（老项目踩过）；
+            adjustResize 让键盘真的压缩布局视口 —— 只靠 CSS 的
+            interactive-widget=resizes-content 在部分内核落不到原生窗口，
+            底部浮层会被推出可视区（老项目实锤「App 里看不到桌宠」）。
+        -->
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="stateHidden|adjustResize"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              App Links：点 bj.xuyinji.com.cn 的链接直达 App。
+              🔴 autoVerify 只有在服务器上放了 /.well-known/assetlinks.json
+                （含本 App 签名证书 SHA-256 指纹）时才会真正生效；
+                没放的话系统只是"询问"用户，不算直达。这是部署项，不是代码项。
+              🔴 只写 bj 一个 host：新项目与老项目完全独立，不抢老域名的链接。
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="bj.xuyinji.com.cn" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- 应用内打开链接的子 WebView（LinkOpenPlugin.openInApp 拉起，不导出） -->
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:name=".link.LinkViewActivity"
+            android:exported="false" />
+
+        <!--
+          提醒通知接收器：AlarmManager setAlarmClock 到点触发。
+          🔴 缺这条 = 提醒在 App 被杀后**永远不会响**，而 Web Notification 一切正常
+            （前端测试完全测不到这条路径，只有真机杀进程后到点才暴露）。
+        -->
+        <receiver
+            android:name=".rem.RemReceiver"
+            android:exported="false" />
+
+        <!--
+          开机 / 覆盖安装 / 快开机 / 时间或时区变更后重排提醒。
+          🔴 覆盖安装这条尤其重要：OTA 升级后不重排，用户会以为"升级完提醒坏了"。
+        -->
+        <receiver
+            android:name=".rem.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          FileProvider：应用内升级安装 APK 时必须用 content:// 授权。
+          🔴 缺这条 = 更新能下载但点「立即更新」报 FileUriExposedException（Android 7+ 必现）。
+            路径声明在 res/xml/file_paths.xml —— 它只开了 update/ 子目录，
+            别图省事改成 <external-path path="." />，那等于把整块外部存储交给本 App 读。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <!-- Permissions -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- UpdatePlugin.isOnWifi() 判 Wi-Fi 用；缺则仅 Wi-Fi 预下载恒判"非 Wi-Fi" -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android 13+ 弹通知必须显式申请，缺则提醒静默不显示（不报错） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 12+ 精确闹钟；14+ 用 USE_EXACT_ALARM 替代 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- 开机后重排提醒 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
+      应用内升级：仅用于覆盖安装（拉起系统安装器）。
+      下载走 DownloadManager 落应用私有外部目录，不需要任何存储权限。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+      相机：扫码（getUserMedia）+ 导出长图后拍照。
+      🔴 新项目**不引** @capacitor-mlkit/barcode-scanning（老项目用它）——
+        少一个 8MB+ 的 AAR，也少一份对 Google Play 服务的依赖。
+        扫码走 WebView getUserMedia + jsQR，在壳内与浏览器同一套代码，行为一致。
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+</manifest>

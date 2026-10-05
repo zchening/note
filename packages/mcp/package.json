@@ -13,7 +13,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@bj/client": "0.1.0",
-    "@bj/shared-schema": "0.1.0"
+    "@bj/client": "*",
+    "@bj/shared-schema": "*"
   }
 }

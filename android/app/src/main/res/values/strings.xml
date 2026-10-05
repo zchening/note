@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <!--
+      🔴 app_name 故意与老项目的 "NoteSync" 不同（"NoteSync BJ"）：
+         两个 App 会同时装在用户手机上（老的不动，新的是新架构），
+         桌面、任务切换器、通知渠道名三处都用这个名字。
+         写成同名的话用户点错哪一个都说不清，通知栏里两条 "NoteSync 提醒"
+         更是完全分不出哪条属于哪篇笔记。改词时连带 RemPlugin 的
+         NOTIF_CHANNEL_NAME 一起改。
+    -->
+    <string name="app_name">NoteSync BJ</string>
+    <string name="title_activity_main">NoteSync BJ</string>
+    <string name="package_name">cn.xuyinji.bj</string>
+    <string name="custom_url_scheme">cn.xuyinji.bj</string>
+    <string name="offline_message">网络连接失败，无法加载笔记</string>
+    <string name="offline_retry">重试</string>
+    <!-- 启动页 A2 幕布 slogan（与网页首页 landing .sub 同口径，改词两处同改） -->
+    <string name="splash_slogan">落笔即心安</string>
+</resources>

@@ -59,6 +59,8 @@ import { exportNotePng } from './export/index.ts';
 import { buildPairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
 import { parsePairLink } from './scan/pair-link.ts';
+import { buildAboutOverlay } from './update/ota-ui.ts';
+import { nativeDepsFromWindow } from './update/ota-native.ts';
 import type { ScanDiag } from './scan/engine.ts';
 
 declare global {
@@ -809,7 +811,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       void lockNote(name).then(() => location.reload());
     },
     onAbout: () => {
-      location.href = '/about';
+      // 🔴 S8：就地打开关于页浮层，**不再**跳 /about。
+      //   跳路由在老项目里成立是因为老项目有真实的 about 页；
+      //   新项目没有这条路由，跳过去会落进门牌解析 ——
+      //   症状是"点关于 → 页面变白 / 提示笔记名不合法"，而不是一个关于页。
+      //   顺带把"App 版本"与"检查更新"两行接上（仅壳内显示）。
+      const about = buildAboutOverlay(root || app, {
+        native: nativeDepsFromWindow(window),
+        webVersion: APP_VERSION,
+      });
+      void about.open();
     },
     onKeepLocal: () => {
       // 保留本机：把当前内容推上去，覆盖云端。
