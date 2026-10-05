@@ -90,6 +90,7 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
       <span class="ns-mark" id="brandMark">${LOGO_SM()}</span>
       <b id="brandWord">${SKIN_WORDS.default}</b>
       <span id="brandNote" class="hidden"></span>
+      <span id="nsBadge" aria-hidden="true"><i class="ns-be"></i><i class="ns-bt"></i></span>
     </span>
     <span class="sp"></span>
     ${visible}

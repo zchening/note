@@ -16,6 +16,7 @@ import { COPY, MENU_ITEM_IDS } from './copy.ts';
 import { escapeTrunc } from './escape.ts';
 import {
   ICON_BACK,
+  ICON_CHEVRON,
   ICON_CLOCK,
   ICON_FOLDER,
   ICON_HANDOFF,
@@ -26,7 +27,9 @@ import {
   ICON_LOCK,
   ICON_MOON,
   ICON_PAW,
+  ICON_PLUS,
   ICON_STAR,
+  ICON_STAR_FILLED,
   ICON_SUN,
   ICON_X,
 } from './icons.ts';
@@ -124,24 +127,42 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       return;
     }
     el.classList.remove('hidden');
+    // 🔴 二级视图整体套一层 .menu-sub：老项目靠 `#menuFavView .menu-item{justify-content:flex-start}`
+    //   （:447）让二级页所有行左起笔，而主菜单九行仍居中。新项目用一层容器表达同一件事。
     const body =
       view === 'main'
         ? renderMain()
-        : view === 'fav'
-          ? renderFav()
-          : view === 'hist'
-            ? renderHist()
-            : view === 'conflict'
-              ? renderConflict()
-              : renderLink();
+        : `<div class="menu-sub">${
+            view === 'fav'
+              ? renderFav()
+              : view === 'hist'
+                ? renderHist()
+                : view === 'conflict'
+                  ? renderConflict()
+                  : renderLink()
+          }</div>`;
     el.innerHTML = `<div class="box menu-box"><button type="button" id="menuClose" class="box-x" title="${COPY.back}" aria-label="${COPY.back}">${ICON_X()}</button>${body}</div>`;
     el.querySelector<HTMLButtonElement>('#menuClose')?.addEventListener('click', () => close());
     wire();
   };
 
-  const head = (title: string, extra = ''): string =>
-    `<div class="menu-head"><button type="button" id="menuBack" class="box-x" title="${COPY.back}" aria-label="${COPY.back}">${ICON_BACK()}</button>` +
-    `<span class="mi-l">${title}</span>${extra}</div>`;
+  /**
+   * 二级视图标题行 —— **标准菜单行**，不是另画的一行。
+   *
+   * 🔴🔴 老项目 index.html:701/706/712 的返回行就是 `.menu-item` 本体：
+   *   `<div id="menuFavBack" class="menu-item"><svg …/><span class="mi-l">返回</span></div>`
+   *   靠 `#menuFavView .menu-item{justify-content:flex-start}`（:447）左起笔。
+   *   原新项目用的是「32px 小 box-x + 15px 粗标题」，形态与主菜单完全不同 ——
+   *   同一个"菜单项"在两层视图里长成两种样子，点进去像换了个应用。
+   */
+  const head = (title: string): string =>
+    `<div class="menu-item" id="menuBack" role="button" tabindex="0">` +
+    `<span class="ic">${ICON_BACK()}</span><span class="mi-l">${title}</span></div>`;
+
+  /** 历史页底部那枚「新增历史版本」——老项目 :709 也是一条独立菜单行，不塞进标题行。 */
+  const histSaveRow = (): string =>
+    `<div class="menu-item" id="histSave" role="button" tabindex="0">` +
+    `<span class="ic">${ICON_PLUS()}</span><span class="mi-l">${COPY.histSave}</span></div>`;
 
   const renderMain = (): string => {
     const items = mainItems(st)
@@ -160,29 +181,37 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     const kick = st.favList.length
       ? `<div class="list-kicker">${COPY.favKicker(st.favList.length)}</div>`
       : '';
+    // 🔴 三列结构逐字对老项目 index.html:7986-7991：金星列(fav-star 18px)
+    //   + 等宽名(fav-name 13.5px) + 右箭头(fav-go 14px)。
+    //   少了图标列与箭头列，行就退化成一句裸文本 —— 与主菜单的胶囊行族脱节。
     const rows = st.favList.length
       ? st.favList
           .map(
             (f) =>
               `<div class="list-row" data-name="${escapeTrunc(f.name)}" role="button" tabindex="0">` +
-              `<span class="grow">${escapeTrunc(f.name)}</span></div>`,
+              `<span class="fav-star">${ICON_STAR_FILLED()}</span>` +
+              `<span class="fav-name">${escapeTrunc(f.name)}</span>` +
+              `<span class="fav-go">${ICON_CHEVRON()}</span></div>`,
           )
           .join('')
       : `<div class="empty">${COPY.favEmpty}</div>`;
-    return `${head(COPY.menuFavEntry)}${kick}<div class="menu-view">${rows}</div>`;
+    return `${head(COPY.menuFavEntry)}${kick}<div class="list-scroll">${rows}</div>`;
   };
 
   const renderHist = (): string => {
+    // 🔴 同fav：三列（时钟 16px + 等宽时间 + 右箭头）。老项目 :8490-8491 用 HIST_CLOCK_SVG。
     const rows = st.histList.length
       ? st.histList
           .map(
             (h) =>
               `<div class="list-row" data-at="${escapeTrunc(h.at, 30)}" role="button" tabindex="0">` +
-              `<span class="grow">${escapeTrunc(h.label)}</span></div>`,
+              `<span class="hist-clock">${ICON_CLOCK()}</span>` +
+              `<span class="hist-meta">${escapeTrunc(h.label)}</span>` +
+              `<span class="fav-go">${ICON_CHEVRON()}</span></div>`,
           )
           .join('')
       : `<div class="empty">${COPY.histEmpty}</div>`;
-    return `${head(COPY.menuHistEntry, `<span class="sp"></span><button type="button" id="histSave" class="row-btn">${COPY.histSave}</button>`)}<div class="menu-view">${rows}</div>`;
+    return `${head(COPY.menuHistEntry)}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
   };
 
   const renderConflict = (): string => {

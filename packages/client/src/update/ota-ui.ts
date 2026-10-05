@@ -55,10 +55,16 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   const box = document.createElement('div');
   box.className = 'box';
 
-  const head = document.createElement('div');
-  head.className = 'modal-head';
   const h1 = document.createElement('h1');
   h1.textContent = COPY.aboutTitle;
+  // 🔴🔴 关于页标题必须**独立居中 + 下方一条 52px 金线**（老项目 index.html:253-254）：
+  //   `#aboutTitle{font-family:var(--serif);font-size:18px;font-weight:600;letter-spacing:1px}`
+  //   `#aboutTitle::after{content:'';display:block;width:52px;height:1px;background:var(--accent);margin:11px auto 0;opacity:.8}`
+  //   原先它挂在 .modal-head 里与关闭 × 并排（space-between），既不居中也没有金线 ——
+  //   「扉页式小号衬线标题 + 细长金线」是用户五轮反馈收敛出来的版式，丢了就不是那个关于页。
+  //   金线走 ::after（纯 CSS），这里只需给它一个能居中的块级容器；
+  //   关闭 × 改为 .box-x 绝对定位浮在盒内右上（老项目 .box-x 同款），不参与标题行的排版。
+  h1.className = 'about-title';
   const x = document.createElement('button');
   x.className = 'box-x';
   x.type = 'button';
@@ -70,7 +76,7 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   //   并排看时字形 × 明显比旁边的 SVG 图标"轻一号、偏一号"。
   //   走 innerHTML 是安全的：ICON_X 是本项目自产的常量字符串，无外部输入。
   x.innerHTML = ICON_X();
-  head.append(h1, x);
+  box.append(h1, x);
 
   const body = document.createElement('div');
   body.className = 'about-body';
@@ -85,7 +91,12 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   body.append(appRow);
 
   // 作者
-  body.append(row(COPY.aboutAuthor, COPY.aboutAuthorName));
+  // 🔴 作者行的**值是金色衬线 14px**（老项目 index.html:260
+  //   `#aboutAuthorName{…font-family:var(--serif);color:var(--accent);font-weight:400;font-size:14px;letter-spacing:.5px}`），
+  //   与其余行的前景色值不同 —— 给行加一个专属类，CSS 才能只把这一行的值挑出来。
+  const authorRow = row(COPY.aboutAuthor, COPY.aboutAuthorName);
+  authorRow.classList.add('about-author');
+  body.append(authorRow);
 
   // 检查更新（仅壳内）
   const updRow = row(COPY.aboutUpdate, '');
@@ -100,7 +111,7 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   updRow.lastChild!.replaceWith(updBtn);
   body.append(updRow);
 
-  box.append(head, body);
+  box.append(body);
   el.append(box);
   host.append(el);
 

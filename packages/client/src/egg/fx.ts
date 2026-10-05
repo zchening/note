@@ -59,6 +59,12 @@ export function badgeText(d: Date): string {
   return '';
 }
 
+/**
+ * 徽章图标列（老项目 index.html:653 的 `.ns-be`，6500 段的 `em` 位）。
+ * 🔴 560px 窄屏规则会隐藏文字只留它（老项目 :321），所以它不能为空。
+ */
+const BADGE_EMOJI = '🎆';
+
 let canvas: HTMLCanvasElement | null = null;
 let raf = 0;
 let parts: P[] = [];
@@ -198,23 +204,34 @@ export function rain(durationMs: number): void {
   tick();
 }
 
-/** 节日/深夜徽章：右上角一枚小标。已存在则不重复挂。 */
+/**
+ * 节日/深夜徽章：**顶栏品牌内的一枚 inline 小标**（老项目 index.html:653 的挂点）。
+ *
+ * 🔴🔴 挂点必须在 shell.ts 的品牌 span 里，老项目就是 `<span class="brand">…<span id="nsBadge">`。
+ *   原新项目 append 到 body 上再加 `position:fixed; top:…; right:12px` ——
+ *   那是"右上角浮一枚标签"，与老项目"品牌行里跟字标并排"是两回事：
+ *   前者压在顶栏工具键上方、窄屏还会遮住按钮，后者随品牌一起被 560px 规则收窄。
+ */
 export function showBadge(d: Date): boolean {
   const t = badgeText(d);
   if (t === '') return false;
-  if (document.getElementById(BADGE_ID)) return false;
-  const b = document.createElement('div');
-  b.id = BADGE_ID;
-  b.className = 'ns-badge';
-  b.textContent = t;
-  document.body.appendChild(b);
+  const el = document.getElementById(BADGE_ID);
+  if (!el) return false;
+  // 同内容不重播 pop 动画（老项目 :6585 的 data-ns 守卫）
+  if (el.getAttribute('data-ns') === t) return false;
+  el.setAttribute('data-ns', t);
+  el.querySelector<HTMLElement>('.ns-be')!.textContent = BADGE_EMOJI;
+  el.querySelector<HTMLElement>('.ns-bt')!.textContent = t;
+  el.classList.add('show');
   return true;
 }
 
 export function clearFx(): void {
   stop();
   window.removeEventListener('resize', fit);
-  document.getElementById(BADGE_ID)?.remove();
+  // 🔴 徽章挂点是 shell 的常驻结构，**只能摘 show 类不能 remove 节点** ——
+  //   remove 掉之后同会话再触发就再也挂不回来了（老项目 :6587 同款做法）。
+  document.getElementById(BADGE_ID)?.classList.remove('show');
 }
 
 /** 供图鉴/菜单复用的文案出口。 */

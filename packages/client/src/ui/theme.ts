@@ -45,6 +45,23 @@ export interface ThemeTokens {
    * 🔴 同上：老项目是**全局单值**，夜间不覆写。
    */
   selection: string;
+  /**
+   * 🔴🔴 图片查看器五档（老项目 index.html:69 / :71，逐字节抄）。
+   *
+   *   日间**也暗**（`rgba(20,20,18,.94)`）—— 老项目注释写得很直白：
+   *   「照片要看清必须暗背景」。这一档最容易被"顺手改成日间浅色"，
+   *   症状是白底相册里的白衣服在查看器里彻底看不见，而单看代码无懈可击。
+   *
+   *   `zoomSolid` 是 v9.3.7 补的**不透明**实底（同色去 alpha）：
+   *   亮图铺到底栏后面时半透明底被冲淡，按钮文字读不出来。
+   *   它与 `zoomBg` 必须分开 —— 用 bg 就会把那个已修的 bug 装回来。
+   */
+  zoomBg: string;
+  zoomInk: string;
+  zoomChip: string;
+  zoomLine: string;
+  zoomDim: string;
+  zoomSolid: string;
 }
 
 /**
@@ -67,6 +84,13 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     delLine: 'rgba(152,149,138,.7)',
     linkLine: 'rgba(169,134,60,.35)',
     selection: 'rgba(169,134,60,.22)',
+    // 老项目 index.html:69 —— 日间也压深到近黑（见 ThemeTokens.zoomBg 注释）
+    zoomBg: 'rgba(20,20,18,.94)',
+    zoomInk: '#F2F1EC',
+    zoomChip: 'rgba(255,255,255,.12)',
+    zoomLine: 'rgba(255,255,255,.22)',
+    zoomDim: 'rgba(242,241,236,.62)',
+    zoomSolid: '#141412',
   },
   dark: {
     bg: '#0F0F11',
@@ -86,6 +110,13 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     delLine: 'rgba(152,149,138,.7)',
     linkLine: 'rgba(169,134,60,.35)',
     selection: 'rgba(169,134,60,.22)',
+    // 老项目 index.html:90 —— 夜间比日间再压一档近纯黑。zoomInk 两档同值（老项目如此）。
+    zoomBg: 'rgba(0,0,0,.95)',
+    zoomInk: '#F2F1EC',
+    zoomChip: 'rgba(255,255,255,.1)',
+    zoomLine: 'rgba(255,255,255,.18)',
+    zoomDim: 'rgba(242,241,236,.55)',
+    zoomSolid: '#000000',
   },
 } as const;
 
@@ -157,6 +188,25 @@ export const OVERLAY = {
   // 取景台上的提示字：浅色压深底。必须与 --muted 分开——muted 是"跟着主题走的
   // 次要文字色"，夜间主题下它会变亮，白天主题下会变深，都不适合压在取景台上。
   scanStageText: 'rgba(233,232,227,.62)',
+  /* ---- 图片查看器 / 长按菜单（老项目 index.html:363-375）---- */
+  /**
+   * 长按自建菜单的投影（老项目 :369 `0 18px 50px rgba(20,20,18,.22)`）。
+   * 🔴 比 `--shadow-box` 紧一档：它是贴在图上的小菜单，不是居中模态。
+   */
+  imgMenuShadow: '0 18px 50px rgba(20,20,18,.22)',
+  /**
+   * 查看器次按钮的**纯白字**（老项目 :366 `color:#FFFFFF`）。
+   * 🔴🔴 故意不用 `--zoom-ink`（#F2F1EC）：老项目 v9.3.8 记过一次实测 ——
+   *   近白在手机屏幕上仍发灰看不清，用户拍板改纯白。这是"用户拍板值"，
+   *   不是图省事的硬编码；改回近白等于把那个 bug 装回来。
+   */
+  zoomBtnInk: '#FFFFFF',
+  /**
+   * 查看器主按钮：纯白底 + **纯黑**字（老项目 :367）。
+   * 🔴 同上：近白底/近黑字在手机上发灰，纯黑字是老项目用户明确拍板的。
+   */
+  zoomPriBg: '#FFFFFF',
+  zoomPriInk: '#000000',
 } as const;
 
 /** 复古皮肤三态（老项目叫"三态环"，靠连点 logo 7 次前进）。 */
@@ -232,6 +282,18 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--del-line', p.delLine);
   s.setProperty('--link-line', p.linkLine);
   s.setProperty('--selection', p.selection);
+  // 🔴 图片查看器五档 + 不透明实底（老项目 index.html:69/:71 日间，:90/:91 夜间）。
+  //   实底与半透明底必须并存：底栏吃 --zoom-solid，查看器大底吃 --zoom-bg。
+  s.setProperty('--zoom-bg', p.zoomBg);
+  s.setProperty('--zoom-ink', p.zoomInk);
+  s.setProperty('--zoom-chip', p.zoomChip);
+  s.setProperty('--zoom-line', p.zoomLine);
+  s.setProperty('--zoom-dim', p.zoomDim);
+  s.setProperty('--zoom-solid', p.zoomSolid);
+  s.setProperty('--img-menu-shadow', OVERLAY.imgMenuShadow);
+  s.setProperty('--zoom-btn-ink', OVERLAY.zoomBtnInk);
+  s.setProperty('--zoom-pri-bg', OVERLAY.zoomPriBg);
+  s.setProperty('--zoom-pri-ink', OVERLAY.zoomPriInk);
   s.setProperty('--serif', FONTS.serif);
   s.setProperty('--mono', FONTS.mono);
   s.setProperty('--mask-bg', theme === 'dark' ? OVERLAY.maskDark : OVERLAY.maskLight);

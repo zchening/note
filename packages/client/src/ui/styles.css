@@ -221,11 +221,20 @@ svg .gf { fill: var(--accent); stroke: none; }
 .box > button#ok:hover { opacity: .85; }
 .box > button#ok:active { opacity: .75; }
 .box > button#ok:disabled { opacity: .35; cursor: not-allowed; }
+/* 🔴🔴 首页提示页（老项目 index.html:541-544 逐字）：
+     .home{…padding:20px;text-align:center}
+     .home h1{font-family:var(--serif);font-weight:500;font-size:24px;margin:0 0 12px;letter-spacing:.04em}
+     .home p{color:var(--muted);font-size:14px;line-height:1.9;margin:0}
+     .home code{background:var(--accent-soft);color:var(--accent);padding:3px 8px;border-radius:6px;font-size:13px}
+   原先 h1 22px 且无字重无字距、p 13px/2、code 12.5px、padding 24px ——
+   单看每一项都只差一点点，但这是用户解锁后看到的第一屏，
+   "标题没有分量 + 提示字挤成两行" 的观感差异最扎眼。 */
 .home { min-height: 100%; display: flex; flex-direction: column;
-        align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; }
-.home h1 { font-family: var(--serif); font-size: 22px; margin: 0; }
-.home p { font-size: 13px; color: var(--muted); line-height: 2; margin: 0; }
-.home code { font-family: var(--mono); font-size: 12.5px; color: var(--accent);
+        align-items: center; justify-content: center; gap: 10px; padding: 20px; text-align: center; }
+.home h1 { font-family: var(--serif); font-weight: 500; font-size: 24px;
+           margin: 0 0 12px; letter-spacing: .04em; }
+.home p { font-size: 14px; color: var(--muted); line-height: 1.9; margin: 0; }
+.home code { font-family: var(--mono); font-size: 13px; color: var(--accent);
              background: var(--accent-soft); padding: 3px 8px; border-radius: 6px; }
 
 /* ---------- 应用外壳（顶栏 / 编辑器 / 底栏） ---------- */
@@ -291,6 +300,19 @@ header.ns-top {
 .ns-editor::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 @media (max-width: 560px) {
   .ns-editor { padding: 24px 18px 100px; font-size: 16px; }
+}
+/* 🔴🔴🔴 顶栏窄屏规则**整段缺失**（老项目 index.html:293 逐字）：
+     @media (max-width:560px){ header{gap:6px;padding:12px 12px}
+       header .brand b{display:none} header button{width:27px;height:27px}
+       header button svg{width:16px;height:16px} }
+ *   症状不是"少了个样式"，而是**窄屏顶栏整个撑爆**：7 个 31px 键 + 间距 10px
+ *   加起来已超 375px，品牌字标再被挤一下就把工具键顶出屏幕（用户报"按钮点不到"）。
+ *   老项目 v7.3.3 的 flex-shrink:1 + min-width:0 只解决长笔记名，不解决键本身。 */
+@media (max-width: 560px) {
+  header.ns-top { gap: 6px; padding: 12px 12px; }
+  header.ns-top .ns-brand b { display: none; }
+  header.ns-top button.ns-ic { width: 27px; height: 27px; }
+  header.ns-top button.ns-ic svg { width: 16px; height: 16px; }
 }
 .ns-p { margin: 0; min-height: 1.85em; }
 
@@ -542,6 +564,11 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .menu-box > #menuClose svg { width: 17px; height: 17px; display: block; }
 .menu-item {
   display: flex; align-items: center; gap: 12px;
+  /* 🔴🔴 justify-content:center —— 老项目 index.html:437 明确写 center。
+     * 缺这一句时 flex 默认 flex-start，整组菜单贴左，与老项目"两侧对称留白"的
+     * 观感差一截（用户反馈"贴左大片空 = 失衡"的反面：老项目是**居中**）。
+     * 二级视图的行由下面 .menu-sub 规则改回 flex-start（老项目 :447 同款）。 */
+  justify-content: center;
   width: 100%; box-sizing: border-box;
   padding: 9px 12px; margin-bottom: 5px;
   min-height: 42px; line-height: 1.4;
@@ -553,21 +580,75 @@ footer.ns-foot .dot.off { background: var(--danger); }
 }
 .menu-item:hover { border-color: var(--accent); }
 .menu-item:active { background: var(--hover); }
-.menu-item .ic { width: 20px; height: 20px; flex: none; color: var(--fg); }
+/* 🔴🔴 菜单项图标 **26px**（老项目 index.html:443 `.menu-item svg{width:26px;height:26px;flex:none}`）。
+   上一批误改成 20px：单看一个图标只是"小一号"，但菜单是 11 行同屏的成组元素 ——
+   整列图标缩到 20px 后菜单明显"变精致/变小气"，与老项目并排一眼就不同。 */
+.menu-item .ic { width: 26px; height: 26px; flex: none; color: var(--fg); }
 /* 🔴 标签列定宽 112px —— 老项目 CSS 的原值，别"顺手改成自适应" */
 .menu-item .mi-l, #menuThemeLabel { width: 112px; text-align: left; font-size: 14px; }
-.menu-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.menu-head .sp { flex: 1; }
-.menu-head .mi-l { font-size: 15px; font-weight: 600; }
-.list-kicker { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+/* 🔴🔴 二级视图内的所有菜单行左起笔（老项目 index.html:447
+   `#menuFavView .menu-item,#menuHistView .menu-item{justify-content:flex-start}`）。
+   用户报「收藏列表太靠左没和返回对齐」的根因是主菜单那套居中逻辑漏到了二级页；
+   图标列与列表行的图标列必须落在同一条竖线上（同为左 12px padding）。 */
+.menu-sub .menu-item { justify-content: flex-start; }
+/* 历史列表容器：独立滚动限高。老项目 index.html:478
+   `#menuHistList,#menuFavList{max-height:min(50vh,400px);overflow-y:auto}`。
+   🔴 没有限高时条目一多就把菜单盒撑出屏幕，"关掉菜单"这件事本身变成不可能。 */
+.list-scroll { max-height: min(50vh, 400px); overflow-y: auto; }
+/* 🔴🔴 计数行：等宽体 + uppercase + 字距 .14em + **金色引导圆点**
+   （老项目 index.html:462-463 逐字）：
+     .list-kicker{display:flex;align-items:center;font:400 10.5px/1 <mono>;letter-spacing:.14em;
+                  text-transform:uppercase;color:var(--muted);padding:6px 4px 10px}
+     .list-kicker::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--accent);margin-right:8px;flex:none}
+   原先只有 11.5px 普通灰字：那一行成了纯说明文字，与下方列表没有层级关系。 */
+.list-kicker {
+  display: flex; align-items: center;
+  font: 400 10.5px/1 var(--mono);
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted); padding: 6px 4px 10px;
+}
+.list-kicker::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); margin-right: 8px; flex: none;
+}
 .link-hint { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin-top: 4px; }
 .empty { padding: 26px 0; text-align: center; font-size: 13px; color: var(--muted); }
-.list-row { display: flex; align-items: center; gap: 10px; padding: 11px 12px;
-            border: 1px solid var(--line); border-radius: 10px; font-size: 13.5px;
-            background: var(--box-bg); }
+/* 列表行：与主菜单同族的胶囊行（老项目 .fav-row index.html:456）。
+   🔴 三列各自定宽：图标列 / 名字列 / 右箭头列 —— 与主菜单的"112px 标签列"是同一种
+   「定宽起线齐」的排版纪律；改成自适应的话长短名会让右箭头列参差不齐。 */
+.list-row { display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+            width: 100%; padding: 10px 12px; margin-bottom: 6px;
+            min-height: 42px; font-size: 14px;
+            border: 1px solid var(--line); border-radius: 10px;
+            background: var(--box-bg); color: var(--fg); cursor: pointer;
+            touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+            transition: border-color .2s ease; }
+.list-row:active { background: var(--hover); }
+.list-row:hover { border-color: var(--accent); }
+/* 收藏金星 18px（老项目 .fav-star index.html:459）/ 历史时钟 16px（:467 .hist-clock）
+   🔴🔴 选择器必须**同时命中包裹 span 与内部 svg**：SVG 没有 width/height 属性时
+   默认占 300×150，只给 span 定尺寸的话里面会撑出一个巨大空框（行高整个炸开）。
+   老项目是把这三个类直接写在 <svg> 上，本项目多了一层 span 包裹，故要写全两处。 */
+.list-row .fav-star, .list-row .fav-star > svg { width: 18px; height: 18px; flex: none; }
+.list-row .fav-star { color: var(--accent); }
+.list-row .hist-clock, .list-row .hist-clock > svg { width: 16px; height: 16px; flex: none; }
+/* 名字列走**等宽体**：老项目 index.html:460 `.fav-name{font:400 13.5px/1.5 <mono>;letter-spacing:.01em}`
+   / :469 `.hist-meta{font:400 12.5px/1.5 <mono>;color:var(--muted);letter-spacing:.02em}`。
+   🔴 等宽体给笔记名/时间戳一种"标识符"感，与正文的比例字形明确区分开。 */
+.list-row .fav-name { flex: 1; min-width: 0; font: 400 13.5px/1.5 var(--mono);
+                      letter-spacing: .01em; color: var(--fg);
+                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .hist-meta { flex: 1; min-width: 0; font: 400 12.5px/1.5 var(--mono);
+                       letter-spacing: .02em; color: var(--muted);
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 右箭头列 14px muted（老项目 .fav-go index.html:461）—— "这一行可以进去"的唯一暗示 */
+.list-row .fav-go, .list-row .fav-go > svg { width: 14px; height: 14px; flex: none; }
+.list-row .fav-go { color: var(--muted); }
+/* 冲突视图里的纯文本行（无图标列/箭头列） */
 .list-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
-.row-btn { flex: none; padding: 6px 12px; border-radius: 8px; font-size: 12.5px;
+/* 🔴 按钮 min-height 32px（老项目 index.html:473 `.hist-btns button{min-height:32px;…}`） */
+.row-btn { flex: none; min-height: 32px; padding: 4px 12px; border-radius: 8px; font-size: 12.5px;
            border: 1px solid var(--line); background: var(--bg); }
 .row-btn:hover { background: var(--hover); }
 /* 预览/链接页的按钮行。导出全屏预览的「下载 / 完成」用它。 */
@@ -888,10 +969,107 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
 /* 🔴 pointer-events:none 是硬要求：粒子飘过编辑器时吃掉点击，
    症状是「打字的某一刻按什么都没反应」，极难自查。 */
 #nsFx { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
-.ns-badge { position: fixed; top: calc(env(safe-area-inset-top) + 8px); right: 12px;
-  z-index: 45; padding: 4px 10px; font-size: 11.5px; color: var(--accent);
-  background: var(--box-bg); border: 1px solid var(--line); border-radius: 999px;
-  box-shadow: var(--shadow-chip); pointer-events: none; }
+/* 🔴🔴🔴 彩蛋徽章：老项目是**顶栏品牌内联的一枚小胶囊**（index.html:653挂点 /
+   :298-302 样式 / :321 窄屏规则），不是浮在屏幕右上角的 fixed 药丸：
+     #nsBadge{display:none;align-items:center;gap:6px;max-width:34vw;flex:none;font-size:12px;
+       color:var(--fg);background:var(--accent-soft);border:1px solid var(--ring);
+       border-radius:999px;padding:3px 10px 3px 8px;letter-spacing:.03em;
+       white-space:nowrap;overflow:hidden;pointer-events:none}
+     #nsBadge.show{display:inline-flex;animation:nsBadgePop .45s cubic-bezier(.2,.7,.3,1) both}
+     #nsBadge .ns-be{font-style:normal;font-size:13px;flex:none}
+     #nsBadge .ns-bt{font-style:normal;display:inline-block;min-width:0;max-width:100%;
+       overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+     @keyframes nsBadgePop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+     @media (max-width:560px){ #nsBadge{padding:0;border:0;background:none;gap:0} #nsBadge .ns-bt{display:none} }
+   固定在右上角时它压在工具键上，窄屏下和按钮抢同一块地方；内联到品牌后面后
+   它随标题栏流式排布，窄屏自动只留裸emoji（老项目 v8.2.3：脱掉胶囊皮）。 */
+#nsBadge { display: none; align-items: center; gap: 6px; max-width: 34vw; flex: none;
+  font-size: 12px; color: var(--fg); background: var(--accent-soft);
+  border: 1px solid var(--ring); border-radius: 999px;
+  padding: 3px 10px 3px 8px; letter-spacing: .03em;
+  white-space: nowrap; overflow: hidden; pointer-events: none; }
+#nsBadge.show { display: inline-flex; animation: nsBadgePop .45s cubic-bezier(.2,.7,.3,1) both; }
+#nsBadge .ns-be { font-style: normal; font-size: 13px; flex: none; }
+#nsBadge .ns-bt { font-style: normal; display: inline-block; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+/* to 帧显式写全transform（fill-mode:both 会永久接管 transform，见上文 .box 同款理由） */
+@keyframes nsBadgePop {
+  from { transform: scale(.6); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+@media (max-width: 560px) {
+  #nsBadge { padding: 0; border: 0; background: none; gap: 0; }
+  #nsBadge .ns-bt { display: none; }
+}
+
+/* ── 图片查看器 #nsZoom / 长按菜单 #nsImgMenu ─────────────────────
+   🔴🔴 老项目 index.html:348-375 整块。此处**只写样式与挂点契约**，
+   点击放大/长按弹菜单的交互是另一批的事 —— 这里不写任何 JS 行为。
+   z序：查看器 88、菜单 89，都在图鉴 z90 之下（"图鉴最高"是钉住的口径）。
+   🔴🔴 日间也用暗底（--zoom-bg 日间就压到近黑）：照片要看清必须暗背景，
+   白底浅色图在查看器里等于一片糊。
+   🔴🔴 底栏是**不透明实底** --zoom-solid，不是半透明 —— 老项目 v9.3.7
+   记过一次：半透明底被亮图冲淡，按钮文字直接看不清（问题4）。 */
+#nsZoom {
+  position: fixed; inset: 0; z-index: 88;
+  background: var(--zoom-bg);
+  display: flex; align-items: center; justify-content: center;
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  cursor: zoom-out;
+  animation: nsRise .22s ease both;
+}
+#nsZoom .nz-stage { width: 100%; height: 100%; display: flex;
+  align-items: center; justify-content: center; overflow: hidden; }
+#nsZoom img { max-width: 92vw; max-height: 82vh; object-fit: contain;
+  border-radius: 8px; background: var(--box-bg);
+  transform-origin: center center; will-change: transform; cursor: zoom-in; }
+#nsZoom.zm img { cursor: grab; }
+#nsZoom .nz-x { position: absolute; top: 14px; right: 16px;
+  width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%;
+  background: var(--zoom-chip); color: var(--zoom-ink); cursor: pointer; }
+#nsZoom .nz-x svg { width: 16px; height: 16px; }
+#nsZoom .nz-tip { position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  font: 400 10.5px/1 var(--mono); letter-spacing: .1em; color: var(--zoom-dim);
+  pointer-events: none; text-align: center; }
+/* 老项目 v9.3.0（用户反馈「移动端这三个按钮看不清楚」）：12px mono 半透明小胶囊
+   → 44px 高大按钮。padding 底部避开全面屏手势条（safe-area）。 */
+#nsZoom .nz-bar { position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; gap: 10px; justify-content: center;
+  padding: 12px 16px calc(20px + env(safe-area-inset-bottom, 8px));
+  background: var(--zoom-solid); pointer-events: auto; }
+#nsZoom .nz-bar button { pointer-events: auto; flex: 1; max-width: 220px; min-height: 44px;
+  /* 老项目这里写死系统 sans栈；本项目按钮已由 reset 的 `button{font:inherit}` 继承全站字体，
+     故用 longhand 只写字重字号，字形自动与全站一致。 */
+  font-weight: 600; font-size: 15px; line-height: 1;
+  letter-spacing: .04em; padding: 12px 0;
+  border: 1px solid var(--zoom-line); border-radius: 12px;
+  background: var(--zoom-chip); color: var(--zoom-btn-ink); cursor: pointer;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+/* 老项目 v9.3.8：主按钮纯白底 + 纯黑字（近白底/近黑字在手机上仍发灰，用户拍板纯黑字）。
+   不用 --zoom-ink（#F2F1EC），那个近白值在手机屏上会发灰。 */
+#nsZoom .nz-bar button.nz-pri { background: var(--zoom-pri-bg); color: var(--zoom-pri-ink);
+  border-color: var(--zoom-pri-bg); }
+#nsImgMenu { position: fixed; z-index: 89; min-width: 150px;
+  background: var(--box-bg); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--img-menu-shadow); padding: 5px;
+  animation: nsMenuFade .16s ease both; }
+/* 入场只动 opacity：通用 rise 的 to 帧是 transform:none，fill:both 下会把定位用的
+   transform 一起吞掉。菜单靠 left/top 定位，不需要 transform。
+   🔴 to 帧仍显式写全 transform（见文件头关于 fill-mode:both 接管 transform 的纪律）。 */
+@keyframes nsMenuFade {
+  from { opacity: 0; transform: none; }
+  to   { opacity: 1; transform: none; }
+}
+#nsImgMenu button { display: block; width: 100%; text-align: left; padding: 11px 12px;
+  font: inherit; font-size: 13.5px; color: var(--fg);
+  background: none; border: 0; border-radius: 8px; cursor: pointer;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+#nsImgMenu button:hover { background: var(--hover); }
+/* 触屏端自建菜单接管「保存」，iOS 原生 callout 在 contenteditable 里本来只给
+   选择/复制，留着会与自建菜单打架。 */
+html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
 
 /* ── 扫码配对（出码浮层）──────────────────────────────────────────
    类名与老项目逐字一致（.qr-box/.qr-title/.qr-warn/.qr-lock-warn），
@@ -942,23 +1120,67 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
      老项目 v5.42 实锤「span 元素盒被国产浏览器夜间模块吃字」，
      颜色由行容器锁定继承。这条对升级弹窗同样成立 ——
      版本号与包大小若各裹一层 span，日间主题下可能掉色看不见。 */
-.about-body { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
-.about-row { display: grid; grid-template-columns: 72px 1fr; align-items: center;
-  gap: 12px; font-size: 13.5px; color: var(--fg); }
-.about-k { color: var(--muted); }
+/* 🔴🔴🔴 关于页：扉页式版式（老项目 index.html:253-260 逐字）。
+     #aboutTitle{font-family:var(--serif);font-size:18px;font-weight:600;letter-spacing:1px}
+     #aboutTitle::after{content:'';display:block;width:52px;height:1px;background:var(--accent);margin:11px auto 0;opacity:.8}
+     #aboutVerBlock{margin:12px auto 0}
+     .about-row{display:flex;justify-content:center;align-items:baseline;gap:10px;line-height:2;font-size:12.5px}
+     .about-k{color:var(--muted);font-size:11.5px;letter-spacing:1px}
+     .about-v{width:110px;text-align:left;color:var(--fg);font-variant-numeric:tabular-nums;word-break:break-all;font-weight:600}
+     #aboutAuthor{...margin:6px auto 0}
+   原先是 grid 72px+1fr 左对齐、标题无衬线无金线 —— 「小号衬线标题 + 细长金线 +
+   两行信息整体居中」是用户五轮反馈收敛出来的版式（老项目 v7.0），丢了就不是那个关于页。
+   gap:0 也是抄的：老项目各行靠 line-height:2 自己撑开，只有作者行有 6px 外边距。 */
+.about-title {
+  font-family: var(--serif); font-size: 18px; font-weight: 600;
+  letter-spacing: 1px; margin: 0; text-align: center;
+}
+.about-title::after {
+  content: ''; display: block; width: 52px; height: 1px;
+  background: var(--accent); margin: 11px auto 0; opacity: .8;
+}
+/* 关闭键绝对定位浮在盒内右上，老项目 .box-x 同款（v6.1 退役的 absolute 悬浮式）。
+   不绝对定位它就会作为一个 flex/块参与标题行排版，把「居中标题」挤偏。 */
+#aboutMask .box { position: relative; }
+#aboutMask .box-x { position: absolute; top: 14px; right: 14px; }
+.about-body { display: flex; flex-direction: column; gap: 0; margin-top: 12px; }
+.about-row { display: flex; justify-content: center; align-items: baseline; gap: 10px;
+             line-height: 2; font-size: 12.5px; color: var(--fg); }
+.about-k { color: var(--muted); font-size: 11.5px; letter-spacing: 1px; }
+.about-v { width: 110px; text-align: left; color: var(--fg); font-weight: 600;
+           font-variant-numeric: tabular-nums; word-break: break-all; }
+/* 作者行的值是**金色衬线 14px**（老项目 index.html:260 `#aboutAuthorName{…}`）——
+   与其余行的前景色值不同：作者署名是扉页上唯一该发金的一行。 */
+.about-author { margin: 6px auto 0; }
+.about-author .about-v { font-family: var(--serif); font-weight: 400; font-size: 14px;
+                         letter-spacing: .5px; color: var(--accent); }
 .upd-link { color: var(--accent); text-decoration: underline;
   text-underline-offset: 3px; text-decoration-thickness: 1px; cursor: pointer;
   -webkit-tap-highlight-color: transparent; }
 
-.upd-ver { font-size: 15px; font-weight: 600; color: var(--fg); }
-/* 包大小弱化成小字：它是参考信息，不该和版本号抢注意力 */
-.upd-ver .sz { font-size: 12px; font-weight: 400; color: var(--muted); }
-.upd-notes { font-size: 13px; line-height: 1.7; color: var(--fg); margin-top: 12px; }
-.upd-notes i { font-style: normal; color: var(--muted); margin-right: 6px; }
-.upd-msg { font-size: 12.5px; color: var(--muted); margin-top: 12px; min-height: 1.2em;
-  line-height: 1.6; }
-.upd-prog { margin-top: 10px; }
-.upd-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+/* 🔴🔴🔴 升级弹窗（老项目 index.html:263-272 逐字）：
+     #updMask .box{text-align:center}
+     #updVer{font:600 22px/1.25 var(--serif);color:var(--accent);letter-spacing:.04em}
+     #updVer .sz{font:400 12px/1 var(--mono);color:var(--muted);letter-spacing:0;margin-left:5px}
+     #updNotes{font-size:13.5px;line-height:1.95;color:var(--fg);font-weight:500;text-align:left;margin:14px 22px 2px}
+     #updNotes i{font-style:normal;color:var(--accent);margin-right:5px;font-weight:400}
+     #updProg{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:12px 0 2px}
+     #updMsg{min-height:18px;font:400 11.5px/1.6 var(--mono);color:var(--muted);margin-top:6px;text-align:left}
+   版本号是**金色衬线 22px**：这是"有新版本"这件事唯一需要被看见的信号，
+   原先 15px 前景色把它压成了普通正文一行。进度条 5px→6px 同样是为了让那点进度可见。 */
+#updMask .box { text-align: center; }
+.upd-ver { font: 600 22px/1.25 var(--serif); color: var(--accent); letter-spacing: .04em; }
+/* 包大小弱化成等宽小字后缀：它是参考信息，不该和版本号抢注意力 */
+.upd-ver .sz { font: 400 12px/1 var(--mono); color: var(--muted); letter-spacing: 0;
+               margin-left: 5px; }
+.upd-notes { font-size: 13.5px; line-height: 1.95; color: var(--fg); font-weight: 500;
+             text-align: left; margin: 14px 22px 2px; }
+/* 金色「·」前缀维持常规字重，只让说明文字本身加粗（老项目 v9.3.4 方案B） */
+.upd-notes i { font-style: normal; color: var(--accent); margin-right: 5px; font-weight: 400; }
+.upd-msg { min-height: 18px; font: 400 11.5px/1.6 var(--mono); color: var(--muted);
+          margin-top: 6px; text-align: left; }
+.upd-prog { margin: 12px 0 2px; }
+.upd-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .upd-bar > i { display: block; height: 100%; width: 0; background: var(--accent);
   transition: width .25s ease; }
 .upd-foot { display: flex; gap: 10px; margin-top: 18px; }
