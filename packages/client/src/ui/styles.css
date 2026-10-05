@@ -248,8 +248,21 @@ svg .gf { fill: var(--accent); stroke: none; }
 /* ---------- 应用外壳（顶栏 / 编辑器 / 底栏） ---------- */
 /* 🔴 body 是 flex column（老项目 index.html:96）之后，.shell 是 body 的唯一 flex 子项，
    必须 `flex:1` 才能占满高度 —— 否则它的 `min-height:100%` 参照的是 body 的内容高，
-   底栏 footer 照样被正文顶下去。两者缺一，菜单栏就回不到界面底部（用户报障第 3 条）。 */
+   底栏footer 照样被正文顶下去。两者缺一，菜单栏就回不到界面底部（用户报障第 3 条）。 */
 .shell { display: flex; flex-direction: column; min-height: 100%; flex: 1; }
+
+/* 🔴🔴🔴 #app 是 body 与 .shell 之间那一层，**本条曾完全没有样式** ——
+   于是纵向布局链断在它身上：
+     body(flex column) → #app（普通块，无高度）→ .shell（flex:1 但父不是 flex 容器）
+   实测（真域名 Playwright，1440×900）：整条 shell 只占 327px / 900px，
+   底栏浮在页面上半段、下面一大片空白 —— 即使用了户报的第 3 条仍然没修好。
+   根因是**层级多了一层**，而每一层都得是"能承接高度的 flex item"，
+   漏一层就前功尽弃。
+   老项目没有这一层（编辑器直接挂 body），所以老项目不存在这个坑。
+   修法：#app 自己也必须是 flex column + flex:1。
+   🔴 判据必须量"底栏底边是否等于视口高度"，不能只看"编辑器紧贴底栏"——
+      后者在链条断掉时**照样成立**（两块一起缩在上半段），差点被骗过去。 */
+#app { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 header.ns-top {
   /* 🔴 逐字抄老项目 index.html:100（v9.0.0 注释：position:relative 给桌宠当包含块，
      #nsPet 是 absolute 且 append 进 header，缺它等于钉在首屏底缘外）。
