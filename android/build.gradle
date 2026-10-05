@@ -9,6 +9,14 @@ buildscript {
     dependencies {
         classpath 'com.android.tools.build:gradle:8.7.2'
         classpath 'com.google.gms:google-services:4.4.2'
+        // 🔴🔴 这条不能少：9 个原生源里有 4 个是 .kt（img/ link/ rem/ 三组插件）。
+        //   缺了它 gradle 根本不把 .kt 编成 class，症状是
+        //   「package cn.xuyinji.bj.rem does not exist」——**报在 MainActivity 的import 上**，
+        //   而 MainActivity 自己好好的，看起来像移植搬坏了 import。
+        //   真因是整个 Kotlin 源集没被编译：.kt 文件静默不参与编译，不报任何关于 .kt 的错。
+        //   移植脚本只搬源文件不搬 gradle 声明，漏的就是这三处（classpath / apply plugin / stdlib）。
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25'
+
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files

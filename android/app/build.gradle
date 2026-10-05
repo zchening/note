@@ -1,4 +1,7 @@
 apply plugin: 'com.android.application'
+// 🔴 见根 build.gradle 的同名注释：.kt 源集靠这一行才进编译。
+//   少了它的症状同样是「package ... does not exist」报在 MainActivity 的 import 上。
+apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
     namespace "cn.xuyinji.bj"
@@ -32,6 +35,9 @@ repositories {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    // 🔴 Kotlin 标准库：4 个 .kt 插件与 Java 侧互相调用时会用到（集合/字符串扩展）。
+    //   缺它编译能过但运行期 NoClassDefFoundError，且只在真机某个分支炸。
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.25"
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"

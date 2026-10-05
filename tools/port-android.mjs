@@ -242,6 +242,32 @@ for (const f of walk(join(NEW_ROOT, 'app/src/main'))) {
   if (t.includes(PKG_OLD)) problems.push('仍含老包名：' + f.slice(NEW_ROOT.length + 1));
   if (/note\.xuyinji|biji\.xuyinji/.test(t)) problems.push('仍含老项目域名：' + f.slice(NEW_ROOT.length + 1));
 }
+// 🔴🔴 有一条自检是这次 CI 才抓出来的，必须固化在脚本里：
+//   移植只搬**源文件**，不搬 gradle 里的**语言声明**。
+//   9 个源里有 4 个是 .kt，而缺 Kotlin 声明的症状极其误导 ——
+//   gradle 静默不把 .kt 编成 class，**不报任何关于 .kt 的错**，
+//   报错全落在 MainActivity 的 import 上：
+//     MainActivity.java:36: error: package cn.xuyinji.bj.rem does not exist
+//   看起来像"移植把 import 搬坏了"，真因是整个 Kotlin 源集没参与编译。
+//   ⇒ 判据：有 .kt 源 ⇒ 必须存在那三处声明（classpath / apply plugin / stdlib）。
+//     这三处散在两个文件里，靠人读gradle 记不住，靠 CI 兜要等 5 分钟+ 一次 push。
+const hasKt = EXPECT_SRC.some((rel) => rel.endsWith('.kt'));
+if (hasKt) {
+  const rootGradle = readFileSync(join(NEW_ROOT, 'build.gradle'), 'utf8');
+  const appGradle = readFileSync(join(NEW_ROOT, 'app/build.gradle'), 'utf8');
+  if (!/kotlin-gradle-plugin/.test(rootGradle)) {
+    problems.push('有 .kt 源但根 build.gradle 缺 kotlin-gradle-plugin classpath'
+      + '（.kt 会被静默跳过编译，报错伪装成 import 找不到包）');
+  }
+  if (!/apply plugin:\s*['"]org\.jetbrains\.kotlin\.android['"]/.test(appGradle)) {
+    problems.push("有 .kt 源但 app/build.gradle 缺 apply plugin: 'org.jetbrains.kotlin.android'");
+  }
+  if (!/kotlin-stdlib/.test(appGradle)) {
+    problems.push('有 .kt 源但 app/build.gradle 缺 kotlin-stdlib 依赖'
+      + '（编译能过，真机某个分支炸 NoClassDefFoundError）');
+  }
+}
+
 if (problems.length) {
   console.error('\n❌ 移植自检未通过（' + problems.length + ' 项）：');
   for (const p of problems) console.error('   - ' + p);

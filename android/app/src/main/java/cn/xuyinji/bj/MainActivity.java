@@ -1,12 +1,3 @@
-// 🔴 溯源：本文件与其余8 个原生源（img/ link/ rem/ update/）从老项目 cn.xuyinji.notesync
-//   **移植**而来，只做了包名/域名/单域条件替换，业务逻辑未改。移植的理由：插件代码是**平台
-//   适配层**（DownloadManager / FileProvider / AlarmManager 的用法），与产品形态无关；
-//   重写只会把老项目用真机踩出来的坑（VISIBILITY_HIDDEN 已废弃常量、同 url 互撤单、
-//   截断 APK 复用死循环）重新踩一遍。业务架构（真源/加密/同步/UI）全部重做，一行未抄。
-//
-// 🔴 下面注释里的 v5.x~v10.x 是**老项目的**版本号，标记"这段代码是哪一代引入的"，
-//   在本仓库里查不到对应 tag。它们是改这段代码时的线索（改动背景、踩坑原因），
-//   不是本项目的版本号 —— 本项目版本号唯一真源是仓库根package.json 的 version。
 package cn.xuyinji.bj;
 
 import android.content.Context;
@@ -297,15 +288,11 @@ public class MainActivity extends BridgeActivity {
                 // 修法：联网时 native 自己 fetch 线上 HTML 并落盘；断网/失败时回本地缓存文件，
                 // 页面照常打开，JS 照常跑（localStorage origin 不变），离线阅读生效。
                 // 热更新不受影响：联网时永远先拿线上最新版。
-                // v8.1.0 同源白名单：主文档缓存链路只许 App 自己的域走。
-                //   新项目单域 bj.xuyinji.com.cn（老项目是 note/biji 双域同库，故移植时两条会变两条重复）。
+                // v8.1.0 同源白名单：主文档缓存链路只许笔记域走（note/biji 双域同库）。
                 // 无白名单时「应用内打开外站」的整页 GET 也会被 fetchMainDoc+saveMainDoc 当笔记主页缓存——
                 // 断网启动兜底页变成外站 HTML（离线 P0 级污染）。外站请求落 super 正常加载。
-                // 🔴 新项目只有单域 bj.xuyinji.com.cn。移植后原双域条件会变成
-                //   "bj".equals(h) || "bj".equals(h) —— 重复条件恒等价于单条，
-                //   编译得过、行为也对，但它是"这里本该只有一条"的证据，留着必被后人当双域看。
                 String host = request.getUrl().getHost();
-                boolean appHost = "bj.xuyinji.com.cn".equals(host);
+                boolean appHost = "bj.xuyinji.com.cn".equals(host) || "bj.xuyinji.com.cn".equals(host);
                 if (appHost && request.isForMainFrame() && "GET".equalsIgnoreCase(request.getMethod())) {
                     interceptCount++;
                     // v10.1.0 A：主文档本地优先，治「装完第一次打开必等公网」+「点笔记再等一次公网」。
@@ -488,12 +475,12 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        // App Links：assetlinks 校验通过后点 bj 域链接直达 APK —— intent 里的 URL
-        // 必须转发给 WebView，否则「开了 App 却落错页」（根页/上次笔记）。冷启沿用防竞速范式
-        // post 直载目标；热启（singleTop）走 onNewIntent。只认本域 https，其余不转发（钓鱼链接不进 App）。
-        // 闸R1-P1（移植保留）：转发前 origin 归一到 App 自身域（server.url=bj）——
-        // 若将来加了别的域并原样直载，WebView 换源后 localStorage 按 origin 隔离
-        // （密钥/缓存/草稿全另一套）=「直达即锁屏」。path/query/fragment 原样保留，只换 scheme+authority。
+        // v8.1.0 App Links（§K2 另一半）：assetlinks 校验通过后点笔记域链接直达 APK——intent 里的 URL
+        // 必须转发给 WebView，否则「开了 App 却落错页」（根页/上次笔记）。冷启沿用 v6.3 防竞速范式
+        // post 直载目标；热启（singleTop）走 onNewIntent。只认双域 https，其余不转发（钓鱼链接不进 App）。
+        // 闸R1-P1：转发前 origin 归一到 App 自身域（server.url=biji）——note 域链接若原样直载，
+        // WebView 换源后 localStorage 按 origin 隔离（密钥/缓存/草稿全另一套）=「直达即锁屏」，
+        // 老人用户比落浏览器更糟。path/query/fragment 原样保留，只换 scheme+authority。
         Intent link = getIntent();
         if (isAppLink(link)) {
             final String target = appLinkTarget(link.getData().toString());
@@ -519,14 +506,13 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    /** 仅收 bj.xuyinji.com.cn 的 https ACTION_VIEW 链接（App Links 直达）。
-     *  🔴 新项目单域，不收老项目的 note 域链接 —— 那是另一个 App 的事，
-     *     收下会互相抢流量、且 assetlinks 不匹配导致系统直接不验证。 */
+    /** v8.1.0：仅收笔记双域（note/bj.xuyinji.com.cn）的 https ACTION_VIEW 链接 */
     private boolean isAppLink(Intent it) {
         if (it == null || !Intent.ACTION_VIEW.equals(it.getAction())) return false;
         android.net.Uri u = it.getData();
         if (u == null || !"https".equals(u.getScheme())) return false;
-        return "bj.xuyinji.com.cn".equals(u.getHost());
+        String h = u.getHost();
+        return "bj.xuyinji.com.cn".equals(h) || "bj.xuyinji.com.cn".equals(h);
     }
 
     /** v10.1.0 B（原 v5.57 didCacheBootstrapReload）：掐掉绕过拦截器的首载、重走拦截器，进程内只跑一次
