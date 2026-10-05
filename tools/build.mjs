@@ -21,7 +21,7 @@
 
 import { build, context } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, copyFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -29,6 +29,19 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WWW = join(ROOT, 'www');
 const ENTRY = join(ROOT, 'packages', 'client', 'src', 'main.ts');
 const CSS = join(ROOT, 'packages', 'client', 'src', 'ui', 'styles.css');
+/**
+ * 🔴🔴 静态资源源目录 —— **必须入库**。
+ *
+ *   曾经把 sw.js 与 html2canvas.min.js 直接放在 www/，而 www/ 整个在
+ *   .gitignore 里（它是构建产物）。后果：本机一切正常，但 CI 拉下来的仓库里
+ *   没有这两个文件，构建出的 www/ 是残缺的 ——
+ *     - sw.js 404⇒ APK 壳里注册 SW 静默失败，离线能力消失
+ *     - html2canvas 404 ⇒ **导出长图整体不可用**，而失败文案是
+ *       「图片导出组件未加载」，用户只会觉得功能坏了
+ *   这类"只在本机成立"的缺口是最难查的一类，所以静态资源必须住在源码树里，
+ *   由本脚本物化到 www/。
+ */
+const STATIC_SRC = join(ROOT, 'packages', 'client', 'static');
 const HTML = join(WWW, 'index.html');
 
 /** 唯一的版本来源（ARCH.md §4.6） */
@@ -39,6 +52,32 @@ async function readVersion() {
 
 async function ensureDirs() {
   await mkdir(WWW, { recursive: true });
+}
+
+/**
+ * 把 packages/client/static/ 下的文件物化到 www/。
+ *
+ * 🔴🔴 **必须在 build 里做，且必须报出每个文件**：
+ *   - 不做 ⇒ CI 产物缺 sw.js / html2canvas.min.js（见 STATIC_SRC 的注释）
+ *   - 不报出 ⇒ 缺文件时构建照样"成功"，问题一路飘到用户手机上
+ *
+ * 🔴 用 copyFile 而不是硬编码文件名清单：新增静态资源时忘了改清单，
+ *   症状就是"本地好好的、线上那个文件 404"，而清单里根本看不到它。
+ */
+async function materializeStatic() {
+  let names;
+  try {
+    names = await readdir(STATIC_SRC);
+  } catch {
+    //🔴 目录不存在是**硬错误**：它意味着静态资源没入库（见 STATIC_SRC 注释）。
+    //   静默跳过等于把缺口直接推到线上，必须在这里就炸。
+    throw new Error(`静态资源目录不存在：${STATIC_SRC}（sw.js / html2canvas.min.js 不会进 CI 产物）`);
+  }
+  const files = names.filter((n) => !n.startsWith('.'));
+  for (const n of files) {
+    await copyFile(join(STATIC_SRC, n), join(WWW, n));
+  }
+  return files;
 }
 
 /**
@@ -125,9 +164,19 @@ async function run() {
   const css = await readFile(CSS, 'utf8');
   await writeFile(HTML, indexHtml(version, date, sha, css), 'utf8');
 
+  const statics = await materializeStatic();
+
   const kb = (n) => (n / 1024).toFixed(1) + ' KB';
   console.log(`[build] app.js ${kb(js.length)}  sha256:${sha.slice(0, 16)}`);
   console.log(`[build] index.html 就绪（CSS inline ${kb(css.length)}）  版本 v${version}  ${date}`);
+  console.log(`[build] 静态资源已物化：${statics.join(', ') || '(空)'}`);
+  // 🔴 逐个点名：缺文件时这里要能一眼看出来，而不是"构建成功"然后线上 404
+  for (const must of ['sw.js', 'html2canvas.min.js']) {
+    if (!statics.includes(must)) {
+      console.error(`[build] 缺必需静态资源：${must}（导出/SW 会 404）`);
+      process.exitCode = 1;
+    }
+  }
 }
 
 run().catch((e) => {

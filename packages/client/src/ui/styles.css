@@ -241,6 +241,10 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .row-btn { flex: none; padding: 6px 12px; border-radius: 8px; font-size: 12.5px;
            border: 1px solid var(--line); background: var(--bg); }
 .row-btn:hover { background: var(--hover); }
+/* 预览/链接页的按钮行。导出全屏预览的「下载 / 完成」用它。 */
+.link-actions { display: flex; gap: 12px; justify-content: center; margin-top: 14px; }
+/* 预览里的图片：圆角 + 白底（导出图本身带白/暗底，白底保证夜间也不糊） */
+#imgPreviewMask img { display: block; margin: 0 auto; }
 
 /* ---------- 皮肤覆膜层 ---------- */
 /* 🔴 非色彩、低透明、**不拦截交互**（pointer-events:none），老项目同此。

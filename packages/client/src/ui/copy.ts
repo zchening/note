@@ -202,6 +202,39 @@ export const COPY = {
   uploadOkMs: 2000,
   /** 失败驻留毫秒（老项目 4500，比成功长一倍以上） */
   uploadFailMs: 4500,
+
+  /* 导出长图（老项目原文；失败文案必须自带「图片未生成」） */
+  /** 组件加载失败（自托管文件没部署 / 断网 / CSP） */
+  exportLoadFail: '图片导出组件未加载，请检查网络后重试',
+  /** 渲染过程提示（常驻，被下一条覆盖） */
+  exportDoing: '正在生成图片…',
+  /** 外链图片跨域导致的失败（SecurityError 要说人话，不能回显英文） */
+  exportFailCors: '导出失败：可能因外链图片跨域，请使用支持跨域的图床，图片未生成',
+  /** 其他渲染失败：`{msg}` 由异常 message 拼入 */
+  exportFailMsg: (msg: string): string => `导出失败：${msg}，图片未生成`,
+  /** 渲染完成但没有任何交付出口（理论上不可达，留着兜底） */
+  exportFailUnknown: '导出失败：渲染异常，图片未生成',
+  /** 成功提示，按实际生效的那一档给不同措辞 */
+  exportOkMsg: (kind: string): string =>
+    kind === 'native'
+      ? '图片已复制，可直接粘贴'
+      : kind === 'share'
+        ? '已通过系统分享发出'
+        : kind === 'preview'
+          ? '图片已生成，可长按保存或下载'
+          : '图片已复制，可直接粘贴',
+  /** 成功驻留毫秒 */
+  exportOkMs: 3000,
+  /** 失败驻留毫秒（比成功长，与上传同口径） */
+  exportFailMs: 4500,
+  /* 全屏预览兜底 */
+  exportPreviewTitle: '图片已生成',
+  exportPreviewAlt: '笔记图片',
+  exportPreviewTip: '长按图片可保存或发送；点「下载」也可直接保存',
+  exportDownload: '下载',
+  exportDone: '完 成',
+  /** 编辑器不在时点导出（顶栏还在但笔记已卸载） */
+  exportNoEditor: '请先打开一篇笔记再导出',
   /** 非图片文件的拒绝文案 */
   uploadNotImage: '不是图片文件，图片未插入，请重试',
 } as const;

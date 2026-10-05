@@ -55,6 +55,7 @@ import { handleImageUpload } from './image/upload.ts';
 import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
+import { exportNotePng } from './export/index.ts';
 
 declare global {
   interface Window {
@@ -112,6 +113,19 @@ declare global {
     __NOTESYNC_EGG_CODEX__?: () => boolean;
     /** 主动打开图鉴（与 `?eggs` 同一条生产路径）。 */
     __NOTESYNC_EGG_CODEX_OPEN__?: () => void;
+    /**
+     * Capacitor 全局（App 壳注入）。
+     *
+     * 🔴 必须声明成宽松形态而不是 `any`：桥对象由壳在运行时塞进来，
+     *   编译期无从知道形状；这里只声明本项目**实际用到的那一个方法**，
+     *   访问不存在的插件时返回 undefined（而不是崩）。
+     */
+    Capacitor?: {
+      Plugins?: Record<
+        string,
+        { copyImage?: (o: { base64: string; mime: string }) => Promise<{ ok?: boolean }> }
+      >;
+    };
   }
 }
 
@@ -425,6 +439,27 @@ function dismissKeyboardForTouch(): void {
   }
 }
 
+/**
+ * 原生桥：复制图片到系统剪贴板。
+ *
+ * 🔴 为什么需要它（老项目 v7.7.0 血泪）：Android WebView 对
+ *   `navigator.clipboard.write` 写图片**长期不可用**，而导出长图的主要场景
+ *   就是手机。这条桥是那条路上唯一确定性的出口。
+ *
+ * 🔴 桥不存在时返回 false 而不是抛错：调用方会继续往下走分享/预览阶梯，
+ *   抛错会把整条回退链断掉（症状是"有原生桥的机器上分享面板也不弹了"）。
+ */
+async function nativeCopyImage(base64: string, mime: string): Promise<boolean> {
+  try {
+    const br = window.Capacitor?.Plugins?.ImgClip;
+    if (!br || typeof br.copyImage !== 'function') return false;
+    const res = await br.copyImage({ base64, mime });
+    return res?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 let currentPage = 'boot';
 let currentNote = '';
 /** 收藏态与链接打开方式是**本机偏好**（老项目：仅对本机生效），存 localStorage。 */
@@ -564,6 +599,31 @@ function onTopbar(act: TopbarAction): void {
     case 'upload': {
       // 顶栏上箭头 = 选图上传（老项目同一入口）
       pickImage();
+      return;
+    }
+    case 'exportImg': {
+      // 🔴 必须判编辑器在不在：顶栏在编辑器卸载后仍留在 DOM 里，
+      //   此时点导出会 buildCard(null) 抛 TypeError，症状是"退出后误点顶栏就报错"。
+      const host = document.getElementById('editor-host');
+      if (!ed || !host) {
+        setFootStatus?.('offline', COPY.exportNoEditor);
+        return;
+      }
+      void exportNotePng({
+        editorHost: host,
+        noteId: currentNote,
+        brandSvg: document.querySelector('#brandMark svg'),
+        dismissKeyboard: () => dismissKeyboardForTouch(),
+        onStatus: (kind, text, autoHideMs) => {
+          // 🔴 复用上传状态条而不是底栏：底栏那一行是同步状态的位置，
+          //   拿来显示"正在生成图片"会让用户以为同步坏了（老项目同款口径）。
+          showUploadNote(kind, text, autoHideMs);
+        },
+        isNativeApp: window.__NOTESYNC_NATIVE__ === true,
+        nativeCopyImage,
+        okMs: COPY.exportOkMs,
+        failMs: COPY.exportFailMs,
+      });
       return;
     }
     default:
