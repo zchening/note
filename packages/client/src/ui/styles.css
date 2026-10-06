@@ -138,7 +138,18 @@ svg .gf { fill: var(--accent); stroke: none; }
     radial-gradient(ellipse 720px 480px at 50% 30%, var(--accent-soft), transparent),
     var(--bg);
 }
-.landing-in { width: 100%; max-width: 380px; text-align: center; }
+/* 🔴🔴 `.landing-in` 这层包裹是**bj 自己加的**，老项目**没有**（index.html 里 0 处）。
+   老项目里 logo / h1 / .sub / .input-row / .trust 都是 `.landing`（display:flex; column;
+   align-items:center）的**直接子元素** ⇒ 每一项各自 shrink-to-fit，
+   实测 h1 宽 157.53px、.sub 宽 89.97px（各自贴着文字宽度）。
+   bj 多包一层 `.landing-in{width:100%}` ⇒ h1 被拉满 342px（用户报障第 1 条「文字位置不同」）。
+
+   🔴 修法用 `display:contents`：它让这层的**子元素直接参与父级 flex 布局**，
+   等价于老项目"没有这层包裹"的结构，而不是靠调 max-width 去凑宽度
+   （试过 max-content：那会让 .input-row 的 340px 变成所有子项的共同宽度，h1 仍是 340，不对）。
+   ⚠️ display:contents 会让 .landing-in 自身不产生盒子，所以它的 max-width 也不再生效
+   —— 这正是我们要的（限宽由 .input-row 自己的 max-width:340 承担）。 */
+.landing-in { display: contents; }
 .ns-logo { color: var(--accent); margin: 0 auto 6px; display: block; }
 
 /* 🔴🔴 落地页 logo 56px（老项目 index.html:557 `.logo{width:56px;height:56px;margin:0 0 22px}`）。
@@ -812,8 +823,24 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .list-row .hist-btns { display: flex; gap: 6px; flex-shrink: 0; }
 /* 预览/链接页的按钮行。导出全屏预览的「下载 / 完成」用它。 */
 .link-actions { display: flex; gap: 12px; justify-content: center; margin-top: 14px; }
-/* 预览里的图片：圆角 + 白底（导出图本身带白/暗底，白底保证夜间也不糊） */
-#imgPreviewMask img { display: block; margin: 0 auto; }
+/* 🔴🔴 导出全屏预览的图：逐值抄老项目 index.html
+   `img.setAttribute('style','max-width:100%;max-height:60vh;border-radius:12px;background:#fff')`。
+   此前本规则只有 `display:block;margin:0auto`，注释还写着"圆角 + 白底"——
+   **注释描述了三条，规则里一条都没有**（max-width/max-height/border-radius/background 全缺）。
+   症状正是用户报障第 3 条「导出为图片…图片外围的边框不同」：
+   图按原始像素宽铺开、顶到遮罩边、方角、夜里背景透明直接糊在深色上。
+ * 容器侧的 max-width:92vw 由老项目在 box 上用行内样式给（max-width:92vw），
+   这条只管图自身，两者都要。 */
+#imgPreviewMask img {
+  display: block; margin: 0 auto;
+  max-width: 100%; max-height: 60vh;
+  /* 🔴 底色走 --qr-paper 令牌，不写 #fff：S4-T7 纪律闸禁止 CSS 里出现颜色字面量
+     （改配色时会漏改，症状是"夜间某处还是浅色"）。
+     老项目这里是行内 `background:#fff`，但它整套 CSS 都在主题反色块覆盖之下，
+     bj 既然把色板收进 theme.ts，就该用等价令牌。--qr-paper 正是"纸白"。*/
+  border-radius: 12px;
+  background: var(--qr-paper);
+}
 
 /* ---------- 皮肤覆膜层 ---------- */
 /* 🔴 非色彩、低透明、**不拦截交互**（pointer-events:none），老项目同此。

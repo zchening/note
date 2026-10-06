@@ -1276,3 +1276,47 @@ test('VVW-14 🔴 链接打开方式：两行各有专属图标 + 选中行显�
     await page.close();
   }
 });
+
+/**
+ * 🔴 落地页标题/副标题必须**贴着文字宽度**（shrink-to-fit），不能被拉满。
+ * 用户报障第 1 条「文字位置不同」。
+ *
+ * 🔴🔴 bj 曾在 logo/h1/sub/input-row 外面多包一层 `.landing-in{width:100%}`
+ *   （老项目 index.html 里 0 处），于是 h1 被拉成 342px。
+ *   老项目里它们是 `.landing`（flex column + align-items:center）的**直接子元素**
+ *   ⇒ 各自 shrink-to-fit：实测 h1 157.53px、sub 89.97px。
+ *
+ * 🔴 修法是 `display:contents`（让子元素直接参与父级 flex），
+ *   **不是**调 max-width 去凑宽度 —— 试过 max-content：那样 .input-row 的 340px
+ *   会变成所有子项的共同宽度，h1 仍是 340，不对。
+ *
+ * 🔴 判据钉**宽度绝对值**而不是"看起来居中"：因为 align-items:center 下
+ *   两种宽度的**视觉居中效果相同**，只有选中文字时的选区宽度、
+ *   以及任何按元素宽度做的判断才会不同 ⇒ 不量宽度就测不出来。
+ */
+test('VVW-15 🔴 落地页 h1/副标题 shrink-to-fit（不拉满），输入行 340', async () => {
+  const page = await h.browser().newPage({ viewport: { width: 390, height: 844 } });
+  try {
+    await page.goto(h.baseUrl(), { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    await page.waitForSelector('.landing h1, #landing h1', { timeout: 10_000 });
+    const m = await page.evaluate(() => {
+      const w = (s) => {
+        const e = document.querySelector(s);
+        return e ? Math.round(e.getBoundingClientRect().width * 100) / 100 : null;
+      };
+      return {
+        h1: w('.landing h1, #landing h1'),
+        sub: w('.landing .sub, #landing .sub'),
+        row: w('.lrow, .input-row'),
+        trust: w('.trust'),
+      };
+    });
+    // 老项目实测值（390 视口）
+    assert.equal(m.h1, 157.53, `h1 应 shrink-to-fit 到 157.53px，实际 ${m.h1}`);
+    assert.equal(m.sub, 89.97, `副标题应 shrink-to-fit 到 89.97px，实际 ${m.sub}`);
+    assert.equal(m.row, 340, `输入行应 340px，实际 ${m.row}`);
+    assert.equal(m.trust, 390, `卖点行应铺满 390px，实际 ${m.trust}`);
+  } finally {
+    await page.close();
+  }
+});
