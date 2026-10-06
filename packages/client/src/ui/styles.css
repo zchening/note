@@ -1248,6 +1248,15 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
   max-width: 100%; cursor: pointer; -webkit-tap-highlight-color: transparent;
   touch-action: manipulation; }
 .qr-warn { font-size: 12px; color: var(--danger); line-height: 1.65; margin: 0 0 16px; }
+/* 🔴🔴 `.ns-qr-warn`（扫码配对 / 换机面板的警示文字）此前**根本没有对应的样式规则**
+   —— 本文件只有 `.qr-warn`，而三处面板用的是 ns- 前缀：
+     scan/panel.ts:193（扫码配对）、migrate/panel.ts:221 与 :230（换机）。
+   ⇒ 那三处警示文字完全没被样式命中，字号/颜色/行高/边距全是浏览器默认值。
+   量化实测：老项目该行 289x44（22px×2 行），bj 是 289x51 —— 字号大一号、行距不同。
+   这正是用户报障第 3 条「扫码配对弹窗文字与大小不同」。
+   🔴 修法是**补选择器**而不是改那三处调用点的类名 ——
+   "类名与老项目逐字对应"是本项目的约定，改类名会把它破掉。 */
+.ns-qr-warn { font-size: 12px; color: var(--danger); line-height: 1.65; margin: 0 0 16px; }
 .ns-lock-warn { font-size: 13px; color: var(--muted); line-height: 1.7; }
 .ns-ghost-btn { background: transparent !important; }
 
