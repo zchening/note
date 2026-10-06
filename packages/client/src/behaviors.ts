@@ -400,15 +400,31 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
     (event) => {
       const target = event.target as HTMLElement | null;
       if (!target) return false;
-      // 🔴 命中判据是 `.ns-fold > :first-child`（标题段落），与 styles.css 一一对应。
-      //   不用 `closest('.ns-fold')` 再判断点在标题还是正文 —— 后者要在正文里
-      //   排除一切点击，边界多且脆；而「标题是第一个子段落」是结构事实，判据唯一。
-      // 🔴 判据必须用 **child combinator**：只写 `.ns-fold` 会命中整个折叠块，
-      //   于是点正文也会切换开合（用户正在编辑正文，块忽然收起，光标丢失）。
+      // 🔴🔴🔴 命中判据：**只有三角（::before）才切换开合，点标题文字不切**。
+      //   用户拍板：点标题文字 = 光标进去（可改标题）；点三角 = 展开/收起。
+      //   与老项目一致：index.html `editor.addEventListener('click', e => {
+      //     const mark = e.target.closest('span.ns-fold-mark');   // ← 只认三角那个 span
+      //     if (!mark) return;                                    // ← 点标题文字直接不管
+      //   })`。
+      //
+      //   bj 此前判的是 `.ns-fold > :first-child`（**整行**）⇒ 点文字也会展开/收起，
+      //   用户报障「点击标题不符合预期地可以展开/收起」。
+      //
+      //   🔴 怎么判"点在三角上"：三角是 ::before（**没有自己的 DOM 盒子**），
+      //   所以不能用 `target.closest('.ns-tri')`。可靠办法是**几何判据**：
+      //   三角在标题行左侧，宽度固定（收起态 border-left 8px ⇒ 视觉宽约 8px，
+      //   加上 margin-left 3px ⇒ 命中区取标题行左起 0~22px，与老项目
+      //   `.ns-fold-mark::after` 那枚 18×20 透明感应区同量级）。
+      //   命中区必须够大到手指点得到，又不能宽到吃掉标题第一个字。
       const foldDom = target.closest('.ns-fold');
       if (!foldDom) return false;
       const head = target.closest('.ns-fold > :first-child');
       if (!head || !foldDom.contains(head)) return false;
+      // 点在正文的点击一律放行（用户可能正在编辑正文）
+      if (!head.contains(target)) return false;
+      // 🔴 几何判据：命中区 = 标题行左起 22px 内
+      const hr = head.getBoundingClientRect();
+      if (event.clientX - hr.left > 22) return false;
       // 🔴🔴 用 `$getNearestNodeFromDOMNode` 拿节点，**不要读 `dom.__lexicalKey`**。
       //   后者是 Lexical 挂在 DOM 上的**内部字段**，不保证存在、不保证名字不变：
       //   读不到就静默 return false，症状是「点标题毫无反应且零报错」——

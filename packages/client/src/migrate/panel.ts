@@ -42,6 +42,20 @@ export interface MigratePanelDeps {
    *   码生成完立刻清空输入框（老项目同款纪律）。
    */
   onMake?: (passphrase: string) => Promise<{ ok: true; code: string } | { ok: false; reason: string }>;
+  /**
+   * 🔴🔴 免口令直出码：本机**当前会话已持有口令**时传进来（老项目 `preKey` 同名机制）。
+   *
+   * 老项目 index.html `bakShowStage(1)`：
+   *   if (preKey) { await doBakGenerate(preKey); return; }   ← 有 preKey 直接出码
+   *   else { bakShowStage(1); }                              ← 否则才要口令框
+   * 而 bj 此前**没有 preKey**，于是"本机明明刚解锁过，点扫码换机还要再输一次口令"
+   *（用户报障第 4 条：体验与老项目不一致）。
+   *
+   * 为什么 bj 需要显式传：本项目的口令在 `main.ts` 的 `sessionPass` 里，
+   * 面板不持有它（见onMake 注释的纪律），所以由调用方把"这次会话的口令"传进来。
+   * 为 null 时行为与老项目一致（要口令框）。
+   */
+  preKey?: string | null;
   /** 恢复侧：拿码 + 口令去恢复。 */
   onTake?: (code: string, passphrase: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
   /** 生成前的预判（文档太长等），返回非空即拒绝生成。 */
@@ -414,5 +428,36 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
   }
 
   void acquireWakeLock();
+  // 🔴🔴 免口令直出码（老项目 `if (preKey) { await doBakGenerate(preKey); return; }` 同款）。
+  //   本机当前会话已持有口令时，**直接出码**，不再弹口令框——
+  //   否则用户明明刚解锁过，点「扫码换机」还要再输一次口令（体验与老项目不一致）。
+  //   preKey 为空（本次是「记忆解锁」进来的、sessionPass 为空）时行为不变，仍要口令框。
+  if (making && deps.preKey && deps.onMake) {
+    const pre0 = deps.precheck?.() ?? null;
+    if (pre0) {
+      err(errBox, pre0);
+    } else {
+      passWrap.classList.add('hidden');
+      doneWrap.classList.add('hidden');
+      outWrap.classList.remove('hidden');
+      go.disabled = true;
+      go.textContent = COPY.migrateWorking;
+      const mk = deps.onMake;
+      void (async () => {
+        try {
+          const r = await mk(deps.preKey as string);
+          if (!r.ok) {
+            err(errBox, r.reason);
+            showInput();
+            return;
+          }
+          await renderCode(r.code);
+        } finally {
+          go.disabled = false;
+          go.textContent = COPY.migrateMakeGo;
+        }
+      })();
+    }
+  }
   return { el: mask, close: teardown };
 }

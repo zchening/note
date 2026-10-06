@@ -67,7 +67,8 @@ test('FOLD-02 🔴 点标题能收起/展开（data-open 真的翻转）', async
     assert.equal(open0, 'true', '新建的折叠块应为展开态，实际=' + open0);
 
     // 点标题（第一个子段落）→ 收起
-    await page.click('.ns-fold > :first-child');
+    // 🔴 点**三角**才切换开合（用户拍板：点文字=编辑标题、点三角=展开/收起）
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
     await withTimeout(
       page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'false', {
         timeout: 5000,
@@ -85,7 +86,8 @@ test('FOLD-02 🔴 点标题能收起/展开（data-open 真的翻转）', async
     assert.equal(bodyVisible, false, '收起态正文必须 display:none');
 
     // 再点 → 展开
-    await page.click('.ns-fold > :first-child');
+    // 🔴 点**三角**才切换开合（用户拍板：点文字=编辑标题、点三角=展开/收起）
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
     await withTimeout(
       page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'true', {
         timeout: 5000,
@@ -108,7 +110,8 @@ test('FOLD-03 🔴🔴 开合不改变真源 canonical 字节（ephemeral 红线
     await page.waitForTimeout(500);
 
     const before = await canon(page);
-    await page.click('.ns-fold > :first-child');
+    // 🔴 点**三角**才切换开合（用户拍板：点文字=编辑标题、点三角=展开/收起）
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
     await withTimeout(
       page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'false', {
         timeout: 5000,
@@ -177,7 +180,8 @@ test('FOLD-05 🔴🔴 收起时把光标从隐藏正文弹回标题末尾（老
     assert.equal(beforeInside, true, '前置条件：光标应在编辑器内');
 
     // 点标题收起
-    await page.click('.ns-fold > :first-child');
+    // 🔴 点**三角**才切换开合（用户拍板：点文字=编辑标题、点三角=展开/收起）
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
     await withTimeout(
       page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'false', {
         timeout: 5000,
@@ -304,7 +308,8 @@ test('FOLD-ENTER1 标题中间回车：后半段文字落到折叠块**外面**'
     await page.keyboard.type('BODY');
     await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
     await page.waitForSelector('.ns-fold', { timeout: 10_000 });
-    await page.click('.ns-fold > :first-child');
+    // 🔴 点**三角**才切换开合（用户拍板：点文字=编辑标题、点三角=展开/收起）
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
     await new Promise((r) => setTimeout(r, 350));
     await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
     await new Promise((r) => setTimeout(r, 200));

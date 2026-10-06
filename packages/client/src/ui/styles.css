@@ -680,15 +680,10 @@ footer.ns-foot .dot.off { background: var(--danger); }
   max-width: none; width: min(86vw, 300px);
   text-align: left; padding: 14px 16px;
 }
-/* 关闭键浮在盒内右上角（菜单是从底栏升起的浮层，不是居中模态） */
-.menu-box > #menuClose {
-  position: absolute; right: 12px; top: 12px;
-  width: 32px; height: 32px; display: grid; place-items: center;
-  border-radius: 8px; color: var(--muted);
-  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
-}
-.menu-box > #menuClose:hover { background: var(--hover); color: var(--fg); }
-.menu-box > #menuClose svg { width: 17px; height: 17px; display: block; }
+/* 🔴 菜单盒收焦点（Esc 关闭靠它）—— 焦点框本身不该露出来：
+   菜单一打开就带一圈描边，与老项目"点开就干净浮层"的观感不符，
+   而 role=dialog 的语义也由 aria-label 承担，视觉焦点圈是多余的。 */
+.menu-box:focus { outline: none; }
 .menu-item {
   display: flex; align-items: center; gap: 12px;
   /* 🔴🔴 justify-content:center —— 老项目 index.html:437 明确写 center。

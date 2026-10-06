@@ -98,7 +98,17 @@ test('FAV-E 收藏夹全链路', async (t) => {
       assert.equal(before.fill, 'none', `未收藏时应无填充，实际 "${before.fill}"`);
 
       await page.click('#menuFav');
-      await withTimeout(page.waitForSelector('#menuMainView'), 5_000, '收藏后等重画');
+      // 🔴 收藏不再重画整个菜单（用户要求）⇒ #menuMainView **一直都在**
+      //   （此前这行 waitForSelector 会立刻通过，于是读到还没更新的旧 DOM）。
+      //   现在等的是这一行的文案真的变成「取消收藏」。
+      await withTimeout(
+        page.waitForFunction(() => {
+          const l = document.querySelector('#menuFav .mi-l');
+          return l && l.textContent === '取消收藏';
+        }, { timeout: 5_000 }),
+        5_000,
+        '收藏后收藏项文案应变「取消收藏」',
+      );
       const after = await starFill();
       // 🔴 核心判据：实心 = gf 类 + computed fill 真的解析出一个颜色
       assert.ok(after.cls.includes('gf'), `收藏后五角星应带 gf 类（实心），实际 class="${after.cls}"`);
@@ -108,7 +118,16 @@ test('FAV-E 收藏夹全链路', async (t) => {
       );
 
       await page.click('#menuFav');
-      await withTimeout(page.waitForSelector('#menuMainView'), 5_000, '取消后等重画');
+      // 🔴 收藏不再重画整个菜单（用户要求），所以这里**不能等 #menuMainView 重现**
+      //   —— 它一直在。要等的是这一行的文案/图标真的变回去。
+      await withTimeout(
+        page.waitForFunction(() => {
+          const l = document.querySelector('#menuFav .mi-l');
+          return l && l.textContent === '收藏笔记';
+        }, { timeout: 5_000 }),
+        5_000,
+        '取消后收藏项文案应变回「收藏笔记」',
+      );
       const back = await starFill();
       assert.equal(back.cls.includes('gf'), false, '取消收藏后 gf 类应去掉');
     } finally {
@@ -221,6 +240,61 @@ test('FAV-E 收藏夹全链路', async (t) => {
       // 如实报出：底栏状态行出现封顶提示
       const foot = (await page.textContent('#syncText'))?.trim() ?? '';
       assert.match(foot, /收藏最多 100 篇/, `底栏应提示封顶，实得「${foot}」`);
+
+      // 🔴🔴 关键：提示必须**扛过一次同步快照**。
+      //   底栏那一行同时是「同步状态」和「临时提示」两个用途，提示只在设置那一刻
+      //   存在 —— 下一个到达的 onSnapshot 会把它无声覆盖，症状是「提示闪一下就没了」。
+      //   老项目没这个洞是因为它压根不提示（writeFavs 静默截断）；
+      //   bj 选了「如实告知」这条更好的路，就得自己扛住覆盖（footFlash 的占有窗口）。
+      //   判据不能只看「点完那一刻」—— 那正是修好前的通过点，必须让它**穿过**一次
+      //   真实的 dirty→pushing→idle 快照流之后还在。
+      // 🔴 关菜单不能点 #menuBtn —— 菜单遮罩盖在它上面，Playwright 会判定
+      //   "element is visible" 但点击被拦截，一直 retry 到 30s 超时。用 Esc。
+      await page.keyboard.press('Escape');
+      // 🔴 Esc 之后焦点不保证落在编辑器上，直接 type 会打进空气
+      //   （症状：等不到 dirty，10s 超时，报错还指向「同步没动」这个假方向）。
+      //   必须显式点一下可编辑区，与 01-editor-roundtrip 的做法一致。
+      const editable = await page.$('#editor-host[contenteditable="true"]');
+      assert.ok(editable, '编辑器未挂载：#editor-host[contenteditable] 不存在');
+      await editable.click();
+      await page.keyboard.type('触发一次真实快照流');
+      // 🔴 打字必须真进真源，否则后面等 dirty 可能白等 10s 才发现方向错了
+      const docNow = await page.evaluate(() => window.__NOTESYNC_DOC__());
+      assert.notDeepEqual(
+        docNow,
+        { v: 1 },
+        `打字没进真源，后面的快照断言就成恒真了（实得 ${JSON.stringify(docNow)}）`,
+      );
+      // 🔴🔴 等「同步动起来」必须读 `#shell[data-sync-state]`（同步状态机自己的
+      //   原始状态位），**不能读底栏文案**：提示持有期间底栏只有「收藏最多 100 篇」，
+      //   读文案永远等不到 → 硬等满 10s → 提示自己 5s 到期收掉 → 断言必红，
+      //   且红的原因与被测的修复无关（我自己第一版就踩了，还一度以为修复无效）。
+      await withTimeout(
+        page.waitForFunction(
+          () => {
+            const st = document.querySelector('#shell')?.dataset.syncState ?? '';
+            return st === 'dirty' || st === 'pushing';
+          },
+          { timeout: 8_000 },
+        ),
+        10_000,
+        '等同步状态机真的动起来',
+      );
+      try {
+        await withTimeout(
+          page.waitForFunction(
+            () => (document.querySelector('#syncText')?.textContent ?? '').includes('收藏最多'),
+            { timeout: 1_500 },
+          ),
+          2_500,
+          '封顶提示应扛过同步快照',
+        );
+      } catch (e) {
+        const now = (await page.textContent('#syncText'))?.trim() ?? '';
+        throw new Error(
+          `封顶提示被同步快照覆盖了（footFlash 占有窗口失效），现底栏「${now}」：${e.message}`,
+        );
+      }
     } finally {
       await page.close();
     }

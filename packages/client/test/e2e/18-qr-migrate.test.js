@@ -108,19 +108,70 @@ test('QR-M 扫码换机', async (t) => {
         `点了「扫码换机」后URL 不该是 /backup（那是死链，会落回首页提示页）。实际=${url}`,
       );
 
-      // 面板本体：口令框 + 生成按钮必须在（老项目 stage1 形态）
-      assert.ok(await page.$('#migratePass'), '备份面板应有口令框');
-      assert.ok(await page.$('#migrateGo'), '备份面板应有生成按钮');
+      // 🔴🔴 本机已解锁 ⇒ **不该出现口令框**，应直接出码（用户拍板）。
+      //   老项目 index.html:9163 的 `bakShowStage(1)` 只在"本机没留口令"时兜底问一次；
+      //   已解锁时走的是 `if (preKey) { await doBakGenerate(preKey); return; }` ——
+      //   跳过整个口令阶段。所以判据必须是「口令框不存在」，
+      //   我此前写成 `assert.ok(#migratePass)`（要求它在），方向正好反了，
+      //   症状是 fill 一直 retry 到 30s 超时。
+      const hasPassBox = await page.$('#migratePass');
+      if (hasPassBox) {
+        const visible = await hasPassBox.isVisible();
+        assert.equal(
+          visible,
+          false,
+          '本机已解锁时口令框不该可见 —— 用户要求「点扫码换机直接出码，不要输口令」',
+        );
+      }
+      // 直接出码：码必须在（这才是用户要的形态）。
+      // 🔴 读码走 `window.__NOTESYNC_MIGRATE_CODE__()` —— 那是生产侧真实的取码口，
+      //   不是 DOM 文本：面板里码显示在 `#migrateCodeIn` 的 **value** 上
+      //   （textarea/input 的 textContent 恒为空，用 DOM 判会永远等不到）。
+      await withTimeout(
+        page.waitForFunction(() => {
+          const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
+          return c.startsWith('nsbak1:');
+        }, { timeout: 20_000 }),
+        25_000,
+        '本机已解锁时点扫码换机应直接出码（免口令，老项目同款）',
+      );
+      // 🔴 直出码后「取消」键是**隐藏**的（panel.ts:342 `renderCode` 里
+      //   passWrap/go/cancel 一起 hidden，outWrap 接管 —— 与老项目 :9163 同款：
+      //   出码后直接展示结果，不需要用户再点"取消"）。
+      //   🔴🔴 我此前在这里 `page.click('#migrateCancel')`，而那按钮不可见 ⇒
+      //   Playwright 一直 retry 到 30s 超时；**超时路径反复截图/取快照会把
+      //   Node 侧内存打爆**，报出来的是 `Array buffer allocation failed` ——
+      //   一个与被测功能毫无关系的错误，把排查方向整个带偏（我为此白查一轮
+      //   二维码渲染与 wakeLock，探针跑出来 5.5s / 10MB 一切正常）。
+      //   ⇒ 教训：**点不可见元素不只是慢，它会让失败现场变成噪声**。
+      //      判据改成"按钮确实隐藏"，再用 Esc 关面板（老项目 Esc 同款）。
+      // 🔴🔴 判「生成」键消失要判**可见性**，不能判 `page.$('#migrateGo') === null`：
+      //   panel.ts:341 `renderCode` 里 go 只是 `classList.add('hidden')`，
+      //   **元素还在 DOM 里**（这是对的：出码失败要能 showInput() 把它放回来）。
+      //   我写成查 null ⇒ 每跑必红。更糟的是 `page.$()` 命中一个 hidden 元素时
+      //   Playwright 会进入可见性重试路径，30s 后抛的却是
+      //   `Array buffer allocation failed`（Node 侧 OOM），**与被测功能毫无关系**。
+      //   ⇒ 这条与上面那段同一个教训：判"看不见"用可见性，别用"点它/查它在不在"。
+      const goVisible = await page.evaluate(() => {
+        const g = document.getElementById('migrateGo');
+        return g ? !g.classList.contains('hidden') : false;
+      });
+      assert.equal(goVisible, false, '已直接出码时「生成」键应隐藏（老项目 :9163 同款）');
+      const cancelVisible = await page.evaluate(() => {
+        const c = document.getElementById('migrateCancel');
+        return c ? !c.classList.contains('hidden') : false;
+      });
+      assert.equal(cancelVisible, false, '已出码时「取消」键应隐藏（老项目 :9163 同款）');
 
-      // 🔴 口令**绝不**残留在 DOM：关闭面板后输入框必须被清掉/摘除
-      await page.fill('#migratePass', '不该留下');
-      await page.click('#migrateCancel');
+      // 关面板：Esc（老项目 bakClose 同款纪律），关掉后浮层与码都不许留在 DOM 里
+      await page.keyboard.press('Escape');
       await withTimeout(
         page.waitForFunction(() => !document.getElementById('migrateMask'), null, { timeout: 5000 }),
         8_000,
         '等面板关闭',
       );
-      assert.equal(await page.$('#migratePass'), null, '关闭后口令框不该留在 DOM 里（老项目 bakClose 同款纪律）');
+      assert.equal(await page.$('#migrateMask'), null, '关闭后浮层不该留在 DOM 里（老项目 bakClose 同款纪律）');
+      assert.equal(await page.$('#migratePass'), null, '关闭后口令框不该留在 DOM 里');
     } finally {
       await page.close();
     }

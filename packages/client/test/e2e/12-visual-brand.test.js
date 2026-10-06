@@ -210,11 +210,17 @@ test('VIS-05 🔴 描边宽度必须分档：顶栏 1.7 / 菜单 1.9 / 关闭 2�
     );
 
     // 关闭 ×：描边 2
-    const xW = await page.evaluate(() => {
-      const s = document.querySelector('#menuClose svg');
-      return s ? parseFloat(getComputedStyle(s).strokeWidth) : -1;
-    });
-    assert.ok(Math.abs(xW - 2) < 0.01, `关闭图标描边应 2，实际 ${xW}`);
+    // 🔴🔴 判据对象改成「弹窗盒里的 .box-x」（提醒卡/提醒面板），**不是菜单里的 X**。
+    //   老项目 index.html:482 的注释钉死了这件事：「v6.1 绝对定位悬浮式随 menuClose 退役」
+    //   —— 菜单盒（#menuBox）里从来就没有过关闭 X，只有 #remCardX / #remPanelX 有。
+    //   我此前把判据写成 `#menuClose svg`，等于要求 bj 长出一个老项目不存在的元素；
+    //   用户报障「菜单右上角多了一个 X」后我删了它，这条断言就红了。
+    //   ⇒ 描边 2 的真实归属是 `.box-x`，去弹窗里量。
+    // 🔴 反向钉死：菜单盒里**不许**再有 box-x（用户报障第 4 条：菜单右上角多一个 X）。
+    //   这条是"删掉了"的证据，光靠"没有 #menuClose"不够 —— 万一有人用别的 id 加回来。
+    //   🔴 必须在菜单**开着**的时候量，否则这条恒真（关掉菜单后 innerHTML 已清空）。
+    const menuHasX = await page.evaluate(() => !!document.querySelector('.menu-box .box-x'));
+    assert.equal(menuHasX, false, '菜单盒内不该有 .box-x —— 老项目菜单里从来没有关闭 X');
 
     // 菜单盒宽度：老项目 width:min(86vw,300px)
     const boxW = await page.evaluate(() => {
@@ -225,6 +231,18 @@ test('VIS-05 🔴 描边宽度必须分档：顶栏 1.7 / 菜单 1.9 / 关闭 2�
       boxW > 250 && boxW <= 302,
       `菜单盒宽应 ≈300px（min(86vw,300px)），实际 ${boxW}px —— 460px 会让整组浮层变重`,
     );
+
+    // 🔴🔴 顺序纪律：菜单相关的量必须**在菜单开着时**做完，之后才能关菜单开弹窗。
+    //   菜单遮罩（.mask）盖在顶栏之上，remBtn 虽"visible"但点不到，Playwright 会
+    //   一直 retry 到 30s 超时 —— 症状与"按钮坏了"一模一样，极易误判成代码问题。
+    await page.keyboard.press('Escape');
+    await page.click('#remBtn');
+    await page.waitForSelector('.box .box-x svg', { timeout: 10_000 });
+    const xW = await page.evaluate(() => {
+      const s = document.querySelector('.box .box-x svg');
+      return s ? parseFloat(getComputedStyle(s).strokeWidth) : -1;
+    });
+    assert.ok(Math.abs(xW - 2) < 0.01, `弹窗关闭图标描边应 2，实际 ${xW}`);
 
     // 遮罩模糊：老项目 blur(10px)，被改成 2px 后浮层"变轻"到看不出层次
     const blur = await page.evaluate(() => {

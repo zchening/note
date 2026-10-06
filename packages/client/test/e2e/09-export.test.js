@@ -177,7 +177,10 @@ test('EXPORT-E 导出长图全链路', async (t) => {
       assert.equal(opened, 'true', '插入的折叠块应为展开态');
 
       // 点标题收起 —— 走真实用户路径
-      await page.click('#editor-host .ns-fold > :first-child');
+      // 🔴 必须点**三角**（标题行左起 22px 内），不能点标题中心——
+      //   用户拍板：「点标题文字 = 光标进去可改标题，点三角 = 展开/收起」。
+      //   判据钉的是**手势语义**，点中心现在就该是"光标进标题"，收起是错的行为。
+      await page.click('#editor-host .ns-fold > :first-child', { position: { x: 8, y: 10 } });
       await withTimeout(
         page.waitForFunction(
           () => document.querySelector('#editor-host .ns-fold')?.getAttribute('data-open') === 'false',

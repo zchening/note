@@ -192,9 +192,30 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
                   ? renderConflict()
                   : renderLink()
           }</div>`;
-    el.innerHTML = `<div class="box menu-box"><button type="button" id="menuClose" class="box-x" title="${COPY.back}" aria-label="${COPY.back}">${ICON_X()}</button>${body}</div>`;
-    el.querySelector<HTMLButtonElement>('#menuClose')?.addEventListener('click', () => close());
+    // 🔴🔴 菜单**没有右上角关闭 X**（老项目 index.html `<div class="box" id="menuBox">` 内
+    //   确实没有 box-x，全文只有二级视图的「返回」行 + 点遮罩 + Esc 三种退出方式）。
+    //   bj 曾自己加一个 #menuClose，导致收藏夹/历史版本/打开链接三个二级页右上角
+    //   都多出一个预期外的 X（用户报障第 4 条）。
+    //   现在删掉，退出方式与老项目一致：点遮罩空白 / 按 Esc / 点菜单项。
+    // 🔴 `tabindex="-1"` 不是可选项：没有它div 不可聚焦，`focus()` 是**静默 no-op**，
+    //   Esc 照样关不掉菜单（我第一版就漏了它，测试报`intercepts pointer events`）。
+    //   -1 = 可编程聚焦但**不进 Tab 序列**（菜单不该让用户 Tab 进去逐项走）。
+    el.innerHTML = `<div class="box menu-box" tabindex="-1">${body}</div>`;
     wire();
+    // 🔴🔴 打开后必须把焦点收进菜单，否则**键盘用户按 Esc 关不掉菜单**。
+    //   症状（e2e VIS-05 实锤）：`el.addEventListener('keydown')` 里判Esc 关菜单，
+    //   但打开菜单时焦点仍在编辑器上 ⇒ Esc 的 target 是编辑器，事件不冒到遮罩
+    //   ⇒ 菜单纹丝不动。用户接着点顶栏按钮，被遮罩拦成 "intercepts pointer events"，
+    //   表现就是"菜单卡住关不掉"，零报错。
+    //   role="dialog" + aria-modal="true" 按规范也要求焦点进入对话框。
+    //   焦点给到**菜单盒本体**（不是某一行的 tabindex）——行是 div role=button，
+    //   聚焦它会让读屏/键盘用户以为直接进入了某一菜单项。
+    //   try 包住：极端环境（元素尚未布局）focus 可能抛，抛了不该让整个 open 失败。
+    try {
+      el.querySelector<HTMLElement>('.menu-box')?.focus({ preventScroll: true });
+    } catch {
+      /* 焦点收不进菜单不该影响菜单本身可用 */
+    }
   };
 
   /**
@@ -378,7 +399,27 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       bind(el.querySelector<HTMLElement>('#' + it.id), () => {
         switch (it.id) {
           case 'menuHome': close(); cb.onHome(); return;
-          case 'menuFav': cb.onToggleFav(); render(); return;
+          // 🔴🔴 收藏/取消收藏**不重画整个菜单**（用户要求：「不要刷新菜单栏」）。
+          //   此前 `render()` 会把菜单 innerHTML 整块换掉 ⇒ 视觉上闪一下、
+          //   滚动位置复位、二级视图状态被清。
+          //   现在只改那一行：文案在「收藏笔记/取消收藏」间切、图标在空心/实心间切。
+          case 'menuFav': {
+            cb.onToggleFav();
+// 🔴 只换**这一行**的内容，不动菜单其余部分。
+          //   ⚠️ 图标必须写 `ICON_STAR(st.faved)`（**无条件带 svg**），不能写
+          //   `st.faved ? ICON_STAR(true) : ''` —— 后者在未收藏态把整个 svg 删掉，
+          //   与 mainItems/renderMain 的首屏形态不一致：那里未收藏渲染的是
+          //   **空心描边星**（svg 在、path 无 gf 类），老项目亦如此。
+          //   实测我第一版就是这么写的，判据 `#menuFav svg path` 直接找不到元素，
+          //   且用户视觉上会看到"星星凭空消失再出现"。
+          const row = el.querySelector<HTMLElement>('#menuFav');
+          if (row) {
+            row.innerHTML =
+              `<span class="ic">${ICON_STAR(st.faved)}</span>` +
+              `<span class="mi-l">${st.faved ? COPY.menuFavOff : COPY.menuFavOn}</span>`;
+          }
+          return;
+        }
           case 'menuFavEntry': view = 'fav'; render(); return;
           // 🔴 历史：先进视图（马上能看到返回行与空态），再拉列表。
           //   反过来做（await 完再 render）的话，在网慢时点菜单会**毫无反应** ——
@@ -503,6 +544,16 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     view = 'main';
     el.classList.add('hidden');
     el.innerHTML = '';
+    // 🔴 关掉后必须把焦点**还给编辑器**（老项目红线 10，弹窗/浮层通用纪律）。
+    //   打开时我们把焦点收进了菜单（否则 Esc 关不掉，见 render 里的注释），
+    //   关闭时若不还回去，焦点就落在一个刚被摘干净的节点上 ——
+    //   症状是"关掉菜单后打字没反应"，而用户视角是"菜单点了没反应"。
+    //   try 包住：focus 在节点已被移除时会抛。
+    try {
+      cb.onClose();
+    } catch {
+      /* 归还焦点失败不该让"菜单已关闭"这件事被判定为失败 */
+    }
   };
 
   // 点遮罩空白处关闭（点在 box 里不关）

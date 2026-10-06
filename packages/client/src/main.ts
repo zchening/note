@@ -33,6 +33,11 @@ import {
   type LexicalEditor,
 } from 'lexical';
 import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode } from 'lexical';
+// 🔴 官方链接可点扩展：让识别出来的链接**真的点得动**（探针实锤，见 registerClickableLink 处注释）
+// 🔴 0.52 的 LexicalEditor **没有 editor.use()**（typecheck TS2339 直接报出来），
+//   所以只能调底层 registerClickableLink(editor, signals)，用不了官方那个 Extension 包装。
+import { registerClickableLink } from '@lexical/link';
+import { namedSignals } from '@lexical/extension';
 
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
@@ -430,6 +435,45 @@ let linkifyNowRef: (() => void) | undefined;
 /** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
 let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
+
+/**
+ * 🔴🔴 一次性底栏提示的**占有窗口**。
+ *
+ *   问题：底栏那一行同时是"同步状态"和"临时提示"两个用途（老项目亦如此）。
+ *   提示只在设置那一刻存在，下一个到达的 `onSnapshot` 会把它无声覆盖 ——
+ *   实测 FAV-E06「收藏封顶」提示就是这么闪一下就没的（偶发红，竞态）。
+ *   老项目没有这个洞是因为它压根不提示（writeFavs 静默截断）；
+ *   bj 选了"如实告知"这条更好的路，就得自己把提示护住。
+ *
+ *   做法：提示期间记一个到期时间戳，`onSnapshot` 见到还没到期就**跳过写入**。
+ *   到期后恢复真实状态（不是硬写"已同步"——那时可能真处于离线）。
+ */
+let footHoldUntil = 0;
+let footHoldText = '';
+
+/** 显示一条会自己消失的底栏提示；`ms` 内不被同步快照覆盖。 */
+function footFlash(text: string, ms: number): void {
+  footHoldText = text;
+  footHoldUntil = Date.now() + ms;
+  setFootStatus?.('synced', text);
+  window.setTimeout(() => {
+    // 期间又来了条更新的提示 ⇒ 交给它收，别把新的收掉
+    if (footHoldText !== text) return;
+    footHoldUntil = 0;
+    footHoldText = '';
+    const f = footFor(lastSyncState);
+    setFootStatus?.(f.s, f.d);
+  }, ms);
+}
+
+/** 同步状态回写口：持有一次性提示期间让路。 */
+function footStatus(s: 'connecting' | 'synced' | 'offline', d?: string): void {
+  if (footHoldUntil > Date.now()) return;
+  setFootStatus?.(s, d);
+}
+
+/** 最近一次快照的原始状态，供提示到期后恢复真实状态用。 */
+let lastSyncState: SyncState = 'idle';
 
 /* ---- 上传状态条（老项目 showUploadStatus 同款） ---- */
 
@@ -903,7 +947,22 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
   // 菜单面板挂在 shell 之后（同一宿主内，用fixed 定位，互不影响）
   menuRef = buildMenu(app, menuState, {
-    onClose: () => menuRef?.close(),
+    // 🔴 关闭菜单 = 把焦点**还给编辑器**（老项目红线 10）。
+    //   menu.ts 的 close() 在收掉遮罩后调这个回调：打开时它把焦点收进了菜单盒
+    //   （否则键盘用户按 Esc 关不掉菜单 —— 事件 target 是编辑器，不冒到遮罩），
+    //   关掉时若不还回去，焦点落在一个刚被摘干净的节点上，
+    //   症状是"关掉菜单后打字没反应"，用户视角就是"菜单点了没反应"。
+    //   ⚠️ 此前这个回调写的是 `() => menuRef?.close()` —— 自己调自己。
+    //     因为 close() 从来不调它，所以只是一条死路；现在真被调用了，
+    //     不改就是无限递归。**教训：把回调从"没人调"改成"有人调"时，
+    //     必须重读它的实现** —— 死代码里往往藏着荒谬的接线。
+    onClose: () => {
+      try {
+        editor?.focus();
+      } catch {
+        /* 归还焦点失败不该影响"菜单已关闭" */
+      }
+    },
     onHome: () => {
       history.pushState({}, '', '/');
       route();
@@ -916,9 +975,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //🔴 收藏夹列表必须同刻重算：老项目 toggle 后立刻 writeFavs，
       //   而收藏夹视图若还读旧缓存，进去会看到刚才取消的那条还在。
       menuState.favList = favListOf(favStore);
-      // 超上限时如实告知挤掉了谁 —— 不说的话用户查不到自己刚收藏的
+      // 超上限时如实告知挤掉了谁 —— 不说的话用户查不到自己刚收藏的。
+      //🔴 走 footFlash 而不是裸 setFootStatus：裸调用会被紧接着到达的同步
+      //   快照覆盖，提示一闪而过（老项目没这洞是因为它压根不提示）。
       if (r.evicted !== null) {
-        setFootStatus?.('synced', COPY.favFull(FAVS_MAX));
+        footFlash(COPY.favFull(FAVS_MAX), 5_000);
       }
     },
     onOpenFav: (n) => {
@@ -990,7 +1051,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       writePref('linkInApp', inApp ? '1' : '0');
     },
     onBackup: () => {
-      // 🔴🔴 这里曾是一句 `location.href = '/backup'` —— 一条**死链**。
+      // 🔴🔴🔴 必须先关菜单，否则弹层盖在菜单上，**看起来像弹了两层**
+      //   （用户报障：「点扫码换机后下面又弹一个『扫码换机』」）。
+      //   老项目同款：菜单项 click 里 `menuMask.classList.add('hidden')`（index.html:9113）
+      //   —— 它是**先关菜单再开弹层**，bj 此前漏了关闭那一步。
+      menuRef?.close();
+      // 🔴 这里曾是一句 `location.href = '/backup'` —— 一条**死链**。
       //   服务端没有这个页面（SPA 回落到 index.html），
       //   而 egg/registry.ts:88 又把 `backup` 列为保留字，
       //   于是「点扫码换机 → 跳 /backup → 回落 → 落进首页提示页 → 什么也没发生」，
@@ -1077,6 +1143,30 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   });
 
   ed.setRootElement(editorHost);
+  // 🔴🔴🔴 链接可点：必须装官方 `registerClickableLink`（0.52 新增，@lexical/link）。
+  //
+  //   症状（探针 probe-link-nav-cause 实锤，零报错）：链接识别得好好的
+  //   —— `<a href="https://example.com/" target="_blank" rel="noopener noreferrer">`
+  //   齐活、computed color 金色、pointer-events auto，**点击事件也真的派发了**
+  //   （document 冒泡阶段能收到、defaultPrevented=false），
+  //   连原生 `a.click()` 都不产生导航、context 上也等不到新页面。
+  //
+  //   真因：可编辑的 contenteditable 里，原生 `<a>` 的默认导航被编辑器的
+  //   "点击是放光标、不是跟随链接"语义压制。官方给的正解不是绕开它，而是
+  //   **接管**：在 root 上挂 click/auxclick，主动 `window.open(url, '_blank')`
+  //   并 `preventDefault()`（LexicalLink.dev.js:1310-1341）。
+  //   少了它，链接就是"点亮但点不动"—— 而识别侧看起来完全正常，测试也全绿。
+  //
+  //   🔴 `newTab: true` 对齐本项目自己的 `target="_blank"`（linkify/apply.ts 逐字抄了
+  //   老项目 index.html:3746），否则官方默认的 `_self` 会与节点上的 target 不一致 ——
+  //   表现是"能点开但开在当前标签，笔记被导航走"。
+  //   🔴 官方那个 `ClickableLinkExtension` 包装需要 `editor.use()`，而
+  //   **0.52 的 LexicalEditor 上没有这个方法**（TS2339 直接报出来）⇒ 只能调底层。
+  //   🔴 为什么不能自己写个 click 监听：编辑器里用户经常要选中链接文字改写，
+  //   官方实现先判 `!selection.isCollapsed()` 才 preventDefault（选区非空时放行）。
+  //   自己写通常会漏这个分支 ⇒ 想改链接却总被新标签抢走。
+  //   反向判据见 test/e2e/19-link-click.test.js 的 LINK-E03。
+  registerClickableLink(ed, namedSignals({ disabled: false, newTab: true }));
   // 🔴🔴 行为注册必须在 setRootElement 之后、任何 update 之前。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
   //   deps.uploadImage 指向 main.ts 里那**唯一**的上传入口，
@@ -1406,13 +1496,14 @@ async function startSyncFor(name: string): Promise<void> {
       linkifyNowRef?.();
     },
     onSnapshot: (s) => {
+      lastSyncState = s.state;
       const f = footFor(s.state);
-      setFootStatus?.(f.s, f.d);
+      footStatus(f.s, f.d);
       if (root) root.dataset.syncState = s.state;
       if (s.state === 'conflict') showConflictHint();
     },
     onError: (msg) => {
-      setFootStatus?.('offline', msg);
+      footStatus('offline', msg);
     },
     // 🔴 自动快照：每次推送成功后把"刚被覆盖的那一版"存进快照环。
     //   节流在 pushAutoHistory 里（60s，老项目 :8469 同值同理由）。
@@ -1819,13 +1910,27 @@ function openMigrateMake(): void {
   }
   buildMigratePanel({
     mode: 'make',
+    // 🔴🔴 免口令直出码：本机当前会话**已持有口令**时直接出码，不再要口令框
+    //   （老项目 index.html `if (preKey) { await doBakGenerate(preKey); return; }` 同款）。
+    //   本项目口令在 `sessionPass` 里、面板不持有，所以由这里传进去；
+    //   「记忆解锁」进来的会话 sessionPass 为空 ⇒ 传 null ⇒ 仍要口令框（与老项目一致）。
+    preKey: sessionPass === '' ? null : sessionPass,
     // 🔴 预判放在生成之前：超长就别白跑600,000 次 PBKDF2。
     //   超限时**如实说装不下**，绝不静默截断（截断 = 恢复出被腰斩的笔记）。
     precheck: () => (fitsInMigrateCode(canonicalize(doc)) ? null : COPY.migrateTooLong),
     onMake: async (passphrase) => {
       const latest = window.__NOTESYNC_DOC__?.() ?? doc;
       const r = await buildMigrateCode(latest, passphrase);
-      if (r.ok) return r;
+      if (r.ok) {
+        // 🔴🔴 必须回写 lastMigrateCode —— 「取最近一次生成的码」只有一个真源。
+        //   此前只有测试钩子 __NOTESYNC_MIGRATE_MAKE__ 会写它，而**面板走的不是那条路**
+        //   ⇒ 走真实用户路径（点菜单 → 扫码换机）生成的码，从取码口读回来是空串。
+        //   探针实测：DOM 里码明明在（#migrateQrHolder[data-code] 有完整 nsbak1:...），
+        //   `__NOTESYNC_MIGRATE_CODE__()` 却返回 "" —— 判据与产物脱节。
+        //   免口令直出码（preKey）那条路同样经过这里，所以一并修好。
+        lastMigrateCode = r.code;
+        return r;
+      }
       return { ok: false, reason: r.reason === 'too-long' ? COPY.migrateTooLong : COPY.migrateRenderFail };
     },
     onClosed: () => {
