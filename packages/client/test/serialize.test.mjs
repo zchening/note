@@ -53,9 +53,32 @@ function roundTrip(doc) {
   return canonicalize(normalize(back));
 }
 
-/** 参照答案：直接对模型做normalize + canonicalize */
+/**
+ * 参照答案：直接对模型做 normalize + canonicalize，**外加「唯一空块 ⇒ 归零」**。
+ *
+ * 🔴🔴 为什么参照答案必须和 `lexicalToDoc` 用同一条归零规则（2026-10-06 加）：
+ *   属性测试比的是 `roundTrip(doc) === canonicalOf(doc)`，而 `roundTrip` 内部
+ *   走的是编辑器导出侧。导出侧有一条「整篇恰好一个空段落 ⇒ 归零 `{}`」的规则
+ *   （理由见 serialize.ts 的注释），参照答案若不知道它，就会在这一个形状上红：
+ *     真源 `[{t:'p'}]` → 编辑器（导入侧补占位段落）→ 导出归零 → `{}`
+ *     而 `canonicalOf([{t:'p'}])` 仍是 `[{t:'p'}]` ⇒ 不等、属性测试随机红。
+ *
+ *   ⚠️ 这里**不是**把测试改松。判据的强度没变：仍然要求"往返后的字节 == 输入的规范态"，
+ *   只是"规范态"的定义补上了编辑器侧那条已定规则的等价类。
+ *   反向检验：如果哪天导出侧那条规则被删了，本参照答案会与之不符 ⇒ 测试立刻红。
+ */
 function canonicalOf(doc) {
-  return canonicalize(normalize(doc));
+  const normalized = normalize(doc);
+  const blocks = normalized.blocks ?? [];
+  const onlyEmpty =
+    blocks.length === 1 &&
+    blocks[0] &&
+    blocks[0].t === 'p' &&
+    (blocks[0].spans ?? []).length === 0;
+  const shaped = onlyEmpty
+    ? { v: normalized.v, ...(normalized.reminders ? { reminders: normalized.reminders } : {}) }
+    : normalized;
+  return canonicalize(shaped);
 }
 
 // ── 定向用例：每种块类型至少一条 ────────────────────────────────────────
@@ -743,11 +766,28 @@ test('S3-41 相邻同类型列表在真源层已合并（编辑器结构上装�
   assert.equal(canonicalOf(same), '{"v":1,"blocks":[{"t":"ul"}]}');
   const diff = { v: 1, reminders: [], blocks: [{ t: 'ul' }, { t: 'ol' }] };
   assert.equal(canonicalOf(diff), '{"v":1,"blocks":[{"t":"ul"},{"t":"ol"}]}');
-  // 顺序铁律：先剔空 p 再合并 —— [ul,空p, ul] 里两个 ul 会因剔空而变成相邻
+  // 🔴🔴 语义在 2026-10-06 反转（用户拍板方案 A：空段落进真源）。
+  //   此前这条断言「[ul, 空p, ul] ⇒ 合并成一个 ul」，依据是旧顺序铁律
+  //   "先剔空 p、再合并相邻列表"——剔掉中间那个空 p，两个 ul 就成了相邻。
+  //   现在空段落**保留**（它就是用户在两个列表之间敲的那一行），所以两个 ul
+  //   **不该**被合并：那行空白正是用户把它们隔开的意图。
+  //   老项目同款：`index.html` 的 DOM 真源里，两个 `<ul>` 之间有一个空的 `<p>`，
+  //   渲染出来就是两段列表 + 一行空白，不是一段。
+  //   ⇒ 这条断言从"会合并"改成"**不该合并**"，它是方案 A 最直接的用户价值。
   const withGap = {
     v: 1,
     reminders: [],
     blocks: [{ t: 'ul' }, { t: 'p' }, { t: 'ul' }],
   };
-  assert.equal(canonicalOf(withGap), '{"v":1,"blocks":[{"t":"ul"}]}');
+  assert.equal(
+    canonicalOf(withGap),
+    '{"v":1,"blocks":[{"t":"ul"},{"t":"p"},{"t":"ul"}]}',
+    '空段落必须能隔开两个相邻同类型列表 —— 用户敲的那一行空白就是他要的分组',
+  );
+  // 反向：**没有**空段落时相邻同类型列表仍然要合并（这条旧不变量不能被破坏）
+  assert.equal(
+    canonicalOf({ v: 1, reminders: [], blocks: [{ t: 'ul' }, { t: 'ul' }] }),
+    '{"v":1,"blocks":[{"t":"ul"}]}',
+    '没有空行时相邻同类型列表仍须合并 —— Lexical 结构上装不下两个独立同型列表',
+  );
 });

@@ -1421,6 +1421,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
 /** 当前笔记的同步实例。切笔记时必须先 stop()，否则旧实例的 SSE 还在跑。 */
 let syncRef: SyncClient | undefined;
+/**
+ * `pagehide` 监听器句柄（模块级，因为每次 `startSyncFor` 都要先摘旧的再挂新的）。
+ * 🔴 为什么不能用 `{ once: true }`：切笔记会重建 SyncClient，
+ *   once 的话只在第一篇生效，切走后页面关闭就不再兜底 —— 缺陷只在第二篇笔记上复现，
+ *   极难发现。老项目是单页不换笔记，但本项目**能换**，不能照抄成 once。
+ */
+let pagehideHandler: (() => void) | null = null;
 
 /**
  * 🔴 当前笔记的派生密钥（模块级）。
@@ -1512,6 +1519,23 @@ async function startSyncFor(name: string): Promise<void> {
     },
   });
   syncRef = c;
+  // 🔴🔴 页面离开时把待推内容立刻推掉（老项目 index.html:10080 `pagehide → flushDirtySave` 同款）。
+  //   不接这条的后果是**真的丢数据**：`PUSH_DEBOUNCE_MS = 700`，
+  //   用户打完字 700ms 内刷新/关页面/切走，最后一批编辑就只留在内存里。
+  //   探针 probe-ep01-flow 实锤：打完 A/空行/B 立刻 reload，真源回到 `{"v":1}`。
+  //
+  //   🔴 必须用 `{ once: true }` 之外的写法？——不，**恰恰要每次都解绑再绑**：
+  //   `startSyncFor` 每篇笔记调一次（切笔记会重建 SyncClient），
+  //   用 once:true 的话只在第一次生效，切笔记后就失联了。
+  //   正确做法是：先把**模块级**那个 listener 摘掉（它持有的是上一份 syncRef），
+  //   再挂新的。
+  pagehideHandler = () => {
+    // 🔴 同步读一次 localStorage 不做，push 本身已是 fire-and-forget；
+    //   本地那份在 writeCache 里是同步写的，所以最坏只丢"上云"这一步。
+    syncRef?.flushPending();
+  };
+  window.removeEventListener('pagehide', pagehideHandler);
+  window.addEventListener('pagehide', pagehideHandler);
   await c.start();
   // 🔴 新笔记：解锁时拿到的是空文档且云端也没有，必须立刻推一次，
   //   否则"这篇笔记存在"这件事只存在于本机 —— 换台设备输入同一口令，

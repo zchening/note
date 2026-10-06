@@ -197,13 +197,22 @@ export function parseDoc(input: string): Doc {
  */
 export function normalize(doc: Doc): Doc {
   const base = validateDoc(JSON.parse(canonicalize(doc)));
-  // 🔴 顺序铁律：**先剔空 p，再合并相邻列表**。
-  //   [ul[], p(空), ul] 剔掉中间的空 p 之后两个 ul 就变成相邻了 ——
-  //   反过来做（先合并）的话它们中间还隔着一个 p，合并不到，
-  //   归一结果 `ul, ul` 会在第二轮才合并，幂等性破掉、parseDoc 拒收自己产出的形态。
-  //   这类"顺序依赖"在属性测试里表现为**随机红**（取决于生成了几个空 p），
-  //   定向用例永远测不出来，所以顺序必须写在代码注释里钉死。
-  const blocks = mergeAdjacentLists(stripEmptyParas(base.blocks ?? []));
+  // 🔴🔴 顺序铁律：**先合并相邻列表**（`dropEmptyChildArrays` 现在只做"删空 children 数组"，
+  //   不再剔空 p，所以没有"剔掉中间空 p 让两个 ul 变相邻"这一步了）。
+  //
+  //   🔴 历史：这里曾是 `mergeAdjacentLists(stripEmptyParas(...))`，理由是
+  //   "[ul[], p(空), ul] 剔掉中间的空 p 之后两个 ul 就变成相邻了"——
+  //   顺序反过来会导致幂等性破掉。那条推理在"空 p 被剔除"的前提下成立；
+  //   用户拍板方案 A（空段落进真源）后前提没了，而**两条路径曾经不一致**：
+  //     canonicalize({v:1,blocks:[A, {t:'p'}, B]}) → **三块**（保留）
+  //     normalize(同一份)                        → **两块**（剔掉）
+  //   实锤症状：编辑器里 DOM 有 3 个 `<p>`（探针 probe-empty-para 实测），
+  //   而真源只有 2 块 —— 因为 main.ts:1299 走的是 `normalize(lexicalToDoc(...))`。
+  //   **同一份数据的"归一"与"规范化"给出两种答案**，本身就是 bug 的形状。
+  //
+  //   现在两边都保留空段落，于是顺序不再敏感：合并只在"真的相邻"时发生，
+  //   中间隔着空 p 的两个 ul 保持分开（这正是用户敲那一行空行的意义）。
+  const blocks = mergeAdjacentLists(dropEmptyChildArrays(base.blocks ?? []));
   const reminders = base.reminders ?? [];
   // 🔴 归一后的 `blocks` 可能是空数组，而 canonical 规则 2 要求空数组整个键不出现。
   //   这里必须用条件展开而不是 `blocks: [...]`：后者会产出一个"带空数组键"的非法真源
@@ -223,16 +232,26 @@ export function normalize(doc: Doc): Doc {
   return out;
 }
 
-/** 递归剔除空p 块（不进 list 合并逻辑，纯剔除） */
-function stripEmptyParas(bs: readonly Block[]): Block[] {
+/**
+ * 递归**删空 children 数组**（canonical 规则 2：`{"t":"ul","children":[]}` 与 `{"t":"ul"}` 同形）。
+ *
+ * 🔴🔴 这里是原 `stripEmptyParas` 的**一半**，另一半（剔除空 p 块）已经删掉。
+ *   历史与真因见 `normalize` 上面那段注释：`canonicalize` 一直保留空段落，
+ *   只有 `normalize` 在剔，两条路径不一致 ⇒ 编辑器导出时丢空行（用户报障）。
+ *   方案 A（用户拍板）落地后，两边统一为"保留"。
+ *
+ * 🔴 为什么"删空 children"这一半必须留着：它不是内容判断，是**形态归一**。
+ *   与"空 p 是不是内容"完全无关 —— 空 children 是同一内容的两种写法，
+ *   留着它就会出现同一内容两种合法字节，往返与冲突判定全乱。
+ */
+function dropEmptyChildArrays(bs: readonly Block[]): Block[] {
   const out: Block[] = [];
   for (const b of bs) {
     if (b.children !== undefined) {
-      const kids = stripEmptyParas(b.children);
+      const kids = dropEmptyChildArrays(b.children);
       if (kids.length > 0) b.children = kids;
       else delete b.children;
     }
-    if (isEmptyPara(b)) continue;
     out.push(b);
   }
   return out;
@@ -262,7 +281,7 @@ function mergeAdjacentLists(bs: readonly Block[]): Block[] {
       //   合并判定。只 push 不重扫的话，normalize 第一轮留下 ul[ol, ol]，
       //   第二轮才合掉 —— 幂等性破掉，且 parseDoc 会拒收自己刚产出的形态。
       const joined = [...(prev.children ?? []), ...(b.children ?? [])];
-      const mergedKids = mergeAdjacentLists(stripEmptyParas(joined));
+      const mergedKids = mergeAdjacentLists(dropEmptyChildArrays(joined));
       if (mergedKids.length > 0) prev.children = mergedKids;
       else delete prev.children;
       continue;
@@ -298,21 +317,23 @@ function sameSpanFormat(a: Span, b: Span): boolean {
 }
 
 /**
- * 空段落判定：`t==='p'` 且没有任何非空 span。
+ * 🔴 溯源：这里原有 `isEmptyPara(b)`（`t==='p'` 且无任何非空 span），配合
+ *   `stripEmptyParas` 在 `normalize` 里递归剔除空段落。
  *
- * 🔴 只认 `p`：`{"t":"h3"}`、`{"t":"quote"}`、`{"t":"li"}`、`{"t":"fold"}` 的空壳是真源里的
- *   合法块（用户可以留一个空标题），吞掉它们是数据丢失。折叠块的空 children 不剔
- *   （`{"t":"fold"}` 与 `{"t":"fold",children:[]}` 靠 canonical 规则 2 已经同形）。
+ *   用户拍板方案 A（空段落进真源）后**已删除**，理由与影响：
+ *   - 缺陷：只有 `normalize` 剔、`canonicalize` 不剔 ⇒ 同一份数据两种归一结果，
+ *     而编辑器导出走的正是 `normalize(lexicalToDoc(...))` ⇒ **用户敲的空行永久消失**
+ *     （探针 probe-empty-para 实锤：DOM 三个 `<p>`、真源两个块）。
+ *   - 删除理由不是"不再需要判断空段落"，而是**这个判断本身是错的**：
+ *     它把"用户敲出来的空行"与"编辑器为了落光标而存在的空占位"当成同一件事，
+ *     而后者要靠 `serialize.ts` 的 `trimTrailingEmptyParas` 在**导出侧**处理，
+ *     不能在真源层做 —— 真源层分不清"这一行是用户留的"还是"占位"。
+ *   - 附带的"只认 p，h3/quote 的空壳是合法块"这条洞察仍然成立，
+ *     但现在它体现在 `dropEmptyChildArrays` 只动 children、不动块本身。
+ *
+ *   ⚠️ 别把这段溯源当成"可以重新引入空段落剔除"的许可：
+ *   若将来又要剔，判据必须落在导出侧且只剔尾部，不能回到真源层递归剔。
  */
-function isEmptyPara(b: Block): boolean {
-  if (b.t !== 'p') return false;
-  for (const s of b.spans ?? []) {
-    if (s.t !== '') return false;
-    if ((s.rem ?? '') !== '') return false;
-    if ((s.href ?? '') !== '') return false;
-  }
-  return true;
-}
 
 function normalizeBlock(b: Block): Block {
   const out: Block = { t: b.t };
@@ -346,7 +367,7 @@ function normalizeBlock(b: Block): Block {
         // 与顶层同一套顺序：先剔空 p，再合并相邻列表。空数组省略 ——
         // 真源里"没有这个字段"只有一种表示：键不存在。
         if (v !== undefined) {
-          const kids = mergeAdjacentLists(stripEmptyParas(v as Block[]));
+          const kids = mergeAdjacentLists(dropEmptyChildArrays(v as Block[]));
           if (kids.length > 0) out.children = kids;
         }
         break;

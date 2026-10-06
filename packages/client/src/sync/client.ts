@@ -84,6 +84,14 @@ export class SyncClient {
   private state: SyncState = 'locked';
   private snap: SyncSnapshot = snapshotOf('locked');
   private pushTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * 🔴 待落本地缓存的密文信封（由 `noteEdit` → `stageEnv` 提前备好）。
+   * 页面卸载时 `flushPending` 直接拿它写 localStorage，不等去抖也不等网络。
+   * 见 flushPending 的注释（那是这个字段存在的唯一理由）。
+   */
+  private pendingEnv: Envelope | undefined;
+  /** stageEnv 的序号：只认最后一次编辑的结果，见 stageEnv 注释里的并发段。 */
+  private envSeq = 0;
   private es: EventSource | undefined;
   private retry = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -167,11 +175,44 @@ export class SyncClient {
   /** 本地有改动。去抖后推送。 */
   noteEdit(): void {
     this.send('edit');
+    // 🔴🔴 同时**立刻**启动一次信封构造挂到 pendingEnv —— 不等去抖窗口。
+    //   理由见 flushPending() 的注释：700ms 窗口内卸载时，数据必须已经能落到本地。
+    //   加密是异步且很贵的（PBKDF2 600,000 次），所以这里是"发起"而不是"等结果"；
+    //   pendingEnv 会被**后一次**编辑的结果覆盖（后写的版本才是要存的那一版）。
+    void this.stageEnv();
     if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
     this.pushTimer = setTimeout(() => {
       this.pushTimer = undefined;
       if (this.state === 'dirty') void this.push();
     }, PUSH_DEBOUNCE_MS);
+  }
+
+  /**
+   * 构造待推信封并挂到 `pendingEnv`（供页面卸载时抢在网络之前落本地）。
+   *
+   * 🔴🔴 旧实现只在 `push()` 里写缓存，而 `noteEdit()` 到 `push()` 之间有 700ms 去抖 ——
+   *   实测（探针 probe-cache-vs-cloud）打字后立刻查，缓存键**根本不存在**。
+   *   ⇒ 数据在那 700ms 里只存在于内存，页面一卸载就没了（probe-ep01-flow 实锤）。
+   *
+   * 🔴 为什么不能在 `noteEdit` 里同步写缓存：加密是异步的（PBKDF2 600,000 次），
+   *   同步写只能写到"上一版"的内容 —— 那等于把旧内容当成新内容存回去。
+   *
+   * 🔴 并发安全：连着打字时会有多次 stageEnv 在飞，靠 `envSeq` 序号**只认最后一次**。
+   *   不做这件事的话，先发后到的 completion 会用旧信封覆盖新的 pendingEnv
+   *   —— 症状是"用户最后敲的那几个字在页面上可见，但落盘的是前一版"，
+   *   而且**只在网络慢时出现**，极难复现。
+   */
+  private async stageEnv(): Promise<void> {
+    const seq = ++this.envSeq;
+    const doc = normalize(this.d.getDoc());
+    try {
+      const env = await encryptString(canonicalize(doc), this.d.key, 'note', this.d.dk);
+      if (seq !== this.envSeq) return; // 已有更新的一次在飞，这次的结果作废
+      this.pendingEnv = env;
+    } catch {
+      // 加密失败不写 pendingEnv —— flushPending 会跳过本地落盘，
+      // 那正好是对的：没有有效信封就别写，宁可让这次编辑在下次 push 时重新走一遍。
+    }
   }
 
   /** 手动刷新。 */
@@ -192,6 +233,55 @@ export class SyncClient {
     this.send('resolve-remote');
     this.d.setDoc(this.base);
     void this.pull();
+  }
+
+  /**
+   * 页面即将离开时把待推的内容**立刻**落盘 + 推掉，不等去抖窗口。
+   *
+   * 🔴🔴 老项目有同款兜底：`window.addEventListener('pagehide', flushDirtySave)`
+   *   （index.html:10080，注释里叫"脏内容与在途保存的卸载兜底链"）。
+   *   本项目此前**没有**这条，于是坐实了一个数据丢失缺陷，探针 probe-ep01-flow 实锤：
+   *     打完 A/空行/B 立刻 reload → 重载后真源 `{"v":1}`，**刚打的字与空行全丢**。
+   *
+   * 🔴🔴 为什么"提前到 push 之前写缓存"**不够**（我走过一遍）：
+   *   缓存写在 `push()` 内部，而 `noteEdit()` 到 `push()` 之间还有
+   *   `PUSH_DEBOUNCE_MS = 700` 的去抖窗口 —— 实测（probe-cache-vs-cloud）
+   *   打字后立刻查：缓存键**不存在**。所以 700ms 内卸载，那一步根本没执行。
+   *   ⇒ 落盘必须在**事件处理器里当场**做，不能委托给"稍后会跑的 push"。
+   *
+   * 🔴🔴 但加密是**异步且很贵**的（PBKDF2 600,000 次），`pagehide` 里 await 是来不及的
+   *   —— 事件处理器不会被等，异步 continuation 页面已卸载 ⇒ 等于什么都没做。
+   *   所以这里走**老项目同款的另一条路**：把待推的**明文信封构造**提前准备好。
+   *   实现方式是：每次 `noteEdit()` 就启动一次加密并把结果挂到 `pendingEnv`，
+   *   `flushPending()` 直接拿它写缓存 —— 不等 push、不等网络。
+   *
+   * 🔴 为什么 `pagehide` 而不是 `beforeunload`：
+   *   `beforeunload` 会阻塞卸载、且在移动端/bfcache 场景经常不触发；
+   *   `pagehide` 覆盖"关闭/刷新/前进后退/BFCache 入库"四种路径，是老项目选它的原因。
+   *
+   * 🔴 不能用 `sendBeacon`：推的是**密文信封**，而解密 key 只在内存里
+   *   （`currentDk`），页面卸载后服务端拿不到；而 `sendBeacon` 也不支持 PUT/自定义头。
+   *
+   * 🔴 最坏情况的诚实说明：这一条**不能 100% 保证云端收到**（fetch 可能被浏览器丢弃）。
+   *   但**本机那份是同步写进 localStorage 的**，所以"本机丢字"这个用户可见的故障
+   *   被彻底消除了；剩下的只是"换台设备要晚几秒才看到"，由下次push/SSE 补上。
+   */
+  flushPending(): void {
+    if (this.pushTimer !== undefined) {
+      clearTimeout(this.pushTimer);
+      this.pushTimer = undefined;
+    }
+    if (this.pendingEnv !== undefined) {
+      // 🔴 抢在网络之前落本地：本地副本是权威，云端只是备份。
+      try {
+        writeCache(this.d.noteId, this.pendingEnv);
+      } catch {
+        /* 存不下不抛：见 push() 里同一处 try 的注释 */
+      }
+      this.pendingEnv = undefined;
+    }
+    if (this.state !== 'dirty') return;
+    void this.push();
   }
 
   /* ---------------- 拉 ---------------- */
@@ -337,6 +427,29 @@ export class SyncClient {
       this.send('network-fail');
       return;
     }
+    // 🔴🔴🔴 本地缓存必须在**发请求之前**写，不能等 push 成功。
+    //
+    //   实测缺陷（探针 probe-cache-vs-cloud 量化）：
+    //     打完字立刻查 → syncState=dirty、**缓存键根本不存在**（数据只在内存）
+    //     等 1500ms  → idle、缓存键出现（251 字节）
+    //   也就是说旧实现在"编辑完成 → push 返回"这段窗口里，**唯一的副本在内存里**。
+    //   用户在这个窗口内刷新/关页面/切走（`PUSH_DEBOUNCE_MS=700` 就是这个窗口），
+    //   重载后真源回到 `{"v":1}` —— **刚打的字与空行全丢**（探针 probe-ep01-flow 实锤）。
+    //
+    //   🔴 为什么这样才是对的语义：本地副本是**权威**，云端是备份。
+    //     离线优先的客户端就该"先落本地、再谈上传"。push 失败时用户重新打开
+    //     仍能看到自己刚写的内容 —— 这才是本地优先；而旧实现把"本地能不能读到"
+    //     挂在"云端写成功没有"上，等于把网络状态当成了本地数据的前置条件。
+    //   🔴 与 `resolveKeepLocal` 的差别：那条是"用户明确选保留本地"，
+    //     需要连 base 一起推进；这里只落缓存，base不动（远端还没收到），
+    //     所以下次 push 仍会带上这一版，合并语义不受影响。
+    //   🔴 写缓存仍包 try：localStorage 配额满/隐私模式抛异常时，
+    //     不能因此把整次推送搞失败（离线能力是增强项，见 local-cache.ts 的注释）。
+    try {
+      writeCache(this.d.noteId, env);
+    } catch {
+      /* 存不下不抛：继续推云端，本机这份丢了是降级不是失败 */
+    }
     let res: Response;
     try {
       res = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
@@ -374,12 +487,13 @@ export class SyncClient {
         /* 存档是保险：抛了也不许影响本次同步的结论 */
       }
     }
-    // 🔴🔴 推送成功后**必须**更新本地缓存。
-    //   漏了这一步的症状：云端是新内容，本机缓存还是旧的 —— 用户一断网就看到旧正文，
-    //   而且**没有任何报错**。这正是"静默降级"最典型的形态：
-    //   每个单独环节都成功，合起来给出一个错的结果。
-    //   （这条是实测发现的：解锁时写缓存、推送时不写，两处不一致。）
-    writeCache(this.d.noteId, env);
+    // 🔴 缓存已在本函数**发请求之前**写过（见上面那段注释：本地是权威、云端是备份）。
+    //   此前这里在 push 成功后才 writeCache，等于把"本机能不能读回自己的内容"
+    //   挂在"云端写成功没有"上 —— 探针 probe-cache-vs-cloud 实测：
+    //   编辑完成到 push 返回之间，缓存键**根本不存在**，数据只在内存里。
+    //   那个窗口里刷新页面，最后一批编辑全丢（probe-ep01-flow 实锤 reload 后 {"v":1}）。
+    //   同理清掉 pendingEnv：这一版已经上云，页面若此刻卸载不必再落一遍本地。
+    this.pendingEnv = undefined;
     this.send('pushed');
   }
 

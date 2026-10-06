@@ -128,10 +128,20 @@ test('不变量2b-归一: 未归一的表示被parseDoc 拒绝（同一内容只
   const unmerged = '{"v":1,"blocks":[{"t":"p","spans":[{"t":"A","b":true},{"t":"B","b":true}]}]}';
   assert.throws(() => parseDoc(unmerged), /非 canonical/);
   assert.equal(canonicalize(normalize(d)), '{"v":1,"blocks":[{"t":"p","spans":[{"t":"AB","b":true}]}]}');
-  // 空 p 块同样被剔除（真源里表达"空"的唯一办法是整篇没有 p 块）
+  // 🔴🔴 空 p 块**保留**（用户 2026-10-06 拍板方案 A：空段落进真源）。
+  //   此前这条断言的是"空 p 被剔除"，它是"空段落剔不掉"这条缺陷的**锁定闸**——
+  //   正因为它绿着，编辑器里用户敲的空行才一路丢到真源之外都没人发现。
+  //   改动的完整理由与新不变量见 test/empty-para.test.mjs 的文件头。
   assert.equal(
     canonicalize(normalize({ v: 1, blocks: [{ t: 'p', spans: [{ t: 'x' }] }, { t: 'p' }], reminders: [] })),
-    '{"v":1,"blocks":[{"t":"p","spans":[{"t":"x"}]}]}',
+    '{"v":1,"blocks":[{"t":"p","spans":[{"t":"x"}]},{"t":"p"}]}',
+  );
+  // 🔴 反向钉死：**空 children 数组**仍要归一成没有该键（canonical 规则 2 没变）。
+  //   这条必须留着 —— "空段落保留"是内容决策，"空 children 省略"是形态归一，
+  //   两者不是一回事；放过后就会出现同一内容两种合法字节。
+  assert.equal(
+    canonicalize(normalize({ v: 1, blocks: [{ t: 'ul', children: [] }], reminders: [] })),
+    '{"v":1,"blocks":[{"t":"ul"}]}',
   );
   // 但空标题 / 空折叠块是合法块，绝不能被一起吞掉
   assert.equal(

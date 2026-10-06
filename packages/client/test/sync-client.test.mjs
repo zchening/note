@@ -375,7 +375,63 @@ test('S5-C2 推送失败时缓存**不许**更新（否则以为存上了）', a
   t.c.noteEdit();
   await settle();
   const after = readCache(NOTE);
-  assert.equal(after.ct, before.ct, '🔴 推送失败了缓存却更新了 = 断网后看到没存上的内容');
+  // 🔴🔴 语义在 2026-10-06 改了（用户报障连带查出，见下），断言随之反转。
+  //
+  //   旧断言「推送失败 ⇒ 缓存不许更新」的**出发点**是对的：别让用户以为存上了。
+  //   但它把"本地副本"当成了"云端的镜像"，于是：
+  //     本地只有"云端确认过的那一版" ⇒ 断网时用户读回的是**旧内容**，
+  //     而他明明刚写完 —— 探针probe-cache-vs-cloud 实测：编辑完成到 push 返回之间，
+  //     缓存键**根本不存在**，数据只在内存里；那一刻刷新页面，字全丢
+  //     （probe-ep01-flow 实锤 reload 后 `{"v":1}`）。
+  //   ⇒ 那是真的**丢数据**，比"以为存上了"严重得多。
+  //
+  //   现在：本地副本是**权威**（先落本地），云端是备份。所以推送失败时
+  //   **缓存应该更新** —— 那不是"以为存上了"，那是用户真的写了、真的能读回来。
+  //   至于"云端没收到"，由底栏状态（`network-fail` 态，见 S5-C1）如实告知用户，
+  //   那才是"有没有存上"的正确位置 —— 不该由本地缓存承担。
+  assert.notEqual(
+    after.ct,
+    before.ct,
+    '🔴 推送失败时本地缓存也应更新：本地副本是权威，不该因为网络断就把用户刚写的内容弄丢',
+  );
+  clearCache(NOTE);
+});
+
+test('S5-C2b 🔴🔴 页面卸载前必须把待推内容落本地（老项目 pagehide → flushDirtySave 同款）', async () => {
+  const NOTE = 'flush-on-unload';
+  clearCache(NOTE);
+  const h1 = fakeFetch([ok(''), ok({ ok: true })]);
+  globalThis.fetch = h1;
+  const t = await mkClient([], { noteId: NOTE });
+  t.setDoc(docOf('起手'));
+  await t.c.start();
+  t.c.noteEdit();
+  await settle();
+  const before = readCache(NOTE);
+  assert.ok(before, '前置：应有缓存');
+
+  // 🔴 这一版**故意不调 settle**（不走去抖窗口），
+  //   模拟"PUSH_DEBOUNCE_MS = 700 的窗口内用户就关掉了页面"。
+  //   fetch 给一个 reject —— 这正是真实场景：页面正在卸载，请求会被浏览器丢弃。
+  //   🔴 不能给空队列：fakeFetch 队列空时返回 undefined，
+  //   而 push 会读 `res.status` ⇒ 抛 "Cannot read properties of undefined"，
+  //   报错完全指不到被测的东西（同"点不可见元素"那类噪声）。
+  const h2 = fakeFetch([new Error('页面卸载，请求被丢弃')]);
+  globalThis.fetch = h2;
+  t.setDoc(docOf('关页面前敲的最后一句'));
+  t.c.noteEdit();
+  t.c.flushPending();
+
+  // 断言要等 stageEnv 的加密完成（它是 fire-and-forget）
+  for (let i = 0; i< 40 && readCache(NOTE)?.ct === before.ct; i += 1) await settle();
+  const after = readCache(NOTE);
+  assert.notEqual(
+    after.ct,
+    before.ct,
+    '🔴 flushPending 之后缓存仍未更新 = 页面卸载时最后一批编辑全丢（用户刷新就没了）',
+  );
+  // 反向：不许把"还没落地的旧内容"清掉 —— 本地是权威，云端失败也不许回滚本地
+  assert.ok(after.ct && after.iv, '缓存信封必须完整（有内容才有资格谈丢不丢）');
   clearCache(NOTE);
 });
 
