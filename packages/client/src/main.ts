@@ -36,7 +36,7 @@ import { $createParagraphNode, $createTextNode, $getRoot } from 'lexical';
 
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
-import { insertFoldAtCaret, registerCommands } from './commands.ts';
+import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc } from './serialize.ts';
 import { canonicalize, deriveKey, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
@@ -97,6 +97,22 @@ declare global {
      * e2e 也用它造场景（造场景走生产代码，才不会测一份只有测试才有的路径）。
      */
     __NOTESYNC_INSERT_FOLD__?: () => void;
+    /**
+     * 把 Lexical 选区落到指定位置。**正式接口**，不是调试后门。
+     *
+     * 🔴🔴 为什么必须有它（这条是被逼出来的）：
+     *   e2e 若自己用 `document.createRange()` 设 DOM 选区，**不会同步到 Lexical 内部选区**
+     *   ⇒ 之后的 `keyboard.press('Enter')` 根本不进编辑器 ⇒ 测试会把
+     *   "实现有效"误判成"修复无效"。我在这上面白绕了很久。
+     *   而"点击标题行"也**不是**解法：点标题就是切换开合（既有设计），
+     *   一敲折叠块被打开，拦截器的判据②`!fold.open` 就不成立了。
+     *   ⇒ 唯一可靠路径：**在页面内用 Lexical 自己的节点 API 落选区**，也就是这个钩子。
+     *
+     * 三个位置够覆盖全部折叠交互：标题末尾 / 正文开头 / 块外最后一段末尾。
+     */
+    __NOTESYNC_CARET_FOLD_TITLE_END__?: () => boolean;
+    __NOTESYNC_CARET_FOLD_BODY_START__?: () => boolean;
+    __NOTESYNC_CARET_AFTER_BLOCKS__?: () => boolean;
     /**
      * 真源的 canonical 字节。
      *
@@ -1209,6 +1225,14 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   window.__NOTESYNC_INSERT_FOLD__ = () => {
     if (ed) insertFoldAtCaret(ed);
   };
+  // 🔴 选区定位钩子。**正式接口**，不是调试后门 —— 理由见Window 类型声明处的注释。
+  //   e2e 靠它把光标准确放进"折叠标题末尾/正文开头/块外"，
+  //   因为设 DOM 选区不会同步到 Lexical 内部选区（那样按键根本不进来）。
+  if (ed) {
+    window.__NOTESYNC_CARET_FOLD_TITLE_END__ = () => placeCaret(ed, 'fold-title-end');
+    window.__NOTESYNC_CARET_FOLD_BODY_START__ = () => placeCaret(ed, 'fold-body-start');
+    window.__NOTESYNC_CARET_AFTER_BLOCKS__ = () => placeCaret(ed, 'after-blocks');
+  }
   // 🔴 复用生产代码那份 canonicalize，不给测试第二份实现
   window.__NOTESYNC_CANON__ = (d: Doc): string => canonicalize(d);
   window.__NOTESYNC_RELOAD_FROM_DOC__ = () => {

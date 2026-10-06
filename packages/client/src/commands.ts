@@ -13,6 +13,7 @@
 import {
   $createParagraphNode,
   $createTextNode,
+  $getRoot,
   $getSelection,
   $insertNodes,
   $isRangeSelection,
@@ -57,6 +58,53 @@ function insertFoldHandler(payload: { title?: string } | undefined): boolean {
   }
 }
 
+/**
+ * 把选区落到「第一个折叠块」的指定位置。**正式接口**（e2e 造场景用）。
+ *
+ * 🔴🔴 为什么必须提供它，而不是让 e2e 自己设 DOM 选区：
+ *   `document.createRange()` 设的 DOM 选区**不会同步到 Lexical 内部选区**，
+ *   之后 `keyboard.press('Enter')` 根本不进编辑器 ⇒ e2e 会把
+ *   「实现有效」误判成「修复无效」。我在这上面白绕了很久才发现。
+ *   而"点击标题行"也不是解法：点标题就是切换开合（既有设计），
+ *   一敲折叠块被打开，拦截器判据②`!fold.open` 就不成立、按设计放行。
+ *
+ * 🔴 `ed.getRootElement()` 返回的是 **DOM 元素**、没有 `getChildren()`；
+ *   拿 Lexical 节点必须用 `$getRoot()`（编辑器状态里的根节点）。
+ *
+ * @param where 'title-end' 标题末尾 ｜ 'body-start' 正文开头
+ * @returns 是否成功落到目标（false = 文档里没有折叠块）
+ */
+function $caretIntoFirstFold(where: 'title-end' | 'body-start'): boolean {
+  const root = $getRoot();
+  const fold = root.getChildren().find((c) => $isFoldNode(c));
+  if (!$isFoldNode(fold)) return false;
+  if (where === 'title-end') {
+    // 🔴 标题 = 折叠块的第一个子段落（nodes.ts FoldNode 的设计，见其 createDOM 注释）
+    const head = fold.getFirstChild();
+    if (!head) return false;
+    head.selectEnd();
+    return true;
+  }
+  // body-start：正文第一个段落；没有正文就退到标题末尾（并如实返回，让调用方知道）
+  const head = fold.getFirstChild();
+  const body = head ? head.getNextSibling() : null;
+  if (!body) {
+    if (head) head.selectEnd();
+    return false;
+  }
+  body.selectStart();
+  return true;
+}
+
+/** 把选区落到文档最后一个块（用于验"折叠块外面"的落点）。 */
+function $caretAfterAllBlocks(): boolean {
+  const blocks = $getRoot().getChildren();
+  const last = blocks[blocks.length - 1];
+  if (!last) return false;
+  last.selectEnd();
+  return true;
+}
+
 /** 注册全部自定义命令。返回注销函数。 */
 export function registerCommands(editor: LexicalEditor): () => void {
   return editor.registerCommand(INSERT_FOLD, insertFoldHandler, COMMAND_PRIORITY_EDITOR);
@@ -85,4 +133,47 @@ export function $caretInFold(): boolean {
     cur = cur.getParent();
   }
   return false;
+}
+
+/**
+ * 把选区落到指定位置（e2e 造场景用）。**正式接口**。
+ *
+ * 🔴 必须走 `editor.update(..., {discrete:true})`：Lexical 的选区只能在
+ *   读函数（`$` 开头）里改，而那些函数只在 update 事务内可用。
+ *   `discrete: true` 让它同步提交 —— 否则 e2e 紧接着读状态会读到旧值。
+ */
+export function placeCaret(
+  editor: LexicalEditor,
+  where: 'fold-title-end' | 'fold-body-start' | 'after-blocks',
+): boolean {
+  let ok = false;
+  editor.update(
+    () => {
+      ok =
+        where === 'after-blocks'
+          ? $caretAfterAllBlocks()
+          : $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start');
+    },
+    { discrete: true },
+  );
+  // 🔴🔴 必须让**根元素拿到 DOM 焦点**，否则键盘输入根本不进来。
+  //   Lexical 的"选区"有两层：编辑器状态里的节点选区 + 真实 DOM 选区。
+  //   上面 update 里设的是前者；后者由 focus + 浏览器自己的 caret 跟随。
+  //   实测只设前者时 `placeCaret` 返回 true、`keyboard.type('ZZZ')` 却什么也没打进去 ——
+  //   症状与"实现无效"完全一样，极易误判（我在这上面又绕了一轮）。
+  if (ok) {
+    const rootEl = editor.getRootElement();
+    if (rootEl) {
+      rootEl.focus();
+      // 🔴 focus() 之后再选一次：focus 会把 DOM caret 复位到上次位置，
+      //   顺序反了的话 DOM 选区与节点选区会错位。
+      editor.update(
+        () => {
+          $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start');
+        },
+        { discrete: true },
+      );
+    }
+  }
+  return ok;
 }
