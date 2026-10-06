@@ -316,6 +316,11 @@ header.ns-top {
   letter-spacing: .04em;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
+  /* 🔴🔴 底色必须跟老项目一致（量化实测：老项目 header 背景 rgb(251,251,248)，
+     bj 此前是 rgba(0,0,0,0)=透明 ⇒ 顶栏"没有自己的底"，直接透出页面底色）。
+     老项目 header 规则里**没有** background —— 它靠 :root 的 body 底色透上来，
+     视觉上等效，但一旦页面有滚动/渐变就会露馅；写死 var(--bg) 是等效且更稳的写法。 */
+  background: var(--bg);
 }
 /* 🔴 老项目 index.html:101：`gap:8px`（不是 7px）、`color:var(--fg)`（不是 muted）、
    `flex-shrink:1`（不是 flex:none）。gap 差 1px 在 logo 与 NoteSync 字标之间看得出来，
@@ -594,6 +599,9 @@ footer.ns-foot {
   letter-spacing: .14em;
   border-top: 1px solid var(--line);
   position: relative; min-height: 46px;
+  /* 🔴 同顶栏：老项目 footer 也没有 background，靠页面底色透上来（实测 rgb(251,251,248)）。
+     bj 此前透明，滚动时底栏会"糊"出下层内容。 */
+  background: var(--bg);
 }
 /* 触控区 44px：图标 19px 靠 padding 撑到手指够得着的尺寸 */
 footer.ns-foot #menuBtn {
@@ -662,7 +670,13 @@ footer.ns-foot .dot.off { background: var(--danger); }
   min-height: 42px; line-height: 1.4;
   border: 1px solid var(--line); border-radius: 10px;
   cursor: pointer; color: var(--fg); font-size: 15px;
-  background: var(--box-bg);
+  /* 🔴🔴 老项目 `.menu-item` **没有 background**（实测 rgba(0,0,0,0)）——
+     菜单行的底色来自外层 `.box`（弹层底），行本身是透明的。
+     bj 此前给每行加了 `background: var(--box-bg)`（= 白），
+     于是菜单打开时每一行都是**独立白块**、行间露出弹层底色（实测 rgb(255,255,255) vs 透明）
+     —— 这正是用户报障第 4 条「菜单项间距不同 / 看着不对」的成因。
+     删掉即可，弹层底色由 .menu-box 承担。 */
+  background: transparent;
   touch-action: manipulation; -webkit-tap-highlight-color: transparent;
   transition: border-color .2s ease, background-color .2s ease;
 }
@@ -673,7 +687,15 @@ footer.ns-foot .dot.off { background: var(--danger); }
    整列图标缩到 20px 后菜单明显"变精致/变小气"，与老项目并排一眼就不同。 */
 .menu-item .ic { width: 26px; height: 26px; flex: none; color: var(--fg); }
 /* 🔴 标签列定宽 112px —— 老项目 CSS 的原值，别"顺手改成自适应" */
-.menu-item .mi-l, #menuThemeLabel { width: 112px; text-align: left; font-size: 14px; }
+.menu-item .mi-l, #menuThemeLabel {
+  width: 112px; text-align: left;
+  /* 🔴🔴 font-size 必须 15px（老项目 .menu-item 的字号），此前写 14px。
+     连带后果：行内容器高度按字号走，14px 时标签盒26px、整行 42px（只够 min-height）；
+     老项目 15px 时标签盒 21px、整行 46px（内容把行撑到 46）。
+     量化实测：老项目行高 46、bj 42 —— 这就是用户报的「菜单项间距不同」。
+     🔴 别用 min-height 去修成 46：那只是把行撑高，标签字号仍与老项目不同。 */
+  font-size: 15px;
+}
 /* 🔴🔴 二级视图内的所有菜单行左起笔（老项目 index.html:447
    `#menuFavView .menu-item,#menuHistView .menu-item{justify-content:flex-start}`）。
    用户报「收藏列表太靠左没和返回对齐」的根因是主菜单那套居中逻辑漏到了二级页；
