@@ -71,7 +71,11 @@ svg .gf { fill: var(--accent); stroke: none; }
   /* 🔴 值由 ui/theme.ts 的 OVERLAY 写进来（本文件不出现颜色字面量） */
   background: var(--mask-bg);
   display: flex; align-items: center; justify-content: center;
-  padding: 20px;
+  /* 🔴🔴 padding必须去掉（老项目 `.mask` 原文没有 padding）。
+     量化实测：老项目弹窗盒子 x=19.5、bj x=20 —— 差的正是遮罩这 20px 内边距。
+     而且它还会**把盒子整体压小**（老项目 h=323/323/… vs bj 308/360 随内容跳动）。
+     遮罩只负责压暗+居中，间距由 .box 自己的 padding 管。 */
+  padding: 0;
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
@@ -110,7 +114,10 @@ svg .gf { fill: var(--accent); stroke: none; }
   animation: nsRise .5s cubic-bezier(.2,.7,.3,1) both;
   max-height: 86vh; overflow-y: auto;
 }
-.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* 🔴🔴 逐值抄老项目 `.modal-head{...;gap:12px;margin:0 0 8px}`。
+   缺 `margin:0 0 8px` 时标题行与下方内容贴在一起，整盒高度少 8px
+   （量化实测：老项目 323 vs bj 307，差的 16px 由此项与 .err 各占一半）。 */
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
 .modal-head h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: .02em; }
 /* 🔴 关闭键36×36 / 圆角 10（老项目 index.html:487）。原先 32px/8px —— 比老项目小一号。 */
 .box-x { width: 36px; height: 36px; display: grid; place-items: center;
@@ -246,7 +253,13 @@ svg .gf { fill: var(--accent); stroke: none; }
 .landing.trust-away .trust { opacity: 0; }
 
 /* ---------- 口令页 / 首页 ---------- */
-.box .hint { font-size: 12.5px; line-height: 1.7; color: var(--muted); margin: 10px 0 14px; }
+/* 🔴🔴 弹窗说明文字**逐值抄老项目 `.box p{font-size:13px;color:var(--muted);
+   margin:0 0 20px;line-height:1.7}`**（index.html 同款）。
+   量化实测（口令弹窗）：老项目 13px/22.1px 行高、盒子高 323；bj 12.5px/21.25px、
+   盒子高 309 —— 字小一号 + 上下留白少 6px，两头差 14px。
+   🔴 别只改字号：margin 也要跟着改回 `0 0 20px`，
+   此前写的 `10px 0 14px`（上下各留一点）会让整盒高度差一截。 */
+.box .hint { font-size: 13px; line-height: 1.7; color: var(--muted); margin: 0 0 20px; }
 /* 🔴 口令框：老项目 index.html:513 `.box input{width:100%;padding:0 14px;height:46px;...}`。
    原先 padding:11px 12px（高约 41px），比老项目矮 5px、左右内边距也差 2px。 */
 .box input[type="password"] {
@@ -255,7 +268,10 @@ svg .gf { fill: var(--accent); stroke: none; }
   height: 46px; padding: 0 14px; font-size: 15px; outline: none;
 }
 .box input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
-.err { min-height: 1.2em; margin-top: 8px; font-size: 12.5px; color: var(--danger); }
+/* 🔴🔴 逐值抄老项目 `.err{color:#C0453E;font-size:13px;min-height:20px;margin:10px 0 6px}`。
+   差异同样体现在整盒高度上：bj 此前 min-height:1.2em / margin-top:8px / 12.5px，
+   与老项目的 20px / 10px+6px / 13px 都不一致 ⇒ 弹窗整体比老项目矮一截。 */
+.err { min-height: 20px; margin: 10px 0 6px; font-size: 13px; color: var(--danger); }
 /* 🔴 主按钮：老项目 index.html:516 `.box button:not(.box-x){width:100%;height:46px;...;
    letter-spacing:.08em}`。原先 padding:11px + `letter-spacing:4px`。
    4px 是**绝对值**：老项目 .08em 会随字号缩放，而 4px 在 15px 字号下

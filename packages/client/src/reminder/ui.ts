@@ -19,6 +19,7 @@
  */
 
 import { COPY } from '../ui/copy.ts';
+import { ICON_X } from '../ui/icons.ts';
 import { fmtLate, fmtRelDay, fmtRemInsert, fmtRemTime, itemForChip, matchAtCaret } from '../reminder/format.ts';
 import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
 import type { Doc } from '@bj/shared-schema';
@@ -371,6 +372,11 @@ export class ReminderUI {
     x.setAttribute('tabindex', '0');
     x.setAttribute('title', COPY.remChipClose);
     x.setAttribute('aria-label', COPY.remChipClose);
+    // 🔴🔴 关闭键必须**有图标**：此前只挂了 class / role / 事件，容器是空的
+    //   ⇒ 弹窗右上角什么都不显示（用户报障第 3 条「提醒弹窗关闭按钮没显示出来」）。
+    //   量化实测：老项目关闭图标 font-size 13.3px、bj 是 16px —— 因为 bj 压根没有 svg。
+    //   与老项目 `.box-x` 内含 svg 同款。
+    x.innerHTML = ICON_X();
     const title = document.createElement('div');
     title.className = 'ns-remcard-title';
     title.textContent = COPY.remCardTitle;
@@ -578,6 +584,11 @@ export class ReminderUI {
     x.setAttribute('tabindex', '0');
     x.setAttribute('title', COPY.remChipClose);
     x.setAttribute('aria-label', COPY.remChipClose);
+    // 🔴🔴 关闭键必须**有图标**：此前只挂了 class / role / 事件，容器是空的
+    //   ⇒ 弹窗右上角什么都不显示（用户报障第 3 条「提醒弹窗关闭按钮没显示出来」）。
+    //   量化实测：老项目关闭图标 font-size 13.3px、bj 是 16px —— 因为 bj 压根没有 svg。
+    //   与老项目 `.box-x` 内含 svg 同款。
+    x.innerHTML = ICON_X();
     const close = (): void => this.hidePanel();
     x.addEventListener('click', close);
     x.addEventListener('keydown', (e) => {

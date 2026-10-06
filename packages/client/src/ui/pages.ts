@@ -9,7 +9,7 @@
  */
 
 import { COPY } from './copy.ts';
-import { LOGO, ICON_SCAN, ICON_TRUST_LOCK, ICON_TRUST_NOACCT, ICON_TRUST_SCAN } from './icons.ts';
+import { LOGO, ICON_SCAN, ICON_TRUST_LOCK, ICON_TRUST_NOACCT, ICON_TRUST_SCAN, ICON_X } from './icons.ts';
 import { isEggRoute, sanitizeNoteName } from './landing-logic.ts';
 
 export type PageKind = 'landing' | 'pass' | 'home' | 'editor';
@@ -127,7 +127,7 @@ export function buildPass(host: HTMLElement, cb: PassCallbacks): void {
     <div class="modal-head">
       <h1>${COPY.passTitle}</h1>
       <button type="button" id="maskClose" class="box-x" title="${COPY.passCloseTitle}"
-              aria-label="${COPY.passCloseTitle}"></button>
+              aria-label="${COPY.passCloseTitle}">${ICON_X()}</button>
     </div>
     <p class="hint">${COPY.passHint}</p>
     <input id="pw" type="password" autocomplete="off" aria-label="${COPY.passTitle}">
