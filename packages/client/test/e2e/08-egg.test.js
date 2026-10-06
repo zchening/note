@@ -283,3 +283,105 @@ test('EGG-E 彩蛋层全链路', async (t) => {
     }
   });
 });
+
+/* ======================================================================
+ * 彩蛋体验对齐（用户报障第 7 条：「你很多彩蛋都有问题」）
+ *
+ * 🔴 这几条都是**用户可见行为**，判据钉"玩起来是什么样"而不是"函数被调用了"：
+ *   - dragon：进入后有 3 秒 intro 无敌（此前**直接进 run 相位，一进去牌子就在眼前**
+ *     ⇒ 站着不动 0.4 秒必撞，用户报「dragon 进入就死亡」。探针 probe-eggs 实锤）。
+ *   - dragon：物理参数与老项目同款（速度 132 起、重力 900、y 是离地高度向上为正）。
+ *     此前 bj 用"绝对屏幕坐标 + 向下为正"，与老项目**反号**，抄任何一行都是反向手感。
+ *   - pet：本体必须是老项目那只 **SVG 小螃蟹**，不是 emoji 🐾
+ *     （用户报「宠物是一个大脚丫」；探针实测旧版是 88×102 的脚爪字形）。
+ *   - tank：玩法提示必须写出**怎么开火**（此前 tip 少了这条，玩家以为游戏坏了）。
+ * ====================================================================== */
+
+test('EGG-E10🔴🔴 dragon 进入后有 3 秒 intro（不立刻死）且物理与老项目同款', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggDragon10', 'pw');
+  try {
+    await page.goto(page.url().replace('/eggDragon10', '/dragon'));
+    await page.waitForSelector('#nsCv', { timeout: 15_000 });
+    // 探针用同一个挂钟点采样：intro 3 秒内必须**还没结束**
+    for (const wait of [1200, 1200, 900]) {
+      await page.waitForTimeout(wait);
+      const over = await page.evaluate(() =>
+        /被.+ 撞倒了|这一局结束了/.test(document.body.innerText || ''),
+      );
+      assert.equal(
+        over,
+        false,
+        `dragon 在 ${3000 - wait}ms 就结束了 —— intro 无敌期没生效（用户报障「dragon 进入就死亡」）。` +
+          '老项目 index.html:11756 有 phase==="intro" 的 3 秒保护。',
+      );
+    }
+    // 结束语必须报出**撞上什么**（老项目 :11763 `END('被'+label+'撞倒了')`），
+    // 此前是千篇一律的「这一局结束了」，用户看不出是哪块牌子。
+    const tip = await page.evaluate(() => document.body.innerText || '');
+    assert.match(tip, /点屏幕 = 跳 · 按住屏幕 = 低头 · 撞上牌子就结束/, '玩法提示应与老项目逐字一致');
+  } finally {
+    await page.close();
+  }
+});
+
+test('EGG-E11 🔴 桌宠本体是老项目那只 SVG 小螃蟹（不是 🐾 字形）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggPet11', 'pw');
+  try {
+    await page.goto(page.url().replace('/eggPet11', '/pet'));
+    await page.waitForSelector('.ns-pet', { timeout: 15_000 });
+    const p = await page.evaluate(() => {
+      const pet = document.querySelector('.ns-pet');
+      const svg = pet?.querySelector('svg');
+      const r = pet?.getBoundingClientRect();
+      const sr = svg?.getBoundingClientRect();
+      return {
+        // 🔴 反向钉死：emoji 🐾 必须不在（那是用户报的"大脚丫"）
+        text: pet?.textContent ?? '',
+        hasSvg: !!svg,
+        viewBox: svg?.getAttribute('viewBox') ?? null,
+        paths: svg ? svg.querySelectorAll('path').length : 0,
+        circles: svg ? svg.querySelectorAll('circle').length : 0,
+        accentEyes: svg
+          ? Array.from(svg.querySelectorAll('circle')).filter(
+              (c) => (c.getAttribute('fill') ?? '').includes('--accent'),
+            ).length
+          : 0,
+        box: r ? [Math.round(r.width), Math.round(r.height)] : null,
+        svgBox: sr ? [Math.round(sr.width), Math.round(sr.height)] : null,
+      };
+    });
+    assert.equal(
+      p.text.trim(),
+      '',
+      `桌宠不该再是 emoji 字形（实测文本 ${JSON.stringify(p.text)}）—— 用户报障「宠物是一个大脚丫」`,
+    );
+    assert.ok(p.hasSvg, '桌宠必须是 SVG');
+    assert.equal(p.viewBox, '0 0 26 26', `viewBox 应与老项目一致（0 0 26 26），实际 ${p.viewBox}`);
+    assert.equal(p.paths, 3, `应 3 条 path（身体弧/地线/三腿合并），实际 ${p.paths}`);
+    assert.equal(p.circles, 2, `应 2 只金眼circle，实际 ${p.circles}`);
+    assert.equal(p.accentEyes, 2, '两只眼睛都应是金色（fill: var(--accent)）');
+    // 尺寸必须接近正方形（按 viewBox 1:1 走，不能压扁）
+    assert.ok(p.svgBox && p.svgBox[0] === p.svgBox[1], `SVG 应等宽等高，实际 ${p.svgBox}`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('EGG-E12 🔴🔴 tank 玩法提示必须写出怎么开火（用户报障「tank 不一样」）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggTank12', 'pw');
+  try {
+    await page.goto(page.url().replace('/eggTank12', '/tank'));
+    await page.waitForSelector('#nsCv', { timeout: 15_000 });
+    const txt = await page.evaluate(() => document.body.innerText || '');
+    // 老项目 index.html:12149逐字
+    assert.match(
+      txt,
+      /划屏改向 \/ 方向键移动 · 点右半屏或空格开火 · 别让记事本被炸/,
+      `tank 玩法提示应与老项目逐字一致（含"怎么开火"），实际「${txt.replace(/\n/g, ' ').slice(0, 120)}」`,
+    );
+    // 反向：旧版那句"撞开砖墙，守住你的笔记"不含开火，必须不再出现
+    assert.doesNotMatch(txt, /撞开砖墙，守住你的笔记/, '旧的不含开火说明的提示不许残留');
+  } finally {
+    await page.close();
+  }
+});

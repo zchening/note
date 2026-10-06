@@ -291,22 +291,43 @@ export function dragonGame(getCtx: () => { body: string; favs: string[] }): Game
   let x = 0;
   let y = 0;
   let vy = 0;
-  let speed = 260;
+  let speed = 132;
   let score = 0;
   let dist = 0;
   let dead = false;
   let ground = 0;
+  let introT = 0;
+  /**
+   * 🔴🔴 intro 相位：进入后的前 3 秒**只跑动画、不判碰撞**。
+   *
+   *   这是用户报障「dragon 进入就死亡」的**真实根因**（探针 probe-eggs 实锤：
+   *   进入后 3 秒就出「这一局结束了得分10」）。bj 此前直接进 run 相位，
+   *   而第一块牌子就在 x=60+220-46 处 ⇒ 站着不动 0.4 秒必撞。
+   *
+   *   老项目 index.html:11756 原样：
+   *     if (phase === 'intro') { it += dt; if (it > 3) { phase = 'run'; } return; }
+   *   —— 它的 `introTap` 机制还让"第一下点击只起跑、不补跳"，bj 不做那层，
+   *   但**3 秒无敌**这条是承重的，必须有（否则用户还没看清玩法就死了）。
+   */
+  let intro = true;
+  /** 本局跑过的字数（老项目 `pass` 之外的"本局跑了 N 字"，本项目用 dist 派生）。 */
+  let passed = 0;
 
   const reset = (g: GameCtx): void => {
     labels = names('dragon', getCtx().body, getCtx().favs, ['账单', 'deadline', '周报', '待办', '会议', '需求', 'bug', '上线']);
     ground = g.h() - 46;
     x = 60;
-    y = ground;
+    // 🔴 y 是**离地高度**，初始 0 = 贴地（此前写 `y = ground`，那是旧的屏幕坐标语义）
+    y = 0;
     vy = 0;
-    speed = 260;
+    // 🔴 起始速度回老项目的 132（此前 260，是老项目的两倍 —— 手感"飞出去"）
+    speed = 132;
     score = 0;
     dist = 0;
+    passed = 0;
     dead = false;
+    intro = true;
+    introT = 0;
     g.setScore('0');
     g.setLevel('');
   };
@@ -321,30 +342,43 @@ export function dragonGame(getCtx: () => { body: string; favs: string[] }): Game
       void g;
     },
     frame: (dt, g) => {
+      if (intro) {
+        introT += dt;
+        if (introT > 3) intro = false;
+        return;
+      }
       if (dead) return;
-      speed = Math.min(560, 260 + dist * 0.5);
+      // 🔴 与老项目同款加速曲线：132 起、每米+0.8、最多 +70（老项目 :11758 `sp = 132 + Math.min(70, it * 0.8)`）
+      speed = 132 + Math.min(70, dist * 0.05);
       dist += speed * dt;
-      vy += 1800 * dt;
+      // 🔴 重力 900、方向与老项目一致（y 是**离地高度**，向上为正 ⇒ vy -= g）
+      vy -= 900 * dt;
       y += vy * dt;
-      if (y >= ground) {
-        y = ground;
+      // 🔴 落地判据是 `y <= 0`（离地高度 0 = 贴地），**不是 `y <= ground`**。
+      //   旧版本把 ground 当屏幕坐标用，改语义时这里漏改会让恐龙一出生就"落地"
+      //   （y=ground=高度值 ⇒ y<=ground 立刻成立 ⇒ vy 被夹成 0，永远跳不起来）。
+      if (y <= 0) {
+        y = 0;
         vy = 0;
       }
       //撞牌子：按 x 间距循环放牌子
       const span = 220;
       const idx = Math.floor((x + dist) / span);
       const rel = (x + dist) % span;
-      if (rel > span - 46 && vy >= 0) {
+      // 🔴 `vy <= 0` 才是"正在下落"（上升中 vy > 0）—— 与新语义配套。
+      if (rel > span - 46 && vy <= 0) {
         const lb = labels[idx % Math.max(1, labels.length)] ?? '账单';
-        void lb;
         dead = true;
         g.fx('die');
-        g.end(COPY.gameOver, [
+        // 🔴 结束语与老项目同款（:11763）：报出**撞上什么**，并给"躲过 N 个"
+        //   此前是千篇一律的「这一局结束了」，用户看不出是哪块牌子撞的。
+        g.end('被' + lb + '撞倒了', [
           [COPY.gameRowScore, String(score)],
-          [COPY.gameRowExtra, String(Math.floor(dist / 10))],
+          [COPY.gameRowExtra, String(passed)],
         ]);
       }
-      score = Math.floor(dist / 10);
+      passed = Math.floor(dist / span);
+      score = Math.floor(dist / 4);
       g.setScore(score);
     },
     draw: (g) => {
@@ -369,29 +403,39 @@ export function dragonGame(getCtx: () => { body: string; favs: string[] }): Game
         c.fill();
         txt(c, lb.slice(0, 6), sx - 4 + Math.max(52, lb.length * 13 + 16) / 2, ground - 43, 12, p.fg);
       }
-      // 恐龙（一个简化的方块_runner）
+      // 🐲 恐龙（简化 runner）。
+      // 🔴 `y` 的语义在这一版改成**离地高度**（向上为正、0 = 地面），
+      //   与老项目 index.html:11740 `function jump(){ vy = 330 }` + `:11759 vy -= 900*dt`
+      //   完全一致 —— 此前 bj 用的是「绝对屏幕坐标 + 向下为正」，
+      //   与老项目的物理约定**反号**，抄任何一行物理参数都会得到反向手感
+      //   （老项目那条注释「写成 vy+=g 会把起跳首帧就夹回地面」说的就是这类反号）。
+      //   ⇒ 画恐龙要用 `ground - y - 26`（屏幕坐标），不能直接拿 y 当屏幕 y。
       c.fillStyle = dead ? p.danger : p.accent;
-      rr(c, x, y - 26, 34, 26, 8);
+      rr(c, x, ground - y - 26, 34, 26, 8);
       c.fill();
       c.fillStyle = p.fg;
       c.beginPath();
-      c.arc(x + 24, y - 30, 3, 0, Math.PI * 2);
+      c.arc(x + 24, ground - y - 30, 3, 0, Math.PI * 2);
       c.fill();
     },
     tap: (g) => {
-      if (dead) return;
-      if (y >= ground - 1) vy = -520;
+      if (dead || intro) return;
+      if (y <= 1) vy = 330;
       void g;
     },
     down: (g) => {
-      if (dead) return;
-      if (y >= ground - 1) vy = -520;
+      if (dead || intro) return;
+      if (y <= 1) vy = 330;
       void g;
     },
     key: (down, e, g) => {
       if (!down) return;
       if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') {
-        if (y >= ground - 1) vy = -520;
+        if (intro) {
+          intro = false; // 🔴 老项目 introTap：intro 期的第一下只起跑、不补跳
+          return;
+        }
+        if (y <= 1) vy = 330;
       }
       void g;
     },
@@ -861,7 +905,12 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
 
   return {
     id: 'tank',
-    tip: '四向划屏 / 方向键 · 撞开砖墙，守住你的笔记',
+    // 🔴🔴 tip 文案逐字对齐老项目（index.html:12149）：
+    //   此前 bj 写的是「四向划屏 / 方向键 · 撞开砖墙，守住你的笔记」——
+    //   **少了"怎么开火"**。用户报障「tank 也和之前不一样」指的就是这个：
+    //   玩法提示里没有射击操作，玩家不知道空格/右半屏能开火，于是以为游戏坏了。
+    //   提示文案是契约（用户按它学操作），不能自己改写。
+    tip: '划屏改向 / 方向键移动 · 点右半屏或空格开火 · 别让记事本被炸',
     start: reset,
     resize: (w, h) => {
       cell = Math.floor(Math.min(w, h) / (N + 0.5));
@@ -1198,13 +1247,30 @@ export function petGame(): DomGameDef {
   return {
     id: 'pet',
     tip: '点它一下，它会叫',
+    // 🔴🔴🔴 桌宠必须是**老项目那只 SVG 小螃蟹**，不是 emoji 🐾。
+    //   用户报障：「宠物是一个大脚丫」—— 说的就是这个 🐾（探针实测 88×102 的脚爪）。
+    //   老项目 index.html:11202 的 SVG 逐字抄在下面（viewBox 0 0 26 26）：
+    //   身体弧线 + 三条腿 + 两只金色眼睛，是"螃蟹"，而脚爪字形在 emoji 字体里
+    //   会被渲染成一个巨大的爪印，与老项目那种"顶栏下沿骑线的小螃蟹"完全不是一回事。
+    //   🔴 而且老项目那只 pet 是**常驻顶栏下沿**（`petMount()` 挂 header，0 占宽，
+    //   `petBlank().adopted` 默认 false ⇒ 不访问 /pet 就不出现）；
+    //   bj 这里是 /pet 彩蛋页内的独立 stage，属**形态差异**，本轮先对齐宠物本体，
+    //   常驻挂载那条属于"要不要做"的设计决策，留待用户拍板（不做隐式移植）。
     dom: (mount, g) => {
       mount.className = 'ns-pet-stage';
       const pet = document.createElement('div');
       pet.className = 'ns-pet';
-      const s = document.createElement('span');
-      s.textContent = '🐾';
-      pet.appendChild(s);
+      // 🦀 老项目 index.html:11202 逐字（aria-hidden 同款）
+      pet.innerHTML =
+        '<svg viewBox="0 0 26 26" aria-hidden="true">' +
+        '<g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">' +
+        '<path d="M4 18c0-5 3.6-8.6 8.6-8.6S21 13 21 18"/>' +
+        '<path d="M4 18h17"/>' +
+        '<path d="M8 18v2.6M13 18v2.6M18 18v2.6"/>' +
+        '</g>' +
+        '<circle cx="9.6" cy="13.4" r="1.2" fill="var(--accent)" stroke="none"/>' +
+        '<circle cx="15.6" cy="13.4" r="1.2" fill="var(--accent)" stroke="none"/>' +
+        '</svg>';
       mount.appendChild(pet);
       pet.addEventListener('click', () => {
         g.fx('burp');

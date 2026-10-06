@@ -1320,3 +1320,249 @@ test('VVW-15 🔴 落地页 h1/副标题 shrink-to-fit（不拉满），输入�
     await page.close();
   }
 });
+
+test('VVW-16 🔴🔴 菜单项几何必须与老项目逐字同值（间距类报障的钉死闸）', async () => {
+  // 🔴 这条是「菜单点出来的菜单列表间距不一样」这条用户报障的**量化钉死**。
+  //   我此前 memory 里把它记成"仍待做"，本轮并排量化后发现**已经对齐**——
+  //   老项目 index.html:437 与 bj 的 .menu-item 逐字相同：
+  //   padding:9px 12px / border-radius:10px / margin-bottom:5px / gap:12px /
+  //   font-size:15px / min-height:42px / align-items:center / justify-content:center。
+  //   ⇒ 这类"报障但实测已对齐"的项，正确的做法是**把钉死写进测试**，
+  //   否则下次有人改了一处又会变成"没人说得清什么时候变的"。
+  //   （教训见 memory：我此前把"未核实"当成"未做"，白排了一轮工。）
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw16', 'pw');
+  try {
+    await page.click('#menuBtn');
+    await page.waitForSelector('.menu-box .menu-item', { timeout: 10_000 });
+    const items = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('.menu-box .menu-item'));
+      const cs = getComputedStyle(els[0]);
+      const r = els[0].getBoundingClientRect();
+      return {
+        n: els.length,
+        h: Math.round(r.height),
+        pad: cs.padding,
+        radius: cs.borderRadius,
+        mb: cs.marginBottom,
+        gap: cs.gap,
+        fs: cs.fontSize,
+        align: cs.alignItems,
+        justify: cs.justifyContent,
+        // 主菜单九行居中（老项目 v8.0.1 起"整组居中"，用户反馈过贴左大片空=失衡）
+        firstCentered: Math.abs(
+          (els[0].getBoundingClientRect().left + r.width / 2) -
+            (window.innerWidth / 2),
+        ),
+      };
+    });
+    assert.ok(items.n >= 9, `菜单至少 9 项（老项目 10 项含口令），实得 ${items.n}`);
+    assert.equal(items.pad, '9px 12px', `.menu-item 内边距应 9px 12px，实际 ${items.pad}`);
+    assert.equal(items.radius, '10px', `圆角应 10px，实际 ${items.radius}`);
+    assert.equal(items.mb, '5px', `项间距（margin-bottom）应 5px，实际 ${items.mb}`);
+    assert.equal(items.gap, '12px', `图标与文字间距应 12px，实际 ${items.gap}`);
+    assert.equal(items.fs, '15px', `字号应 15px，实际 ${items.fs}`);
+    assert.equal(items.h, 42, `行高应 42px（老项目 v7.0.1 从 48 瘦身），实际 ${items.h}`);
+    assert.equal(items.align, 'center', '图标与文字应纵向居中');
+    assert.equal(items.justify, 'center', '主菜单整组应居中（老项目 v8.0.1）');
+    // 反向：菜单盒内不许再有 box-x（老项目菜单里从来没有关闭 X）
+    assert.equal(
+      await page.evaluate(() => !!document.querySelector('.menu-box .box-x')),
+      false,
+      '菜单盒内不该有 .box-x',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VVW-17 🔴 提醒滚轮几何与配色必须与老项目同值（滚轮颜色这条报障）', async () => {
+  // 老项目 index.html:235-242 与 bj styles.css:1006 逐字相同：
+  // wrap 54x150 / border var(--line) / radius 12px / background var(--box-bg)；
+  // mid 绝对定位 left:5px right:5px top:50% height:50px；
+  // 中间高亮条上下两条 1.5px solid var(--accent)。
+  // 用户报的"右侧的滚轮颜色不一样"若再次出现，先量这四个数再动代码。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw17', 'pw');
+  try {
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rem-wheel-wrap', { timeout: 10_000 });
+    const w = await page.evaluate(() => {
+      const wrap = document.querySelector('.ns-rem-wheel-wrap');
+      const mid = document.querySelector('.ns-rem-wheel-mid');
+      const it = document.querySelector('.ns-rem-wheel-it');
+      const root = getComputedStyle(document.documentElement);
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      const wrapCs = getComputedStyle(wrap);
+      const midCs = mid ? getComputedStyle(mid) : null;
+      const itCs = it ? getComputedStyle(it) : null;
+      const wr = wrap.getBoundingClientRect();
+      return {
+        size: [Math.round(wr.width), Math.round(wr.height)],
+        radius: wrapCs.borderRadius,
+        bgIsToken: wrapCs.backgroundColor,
+        bgToken: toRgb(root.getPropertyValue('--box-bg')),
+        borderIsToken: wrapCs.borderTopColor,
+        lineToken: toRgb(root.getPropertyValue('--line')),
+        midBorder: midCs ? midCs.borderTopWidth + ' ' + midCs.borderTopStyle + ' ' + midCs.borderTopColor : null,
+        // 🔴 颜色**单独取**：midBorder 那个拼接串里颜色本身含空格，
+        //   在 Node 侧切字符串会切坏（见下方断言处的注释）。
+        midColor: midCs ? midCs.borderTopColor : null,
+        midSize: mid ? [Math.round(mid.getBoundingClientRect().width), Math.round(mid.getBoundingClientRect().height)] : null,
+        accentToken: toRgb(root.getPropertyValue('--accent')),
+        itSize: it ? [Math.round(it.getBoundingClientRect().width), Math.round(it.getBoundingClientRect().height)] : null,
+        itFont: itCs ? itCs.fontSize : null,
+        itColor: itCs ? itCs.color : null,
+      };
+    });
+    assert.deepEqual(w.size, [54, 150], `滚轮外框应 54x150，实际 ${w.size}`);
+    assert.equal(w.radius, '12px', `圆角应 12px，实际 ${w.radius}`);
+    assert.equal(w.bgIsToken, w.bgToken, `底色必须吃 --box-bg 令牌（实测 ${w.bgIsToken} vs 令牌 ${w.bgToken}）`);
+    assert.equal(w.borderIsToken, w.lineToken, `描边必须吃 --line 令牌（实测 ${w.borderIsToken}）`);
+    assert.deepEqual(w.midSize, [42, 50], `中间高亮条应 42x50，实际 ${w.midSize}`);
+    // 🔴🔴 描边宽度必须读**样式表声明文本**，不能读 computed ——
+    //   dpr=1 的 Chromium 把 border-width 量化到整数设备像素，声明的 1.5px 会被报成 1px
+    //   （本文件文件头第 2 条已记「小数 px 量不到就去看样式表声明文本」，
+    //   我第一版仍按 computed 写，于是把 1.5 自己判成 1、红了）。
+    const decl = await page.evaluate(() => {
+      for (const sheet of document.styleSheets) {
+        let rules;
+        try {
+          rules = sheet.cssRules;
+        } catch {
+          continue;
+        }
+        for (const r of rules) {
+          if (r.selectorText === '.ns-rem-wheel-mid') return r.cssText;
+        }
+      }
+      return null;
+    });
+    assert.ok(decl, '样式表里应有 .ns-rem-wheel-mid 规则');
+    assert.match(decl, /border-top:\s*1\.5px solid/, `上边线声明应为 1.5px，实际 ${decl}`);
+    assert.match(decl, /border-bottom:\s*1\.5px solid/, `下边线声明应为 1.5px，实际 ${decl}`);
+    assert.match(decl, /var\(--accent\)/, `描边色必须走令牌，实际 ${decl}`);
+    // 🔴 配色断言一律**与当前主题令牌比**，不能写死 rgb ——
+    //   harness落在夜间主题，写死日间值会恒红（12-visual-brand VIS-02 已记这条）。
+    // 🔴 `midBorder` 是「宽 style 颜色」三段拼接，而**颜色里本身带空格**
+    //   （`rgb(212, 176, 104)`）—— 我第一版用 `split(' ').pop()` 取末段，
+    //   拿到的是 `'104)'`。判据自己写错，报错完全指不到被测的东西。
+    //   正确做法：在页面里就把颜色单独取出来比，别在 Node 侧切字符串。
+    assert.equal(
+      w.midColor,
+      w.accentToken,
+      `高亮条描边色应吃 --accent 令牌=${w.accentToken}，实际 ${w.midColor}`,
+    );
+    assert.equal(w.itFont, '15px', `滚轮项字号应 15px，实际 ${w.itFont}`);
+    assert.deepEqual(w.itSize, [52, 50], `滚轮项应 52x50（老项目 .rem-wheel-it 高 50），实际 ${w.itSize}`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('VVW-18 🔴 二维码配对弹窗的警示与画布几何（弹窗按钮/警示这条报障）', async () => {
+  // 老项目 index.html:526-538 与 bj styles.css:1279-1298 逐字相同：
+  // .qr-box{text-align:center} / .qr-title 18px 600 / #qrHolder min-height:236px
+  // / #qrCanvas radius:12px + 1px var(--line) + 纸白底 / #qrLarge 88vmin + pixelated。
+  // 用户报的"扫一扫、二维码配对弹窗下面两个按钮不一样"，量化后确认是**已对齐**；
+  // 这条把它钉住，免得下次回归。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw18', 'pw');
+  try {
+    await page.click('#qrBtn');
+    await page.waitForSelector('#pairMask .qr-box', { timeout: 12_000 });
+    const q = await page.evaluate(() => {
+      const root = getComputedStyle(document.documentElement);
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      const box = document.querySelector('#pairMask .qr-box');
+      const title = document.querySelector('#pairMask .qr-title');
+      const holder = document.querySelector('#qrHolder');
+      const canvas = document.querySelector('#qrCanvas');
+      const warn = document.querySelector('#pairMask .ns-qr-warn');
+      const closeBtn = document.querySelector('#pairMask .box-x');
+      const boxCs = getComputedStyle(box);
+      const titleCs = title ? getComputedStyle(title) : null;
+      const holderCs = holder ? getComputedStyle(holder) : null;
+      const canvasCs = canvas ? getComputedStyle(canvas) : null;
+      const warnCs = warn ? getComputedStyle(warn) : null;
+      const closeCs = closeBtn ? getComputedStyle(closeBtn) : null;
+      return {
+        boxAlign: boxCs.textAlign,
+        titleFont: titleCs ? titleCs.fontSize : null,
+        titleWeight: titleCs ? titleCs.fontWeight : null,
+        titleLs: titleCs ? titleCs.letterSpacing : null,
+        holderMinH: holderCs ? holderCs.minHeight : null,
+        holderMb: holderCs ? holderCs.marginBottom : null,
+        canvasRadius: canvasCs ? canvasCs.borderRadius : null,
+        canvasBg: canvasCs ? canvasCs.backgroundColor : null,
+        paperToken: toRgb(root.getPropertyValue('--qr-paper')),
+        warnFont: warnCs ? warnCs.fontSize : null,
+        warnColor: warnCs ? warnCs.color : null,
+        dangerToken: toRgb(root.getPropertyValue('--danger')),
+        warnLines: warn ? Math.round(warn.getBoundingClientRect().height / parseFloat(getComputedStyle(warn).lineHeight)) : null,
+        hasCloseBtn: !!closeBtn,
+        closeSize: closeBtn ? [Math.round(closeBtn.getBoundingClientRect().width), Math.round(closeBtn.getBoundingClientRect().height)] : null,
+        hasCloseIcon: !!closeBtn?.querySelector('svg'),
+        closeStroke: closeBtn?.querySelector('svg')
+          ? getComputedStyle(closeBtn.querySelector('svg')).strokeWidth
+          : null,
+        btnCount: document.querySelectorAll('#pairMask button').length,
+        // 底部关闭键（老项目 `button#qrClose`，无 class）
+        closeBtnText: document.getElementById('qrClose')?.textContent ?? '',
+        closeBtnW: Math.round(document.getElementById('qrClose')?.getBoundingClientRect().width ?? 0),
+        closeBtnH: Math.round(document.getElementById('qrClose')?.getBoundingClientRect().height ?? 0),
+        closeBtnUsesBoxRule: (() => {
+          const b = document.getElementById('qrClose');
+          if (!b) return false;
+          const cs = getComputedStyle(b);
+          // `.box button:not(.box-x)` 是通栏实底（老项目 :516）；若被改成透明胶囊就是没吃这条
+          return cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.width !== 'auto';
+        })(),
+      };
+    });
+    assert.equal(q.boxAlign, 'center', '.qr-box 应 text-align:center');
+    assert.equal(q.titleFont, '18px', `标题应 18px，实际 ${q.titleFont}`);
+    assert.equal(q.titleWeight, '600', `标题应 600，实际 ${q.titleWeight}`);
+    assert.equal(q.titleLs, '0.36px', `标题字距应 .02em=0.36px，实际 ${q.titleLs}`);
+    assert.equal(q.holderMinH, '236px', `码区最小高应 236px，实际 ${q.holderMinH}`);
+    assert.equal(q.holderMb, '12px', `码区下边距应 12px，实际 ${q.holderMb}`);
+    assert.equal(q.canvasRadius, '12px', `码圆角应 12px，实际 ${q.canvasRadius}`);
+    assert.equal(q.canvasBg, q.paperToken, `码底色应吃 --qr-paper 令牌（实测 ${q.canvasBg}）`);
+    assert.equal(q.warnFont, '12px', `警示字号应 12px，实际 ${q.warnFont}`);
+    assert.equal(q.warnColor, q.dangerToken, `警示颜色应吃 --danger 令牌（实测 ${q.warnColor}）`);
+    // 🔴🔴 反向钉死（我第一版把方向写反了，被判据自己抓出来）：
+    //   老项目 `index.html:771-780` 的**扫码配对面板没有右上角 X** ——
+    //   结构是 `.box.qr-box > h1.qr-title + p + #qrHolder + p.qr-warn + button#qrClose`，
+    //   退出只有底部那个「关 闭」按钮。
+    //   （有 `.box-x` 的是 `#remPanel` 那个**提醒**面板，见 index.html:679。）
+    //   我写判据时凭"弹窗就该有关闭键"的常识写了 `assert.ok(hasCloseBtn)`，
+    //   结果第一条就红 —— 是**判据**错，不是产品错。教训与"菜单那个 X"同源：
+    //   「该有/不该有」必须查老项目源码，不能凭常识。
+    assert.equal(
+      q.hasCloseBtn,
+      false,
+      '扫码配对面板不该有右上角 .box-x（老项目 :771-780 只有底部「关 闭」按钮）',
+    );
+    // 底部关闭键必须在（老项目 `button#qrClose`）
+    assert.equal(q.btnCount, 1, `配对面板应只有 1 个按钮（关 闭），实际 ${q.btnCount}`);
+    assert.ok(q.closeBtnText.length > 0, '底部关闭键必须有文案');
+    assert.ok(
+      q.closeBtnW > 0 && q.closeBtnH >= 44,
+      `关闭键触控区应 ≥44px 高（顶栏触控区纪律），实际 ${q.closeBtnW}x${q.closeBtnH}`,
+    );
+    assert.equal(
+      q.closeBtnUsesBoxRule,
+      true,
+      '关闭键必须吃 `.box button` 的通栏规则（老项目 :516 同款），不许自定义成小胶囊',
+    );
+  } finally {
+    await page.close();
+  }
+});

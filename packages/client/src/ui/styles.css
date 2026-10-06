@@ -283,19 +283,28 @@ svg .gf { fill: var(--accent); stroke: none; }
    差异同样体现在整盒高度上：bj 此前 min-height:1.2em / margin-top:8px / 12.5px，
    与老项目的 20px / 10px+6px / 13px 都不一致 ⇒ 弹窗整体比老项目矮一截。 */
 .err { min-height: 20px; margin: 10px 0 6px; font-size: 13px; color: var(--danger); }
-/* 🔴 主按钮：老项目 index.html:516 `.box button:not(.box-x){width:100%;height:46px;...;
-   letter-spacing:.08em}`。原先 padding:11px + `letter-spacing:4px`。
-   4px 是**绝对值**：老项目 .08em 会随字号缩放，而 4px 在 15px 字号下
-   等于 .267em —— 字距宽到「解 锁」两个字被拉散，是那种并排才看出来的松散感。 */
-.box > button#ok {
-  width: 100%; height: 46px; margin-top: 6px; padding: 0 14px;
+/* 🔴🔴🔴 主按钮规则必须与老项目 index.html:516 **同选择器**，不能只管 #ok：
+     老项目是 `.box button:not(.box-x){width:100%;height:46px;…;letter-spacing:.08em}`
+     —— 弹窗里**每一个**按钮（扫码配对的「关 闭」、换机的「生成备份码」/「取消」、
+     提醒面板的按钮…）都吃这条通栏 46px 高规则。
+     bj 此前写的是 `.box > button#ok`，于是只有 #ok 吃到，别的按钮退回浏览器默认：
+     量化实测 `qrClose` 是 **36x26**（老项目 46px 高、100% 宽）。
+     症状很轻（"按钮小一号"），但它是用户报障第 3 条
+     「扫一扫、二维码配对弹窗下面两个按钮也不一样」的**真实根因**。
+     `:not(.box-x)` 的排除是承重的：.box-x 是 36x36 的方键，
+     被通栏规则按优先级覆盖会被渲染成 46px 高的实底条（老项目 v6.2 专门为此加的排除）。 */
+.box button:not(.box-x) {
+  width: 100%; height: 46px; padding: 0 14px;
   border-radius: 10px; background: var(--upload-bg); color: var(--bg);
   font-size: 15px; font-weight: 500; letter-spacing: .08em;
   transition: opacity .2s ease;
 }
-.box > button#ok:hover { opacity: .85; }
-.box > button#ok:active { opacity: .75; }
-.box > button#ok:disabled { opacity: .35; cursor: not-allowed; }
+.box button:not(.box-x):hover { opacity: .85; }
+.box button:not(.box-x):active { opacity: .75; }
+.box button:not(.box-x):disabled { opacity: .35; cursor: not-allowed; }
+/* 老项目 .box button 的 margin-top 是 0；#ok 在老项目里也没有额外上边距，
+   bj 此前给 #ok 单加了 margin-top:6px —— 那会让弹窗第一个按钮与上方内容脱开一截。
+   🔴 保持与老项目一致：不加。若将来要加，必须同步量老项目。 */
 /* 🔴🔴 首页提示页（老项目 index.html:541-544 逐字）：
      .home{…padding:20px;text-align:center}
      .home h1{font-family:var(--serif);font-weight:500;font-size:24px;margin:0 0 12px;letter-spacing:.04em}
@@ -1156,8 +1165,13 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
    给 z70 反而会盖住 HUD（退出键看得见点不动）。 */
 .ns-pet-stage, .ns-mirror-stage { position: fixed; inset: 0; z-index: 1;
   display: flex; align-items: center; justify-content: center; background: transparent; }
-.ns-pet { font-size: 64px; cursor: pointer; user-select: none;
-  transition: transform .2s; }
+/* 🦀 桌宠本体：老项目是**SVG**（viewBox 0 0 26 26），不是 emoji。
+   此前这里写 `font-size:64px` 是给 🐾 字形设的，改成 SVG 后那个尺寸会把螃蟹撑得过大。
+   老项目在顶栏里是 26px 级的"小螃蟹"；这里摆在彩蛋页中央，给到 96px 与"居中展示"相称，
+   但**比例必须按 viewBox 走**（1:1），不能压扁。 */
+.ns-pet { width: 96px; height: 96px; cursor: pointer; user-select: none;
+  color: var(--fg); transition: transform .2s; }
+.ns-pet svg { width: 100%; height: 100%; display: block; }
 .ns-pet.jump { transform: translateY(-22px); }
 .ns-mirror-box { max-width: min(90vw, 560px); max-height: 70vh; overflow: auto;
   padding: 18px; background: var(--box-bg); border: 1px solid var(--line);
@@ -1294,6 +1308,13 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
    这正是用户报障第 3 条「扫码配对弹窗文字与大小不同」。
    🔴 修法是**补选择器**而不是改那三处调用点的类名 ——
    "类名与老项目逐字对应"是本项目的约定，改类名会把它破掉。 */
+/*🔴🔴 这三条警示是 `.qr-box` 里的 `<p>`，所以 `.qr-box p { margin:0 0 14px }`
+   （老项目 :527）**会覆盖**下面的 `margin: 0 0 16px` —— 同一个坑老项目也有。
+   🔴 那为什么不在这里直接写 14px：老项目 `.qr-warn` 也写 16px、也生效成14px，
+   **声明值与老项目逐字一致**是本项目的约定（类名/字面量对齐是契约，见上方注释），
+   而"实际生效 14px"两边也一样 ⇒ 观感一致，不需要改。
+   写清这一点是为了免得下次有人"顺手改成 16px"—— 那才会真的与老项目不同。
+   若将来老项目改了 `.qr-box p`，两边会一起变，仍保持一致。 */
 .ns-qr-warn { font-size: 12px; color: var(--danger); line-height: 1.65; margin: 0 0 16px; }
 .ns-lock-warn { font-size: 13px; color: var(--muted); line-height: 1.7; }
 .ns-ghost-btn { background: transparent !important; }
