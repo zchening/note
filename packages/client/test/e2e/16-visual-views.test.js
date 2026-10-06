@@ -1121,7 +1121,9 @@ test('VVW-12 🔴🔴 彩蛋徽章必须在顶栏品牌内联（不是 fixed 浮
  *   预览是"点开/收起"同一个按钮的两种结果（老项目同款），所以要连点两次验收起，
  *   否则"只会开不会收"也是一种坏，而只点一次的断言看不见。
  */
-test('VVW-06 🔴 历史每行 [预览][恢复] 两枚按钮，预览能内联展开也能收起', async () => {
+// 🔴 编号 VVW-13：此前与关于页那条**重号**（都叫 VVW-07），
+//   重号会让失败定位指向错的用例（同 S4-C6 撞号的教训）。
+test('VVW-13 🔴 历史每行 [预览][恢复] 两枚按钮，预览能内联展开也能收起', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'vvw06', 'pw');
   try {
     await openMenu(page);
@@ -1188,6 +1190,88 @@ test('VVW-06 🔴 历史每行 [预览][恢复] 两枚按钮，预览能内联�
     }));
     assert.ok(closed.menuStillOpen, '收起预览不该关菜单');
     assert.equal(closed.rowOpen, false, '收起后 hist-open 类应去掉');
+  } finally {
+    await page.close();
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 链接打开方式二级页（用户报障第 4 条）
+ * 「设置链接弹窗不同…且没有显示系统浏览器图标…没有选中状态」
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴 这条盯的是三处**同时**缺失的组合，缺任一条测试都会红：
+ *   ① 两行各自的**专属图标**（应用内=手机 / 系统浏览器=地球）。
+ *      bj 此前是一个**通用槽位**，浏览器那行干脆没图标
+ *      —— 而"两行各一个图标"正是这个控件是"二选一"而非"两个链接"的视觉暗示。
+ *   ② 选中标记是**对勾**（老项目 `.tick`），不是五角星。
+ *      复选框画成星星 ⇒ 语义变成"收藏"，用户会误操作。
+ *   ③ `.tick` 默认 `visibility:hidden`、选中才 visible
+ *      —— 靠可见性表达选中，而不是插/删 DOM（两行结构对称，切换时不跳行）。
+ *
+ * 🔴 判据同时钉 aria-checked 与视觉可见性：**两个都要**。
+ *   只钉 aria 的话，"样式全丢"的退化测不出来（属性照样在）。
+ */
+test('VVW-14 🔴 链接打开方式：两行各有专属图标 + 选中行显示对勾', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw14', 'pw');
+  try {
+    await openMenu(page);
+    await page.click('#menuLink');
+    await page.waitForSelector('#linkInApp', { timeout: 10_000 });
+
+    const rows = await page.evaluate(() =>
+      ['linkInApp', 'linkBrowser'].map((id) => {
+        const r = document.querySelector('#' + id);
+        const tick = r?.querySelector('.tick');
+        return {
+          id,
+          checked: r?.getAttribute('aria-checked') ?? null,
+          // 专属图标 = 第一个 svg（第二个是 .tick 对勾）
+          iconPaths: (r?.querySelectorAll('svg')[0]?.querySelectorAll('path,rect,circle').length) ?? 0,
+          iconW: Math.round(r?.querySelectorAll('svg')[0]?.getBoundingClientRect().width ?? 0),
+          tickExists: !!tick,
+          tickVisible: tick ? getComputedStyle(tick).visibility : '(no tick)',
+          rowH: Math.round(r?.getBoundingClientRect().height ?? 0),
+        };
+      }),
+    );
+
+    const [inApp, browser] = rows;
+    // ① 两行都必须有专属图标，且尺寸一致（老项目 26px）
+    for (const r of rows) {
+      assert.ok(r.iconPaths > 0, `${r.id} 缺专属图标（用户报障「没有显示系统浏览器图标」）`);
+      assert.equal(r.iconW, 26, `${r.id} 图标尺寸应 26px，实际 ${r.iconW}`);
+    }
+    // 🔴 浏览器那行不能是"没有图标"（这条单独立一条，因为它是用户原话点名的）
+    assert.ok(browser.iconPaths > 0, '系统浏览器一行没有图标');
+    assert.notEqual(inApp.iconPaths, 0, '应用内一行没有图标');
+
+    // ②③ 两行都必备 .tick，且**恰好一行**可见
+    for (const r of rows) {
+      assert.ok(r.tickExists, `${r.id} 缺 .tick 选中标记容器`);
+    }
+    assert.equal(inApp.tickVisible, 'visible', '应用内（默认选中）应显示对勾');
+    assert.equal(browser.tickVisible, 'hidden', '系统浏览器未选中时对勾应隐藏');
+    // 行高与老项目一致 46px
+    for (const r of rows) assert.equal(r.rowH, 46, `${r.id} 行高应 46px，实际 ${r.rowH}`);
+
+    // 切到浏览器：勾必须跟着走（这是"选中状态"的核心行为）
+    await page.click('#linkBrowser');
+    await page.waitForTimeout(400);
+    const after = await page.evaluate(() =>
+      ['linkInApp', 'linkBrowser'].map((id) => ({
+        id,
+        checked: document.querySelector('#' + id)?.getAttribute('aria-checked'),
+        tickVisible: document.querySelector('#' + id + ' .tick')
+          ? getComputedStyle(document.querySelector('#' + id + ' .tick')).visibility
+          : '(no tick)',
+      })),
+    );
+    assert.equal(after[0].checked, 'false', '切到浏览器后应用内应变为未选中');
+    assert.equal(after[1].checked, 'true', '切到浏览器后浏览器应变为选中');
+    assert.equal(after[0].tickVisible, 'hidden', '切走后应用内的对勾应隐藏');
+    assert.equal(after[1].tickVisible, 'visible', '切到浏览器后对勾应显示');
   } finally {
     await page.close();
   }

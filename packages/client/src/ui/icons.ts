@@ -253,6 +253,23 @@ export const ICON_GLOBE = (): string =>
 export const ICON_CHECK = (): string =>
   TOP('<path class="g" d="m5 12.5 4.5 4.5L19 7.5"/>');
 
+/* ---------------- 链接打开方式（二级页两枚专属图标）----------------
+ * 🔴 逐字抄老项目 index.html 的两个 path（用户报障第 4 条
+ *   「没有显示系统浏览器图标」—— bj 此前两行共用一个通用槽位，
+ *   浏览器那行干脆没图标）。SVG path 一个坐标都不能改，
+ *   改了就是"另一个图标"而不是"同一个图标"。 */
+
+/** 应用内打开：手机 + 底部横条（老项目 `#linkOptInapp` 的 svg） */
+export const ICON_LINK_APP = (): string =>
+  MENU('<rect x="6.6" y="3" width="10.8" height="18" rx="2.6"/>' +
+       '<path class="g" d="M10.4 17.6h3.2"/>');
+
+/** 系统浏览器打开：地球 + 经纬线（老项目 `#linkOptBrowser` 的 svg） */
+export const ICON_LINK_BROWSER = (): string =>
+  MENU('<circle cx="12" cy="12" r="8.5"/>' +
+       '<path class="g" d="M3.6 12h16.8"/>' +
+       '<path d="M12 3.5c2.4 2.2 3.6 5 3.6 8.5s-1.2 6.3-3.6 8.5c-2.4-2.2-3.6-5-3.6-8.5S9.6 5.7 12 3.5Z"/>');
+
 /** 游戏喇叭（彩蛋层音效开关） */
 export const ICON_SPEAKER = (): string =>
   svg('<path d="M4 9.5h3.2L12 5.2v13.6L7.2 14.5H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z"/>' +

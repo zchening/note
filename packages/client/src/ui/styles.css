@@ -533,10 +533,14 @@ header.ns-top {
    底色只盖住 14×0 的小把手盒（index.html:400）。
    🔴 本项目的把手是 0×0 的 ::before，直接 background 什么都画不出来
      （内容盒面积为 0），故用 spread 阴影把一小块圆角底补在三角周围。
-     spread 7 + 4px 偏移 ⇒ 约14×14 的圆角块，与老项目把手盒同量级。 */
+   🔴🔴 偏移必须是 **0**（此前写的 `4px 0 0 7px` 把阴影整体右移了 4px）——
+     三角本体在 ::before 的中心，而阴影盒从元素盒左上角起算，
+     右移 4px 后底色与三角**错位**，用户看到的就是
+     「鼠标移上去三角变形/底色歪到一边」（用户报障第 5 条）。
+     spread 7px 让 0×0 的盒长成 14×14，正好盖住 8×8 的三角。 */
 .ns-fold > :first-child:hover::before {
   border-radius: 7px;
-  box-shadow: 4px 0 0 7px var(--hover);
+  box-shadow: 0 0 0 7px var(--hover);
 }
 /* 命中区放大：老项目 index.html:399 在把手上挂一枚absolute 的透明 ::after
    （18×20）——因为三角改用边框画之后 span 自身盒高恒为 0，桌面唯一命中面
@@ -738,6 +742,18 @@ footer.ns-foot .dot.off { background: var(--danger); }
   background: var(--accent); margin-right: 8px; flex: none;
 }
 .link-hint { margin: 2px 6px 0; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+/* 🔴🔴 链接打开方式那一页的选中标记（用户报障第 4 条「没有选中状态」）。
+   老项目原文 `.tick{margin-left:auto;width:16px;height:16px;color:var(--accent);
+   visibility:hidden}` —— **默认隐藏、选中才 visible**，
+   靠 CSS 可见性表达"选中"而不是插/删 DOM（两个选项行结构完全对称，切换时不会跳）。
+   🔴 bj 此前既没有 .tick 规则、也没有对勾图标（拿五角星顶替），
+   于是这一页**没有任何选中态**。
+   aria-checked 由 markup 提供，.tick 只管视觉——两者都要，别只做其中一个。 */
+.tick { margin-left: auto; width: 16px; height: 16px; color: var(--accent); visibility: hidden; }
+[aria-checked="true"] > .tick { visibility: visible; }
+.tick svg { width: 16px; height: 16px; display: block; }
+/* 🔴 两行各自的专属图标：尺寸与菜单项其它图标一致（老项目 .menu-item svg 同款） */
+.menu-item.link-opt > svg { width: 26px; height: 26px; flex: none; }
 .empty { padding: 26px 0; text-align: center; font-size: 13px; color: var(--muted); }
 /* 列表行：与主菜单同族的胶囊行（老项目 .fav-row index.html:456）。
    🔴 三列各自定宽：图标列 / 名字列 / 右箭头列 —— 与主菜单的"112px 标签列"是同一种

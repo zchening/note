@@ -16,6 +16,7 @@ import { COPY, MENU_ITEM_IDS } from './copy.ts';
 import { escapeTrunc } from './escape.ts';
 import {
   ICON_BACK,
+  ICON_CHECK,
   ICON_CHEVRON,
   ICON_CLOCK,
   ICON_FOLDER,
@@ -24,6 +25,8 @@ import {
   ICON_INFO,
   ICON_KEY,
   ICON_LINK,
+  ICON_LINK_APP,
+  ICON_LINK_BROWSER,
   ICON_LOCK,
   ICON_MOON,
   ICON_PAW,
@@ -343,15 +346,28 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
   };
 
   const renderLink = (): string => {
-    const row = (id: string, label: string, on: boolean): string =>
-      `<div class="menu-item" id="${id}" role="radio" aria-checked="${on}" tabindex="0">` +
-      `<span class="ic">${on ? ICON_STAR(true) : ''}</span><span class="mi-l">${label}</span></div>`;
+    // 🔴🔴 这一页此前有三处与老项目不一致（用户报障第 4 条
+    //「设置链接弹窗不同、菜单栏间距不同，且**没有显示系统浏览器图标**、
+    //   **没有选中状态**」）：
+    //   ① 选中标记用了 **五角星**（ICON_STAR(true)）—— 老项目是**对勾** `.tick`。
+    //      复选框画成星星，语义完全不对（用户会以为"收藏"）。
+    //   ② **系统浏览器那一行没有图标**：老项目两行各有一个**专属**图标
+    //      （应用内=手机、浏览器=地球），bj 只有一个通用槽位。
+    //   ③ `.tick` 靠 CSS `visibility:hidden` 默认隐藏、选中才 visible；
+    //      bj 压根没有 `.tick` 规则，也就没��"选中态"这个视觉。
+    //   修法：每行传入自己的图标 + 用 ICON_CHECK 做对勾，并补 `.tick` 的 CSS。
+    const row = (id: string, label: string, on: boolean, icon: string): string =>
+      `<div class="menu-item link-opt" id="${id}" role="radio" aria-checked="${on}" tabindex="0">` +
+      `${icon}` +
+      `<span class="mi-l">${label}</span>` +
+      `<span class="tick">${ICON_CHECK()}</span>` +
+      `</div>`;
     return (
       `${head(COPY.menuLink)}` +
       `<div class="list-kicker">${COPY.linkKicker}</div>` +
       `<div class="menu-view">` +
-      row('linkInApp', COPY.linkInApp, st.linkInApp) +
-      row('linkBrowser', COPY.linkBrowser, !st.linkInApp) +
+      row('linkInApp', COPY.linkInApp, st.linkInApp, ICON_LINK_APP()) +
+      row('linkBrowser', COPY.linkBrowser, !st.linkInApp, ICON_LINK_BROWSER()) +
       `</div><div class="link-hint">${COPY.linkHint}</div>`
     );
   };
