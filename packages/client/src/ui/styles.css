@@ -160,23 +160,58 @@ svg .gf { fill: var(--accent); stroke: none; }
    🔴 max-width:340 不是装饰：老项目整行锁 340px，两侧留白相等；
      不写的话 bj 行宽 342 且随视口拉伸，与老项目在**任何**非 342px 宽的屏上都不齐。 */
 .lrow { display: flex; gap: 10px; max-width: 340px; width: 100%; }
+/* 🔴🔴 落地页这一段逐值抄老项目（用户报障第 1 条：图标/字体/文字位置/按钮颜色都不同）。
+   量化依据（390×844 并排探针实测，见 _diff_result_20261006.txt）：
+     老项目 input  : h=46 w=250.19 line-height=normal
+     bj改前        : h=48 w=264    line-height=24px
+   老项目原文：
+     #landing input{flex:1;height:46px;padding:0 16px;...;font-size:15px;outline:0;
+                    background:var(--box-bg);color:var(--fg);
+                    transition:border-color .2s,box-shadow .2s}
+     #landing button{height:46px;padding:0 24px;border:0;border-radius:10px;
+                    background:var(--fg);color:var(--bg);font-size:15px;
+                    font-weight:500;letter-spacing:.06em;cursor:pointer;white-space:nowrap}
+🔴 height 46 + padding 0 16px 是"文字上下居中"的成因：bj 此前用 padding 11px12px + 无固定高，
+   行高被 24px 撑到 48px，文字基线整体下移 —— 这就是用户说的"文字位置不同"。
+   🔴 line-height 用 normal（老项目原文）而不是固定 px：按钮是 flex 居中，固定行高会再偏 1px。 */
 .lrow input {
-  flex: 1; min-width: 0;
+  flex: 1; min-width: 0; height: 46px;
   background: var(--box-bg);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 11px 12px;
+  padding: 0 16px;
   font-size: 15px;
+  line-height: normal;
+  color: var(--fg);
   outline: none;
+  transition: border-color .2s, box-shadow .2s;
 }
 .lrow input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 .lrow button {
-  flex: none; padding: 0 18px; border-radius: 10px;
-  background: var(--upload-bg); color: var(--bg);
-  font-size: 15px; font-weight: 500;
+  flex: none; height: 46px; padding: 0 24px; border: 0; border-radius: 10px;
+  background: var(--fg); color: var(--bg);
+  font-size: 15px; font-weight: 500; letter-spacing: .06em;
+  line-height: normal;
+  cursor: pointer; white-space: nowrap;
+  transition: opacity .2s;
 }
-.dark .lrow button { color: var(--bg); }
-.lrow button:disabled { opacity: .35; cursor: not-allowed; }
+.lrow button:hover { opacity: .85; }
+/* 🔴🔴 禁用态必须**换底色+换字色**，不能只压 opacity（用户报障第 1 条
+   「打开按钮和扫码打开笔记按钮初始颜色不同」——量化实测：
+     老项目 disabled:底 rgb(236,234,226)=--line，字 rgb(152,149,138)=--muted
+     bj 改前       : 底 rgb(28,28,26)=--fg（深），字 rgb(251,251,248)=--bg（白）= 看着像可用态
+   老项目原文：#landing button:disabled{background:var(--line);color:var(--muted);
+     cursor:not-allowed;box-shadow:none;opacity:1}
+   🔴 opacity:1 是关键：它把"禁用"这件事从"变淡"改成"换配色"，
+     于是禁用态与可用态**同一个形状**、不同的颜色 —— 这才是老项目的视觉语言。 */
+.lrow button:disabled {
+  background: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 1;
+}
+.lrow button:disabled:hover { opacity: 1; }
 .warn { margin-top: 8px; font-size: 12px; color: var(--danger); }
 .hidden { display: none !important; }
 .lurl { margin-top: 10px; font-size: 12px; color: var(--muted);
