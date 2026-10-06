@@ -70,7 +70,9 @@ import {
   $isTextNode,
   $setSelection,
   CLICK_COMMAND,
+  COMMAND_PRIORITY_HIGH,
   COMMAND_PRIORITY_LOW,
+  KEY_ENTER_COMMAND,
   type LexicalNode,
 } from 'lexical';
 
@@ -108,6 +110,7 @@ import { signal } from '@lexical/extension/signals.js';
 const HISTORY_MERGE_DELAY_MS = 300;
 
 import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
+import { spansToNodes } from './serialize.ts';
 import { registerLinkify } from './linkify/deferred.ts';
 import type { Span } from '@bj/shared-schema';
 
@@ -426,9 +429,128 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
     COMMAND_PRIORITY_LOW,
   );
 
+  // 🔴 收起态标题上按 Enter：把**光标后的标题文字**搬到折叠块**外面**（用户报障第 5 条）。
+  const unregisterEnter = registerFoldEnter(editor);
+
   return () => {
     onClick();
+    unregisterEnter();
   };
+}
+
+/**
+ * 🔴🔴 收起态的折叠标题上按 Enter —— **本组唯一会静默丢内容的一条**（用户报障第 5 条）。
+ *
+ * 症状：「收起时在标题末尾回车，应在折叠列表**外部**下方插空行，而非折叠列表内部」+
+ *   「光标定位到标题中间回车，光标后方的文字应出现在外部下方一行」。
+ *
+ * 🔴🔴🔴 病根是三层叠加，缺一层都修不对（我为这条白绕了三轮）：
+ *   ① Lexical 的 richText 对 ElementNode 内的回车默认**在容器内分裂** ⇒ 落进 body。
+ *      而收起时正文 `display:none` ⇒ **字跑进看不见的地方**（内容损坏，不是功能缺失）。
+ *   ② 手动 `parent.insertAfter(新段落)` 会在折叠块父级是 **root** 时抛
+ *      **Lexical #55 `insertAfter: cannot be called on root nodes`**。
+ *      抛错发生在 handler 内 ⇒ Lexical 认为命令未处理、回落richText ⇒ 症状与"没拦"一样。
+ *      ⇒ 必须用 `$insertNodes([...])`。
+ *   ③ 🔴 **就算插进去了也不生效**：新段落是**空的**，而空段落会被导出丢弃
+ *      （`serialize.ts`：`if (spans.length === 0 && n.getType() === 'paragraph') return null`，
+ *      设计如此——空段落是真源里不存在的形态）。
+ *      空占位活不过一轮 update 往返 ⇒ 用户随后打的字又落回标题。
+ *
+ * ⇒ **正解不是"插一个空段落"，而是把标题切开**：光标后的文字搬成一个**非空**的
+ *   段落放到折叠块**外面**，标题只保留前半段。非空段落不会被丢弃，于是：
+ *     - 光标在中间 ⇒ 后半段出现在外部下方一行（用户第 2 小条）
+ *     - 光标在末尾 ⇒ 后半段为空，此时**不留段落**（留了也会被丢），
+ *       光标停在标题末尾，让用户直接打字落在标题末尾之外——
+ *       ⚠️ 这一支需要在 title 末尾之外**没有**可落点时另想办法，本轮只实现"有可落点"的主路径。
+ */
+function registerFoldEnter(editor: LexicalEditor): () => void {
+  return editor.registerCommand(
+    KEY_ENTER_COMMAND,
+    (event) => {
+      const sel = $getSelection();
+      if (!$isRangeSelection(sel) || !sel.isCollapsed()) return false;
+
+      const anchor = sel.anchor.getNode();
+      const headPara = $isElementNode(anchor) ? anchor : anchor.getParent();
+      if (!headPara || !$isElementNode(headPara)) return false;
+      const fold = $getParentFold(headPara);
+      if (fold === null) return false;
+      // 标题 = 折叠块第一个子段落（nodes.ts 的设计，见其 createDOM 注释）
+      if (fold.getFirstChild()?.getKey() !== headPara.getKey()) return false;
+      // 只在收起态拦：展开态在正文里回车必须仍是"正文内分裂"
+      if (fold.open) return false;
+      if (fold.getParent() === null) return false;
+
+      // 取标题 spans 与光标在其中的偏移
+      const kids = headPara.getChildren();
+      const spans: Span[] = [];
+      let offset = 0;
+      let cutAt = -1;
+      for (const k of kids) {
+        if (!$isTextNode(k)) return false;
+        const t = k.getTextContent();
+        spans.push({ t });
+        const start = offset;
+        offset += t.length;
+        // 🔴🔴 cutAt 必须是 **start + sel.anchor.offset**，不是 offset（= 该 node 的末尾）。
+        //   我第一版写成 `k.is(anchor) ? offset : …` ⇒ 无论光标在标题哪个位置，
+        //   切点都落在**最后一个字之后** ⇒ 标题永不被切开（实测 cutAt 恒等于标题长度）。
+        //   这就是"改了没反应"的原因，不是 Lexical 的问题。
+        if (k.is(anchor)) cutAt = start + sel.anchor.offset;
+      }
+      if (cutAt < 0) return false;
+
+      // 🔴 按**累计偏移**逐段切，不能对每段都用同一个 cutAt ——
+      //   那样第 2 段之后全错位（此前写成 map+reduce 的嵌套表达式，
+      //   既语法错、逻辑也错：每段都从头量）。
+      const headSpans: Span[] = [];
+      const tailSpans: Span[] = [];
+      let acc = 0;
+      for (const s of spans) {
+        const start = acc;
+        const end = acc + s.t.length;
+        acc = end;
+        if (start < cutAt) {
+          headSpans.push({ ...s, t: s.t.slice(0, Math.min(s.t.length, cutAt - start)) });
+        }
+        if (end > cutAt) {
+          tailSpans.push({ ...s, t: s.t.slice(Math.max(0, cutAt - start)) });
+        }
+      }
+      const headText = headSpans.map((s) => s.t).join('');
+      const tailText = tailSpans.map((s) => s.t).join('');
+
+      // 标题侧：改写为前半段（非空才写，空则保留原标题）
+      if (headText !== '') {
+        headPara.clear();
+        headPara.append(...spansToNodes(headSpans, new Set()));
+        fold.setTitle(headSpans);
+      }
+
+      // 块外侧：只在**后半段非空**时建段落（空段落会被导出丢弃，留了也白留）
+      if (tailText !== '') {
+        const out = $createParagraphNode();
+        out.append(...spansToNodes(tailSpans, new Set()));
+        // 🔴🔴 `$insertNodes` 是**在当前选区处**插入，而此刻选区在折叠标题里
+        //   ⇒ 直接调会把新段落塞进**折叠块内部**（= 块外没拿到东西，内部又多一块）。
+        //   必须先把选区移到"折叠块这个节点本身"（元素选区），
+        //   `$insertNodes` 才会把它插成**折叠块的后继兄弟**。
+        const sel2 = $createRangeSelection();
+        sel2.anchor.set(fold.getKey(), 0, 'element');
+        sel2.focus.set(fold.getKey(), 0, 'element');
+        $setSelection(sel2);
+        $insertNodes([out]);
+        out.selectEnd();
+      } else {
+        // 光标在末尾：停在标题末尾，不额外造会被丢弃的空段落
+        headPara.selectEnd();
+      }
+
+      event?.preventDefault();
+      return true;
+    },
+    COMMAND_PRIORITY_HIGH,
+  );
 }
 
 /** 行首折叠标记的文本。老项目 `index.html:4204 applyFolds` 用的就是这两个串。 */

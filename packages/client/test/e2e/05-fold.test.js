@@ -32,6 +32,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const WWW = resolve(HERE, '..', '..', '..', '..', 'www');
 
 const h = installHarness(test, { dir: WWW });
+const PASS = 'pw';
 
 /** 真源的 canonical 字节（判"开合态有没有污染真源"必须用它，不能比对象）。 */
 const canon = (page) =>
@@ -272,6 +273,92 @@ test('FOLD-TITLE1折叠标题可以直接改（真源跟着变）', async () => 
     assert.ok(
       title.includes('ZZZ'),
       `改标题后真源应含新文字，实际 title="${title}"（原"${before}"）—— 又变回"DOM 变了模型没变"`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 收起态折叠标题按 Enter：光标后的标题文字落到折叠块**外面**
+ * （用户报障第 5 条 —— 本组唯一会静默丢内容的一条）
+ * ══════════════════════════════════════════════════════════════════════
+
+/**
+ * 🔴🔴 判据钉的是**真源里字落在哪**，不是"多了一个空段落"：
+ *   空段落是真源里不存在的形态（serialize.ts 会丢掉它），
+ *   所以"回车后多一个 p"这条断言根本不可能成立（我第一版就这么写的，红了一轮）。
+ *
+ * 🔴 为什么正解是"切开标题"而不是"插一个空段落"：
+ *   空段落活不过一轮 update 往返（导出时被丢）⇒ 空占位消失 ⇒ 随后打的字落回标题。
+ *   把后半段文字搬成**非空**段落，它就不会被丢。
+ *
+ * 🔴 光标位置用钩子的 offset 参数给准（键盘方向键在无头下移不动 Lexical 内部选区）。
+ * 反向闸见FOLD-ENTER2：展开态在正文回车必须仍是"正文内分裂"。
+ */
+test('FOLD-ENTER1 标题中间回车：后半段文字落到折叠块**外面**', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fe1', PASS);
+  try {
+    // 造一个折叠块并收起；标题改成 ABCDEF 以便观察切分
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+    await page.click('.ns-fold > :first-child');
+    await new Promise((r) => setTimeout(r, 350));
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
+    await new Promise((r) => setTimeout(r, 200));
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Shift+End');
+    await page.keyboard.type('ABCDEF');
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 🔴 用钩子把光标放到标题第 3 字后（键盘方向键在无头下移不动 Lexical 选区）
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__(3));
+    await new Promise((r) => setTimeout(r, 250));
+    await page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const blocks = doc.blocks || [];
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    assert.ok(fi >= 0, '真源里应有 fold 块：' + JSON.stringify(blocks.map((b) => b.t)));
+    const foldTitle = blocks[fi].title?.[0]?.t ?? '';
+    const outsideText = JSON.stringify(blocks.slice(fi + 1));
+    // 标题应只剩前半段
+    assert.ok(foldTitle.length < 6, `标题应被切开，实际仍为「${foldTitle}」`);
+    // 后半段应出现在块外
+    assert.ok(outsideText.includes('DEF') || outsideText.includes('EF') || outsideText.includes('F'),
+      `后半段文字应落到折叠块外面，实际 outside=${outsideText}`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('FOLD-ENTER2 反向闸：展开态在正文里回车，字仍留在折叠块**内部**', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fe2', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+    // 新建折叠块默认展开
+    assert.equal(await page.getAttribute('.ns-fold', 'data-open'), 'true', '前置：应为展开态');
+
+    assert.equal(await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_BODY_START__()), true,
+      '应能把光标放进折叠正文开头');
+    await new Promise((r) => setTimeout(r, 250));
+    await page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+    await page.keyboard.type('YYY');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const blocks = await page.evaluate(() => window.__NOTESYNC_DOC__().blocks || []);
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    assert.ok(fi >= 0, '真源里应有 fold 块');
+    assert.ok(
+      JSON.stringify(blocks[fi].children || []).includes('YYY'),
+      '展开态在正文回车，字应留在折叠块**内部**（反向闸），实际=' + JSON.stringify(blocks[fi]),
     );
   } finally {
     await page.close();

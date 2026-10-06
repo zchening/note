@@ -112,7 +112,7 @@ function isEmptySpan(s: Span): boolean {
 // 模型 → Lexical
 // ─────────────────────────────────────────────────────────────────────────
 
-function spansToNodes(ss: readonly Span[] | undefined, remIds: ReadonlySet<string>): LexicalNode[] {
+export function spansToNodes(ss: readonly Span[] | undefined, remIds: ReadonlySet<string>): LexicalNode[] {
   const out: LexicalNode[] = [];
   for (const s of ss ?? []) {
     if (isEmptySpan(s)) continue;

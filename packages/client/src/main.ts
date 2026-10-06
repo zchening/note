@@ -111,7 +111,7 @@ declare global {
      *
      * 三个位置够覆盖全部折叠交互：标题末尾 / 正文开头 / 块外最后一段末尾。
      */
-    __NOTESYNC_CARET_FOLD_TITLE_END__?: () => boolean;
+    __NOTESYNC_CARET_FOLD_TITLE_END__?: (offset?: number) => boolean;
     __NOTESYNC_CARET_FOLD_BODY_START__?: () => boolean;
     __NOTESYNC_CARET_AFTER_BLOCKS__?: () => boolean;
     /**
@@ -1267,7 +1267,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   e2e 靠它把光标准确放进"折叠标题末尾/正文开头/块外"，
   //   因为设 DOM 选区不会同步到 Lexical 内部选区（那样按键根本不进来）。
   if (ed) {
-    window.__NOTESYNC_CARET_FOLD_TITLE_END__ = () => placeCaret(ed, 'fold-title-end');
+    window.__NOTESYNC_CARET_FOLD_TITLE_END__ = (offset?: number) => placeCaret(ed, 'fold-title-end', offset);
     window.__NOTESYNC_CARET_FOLD_BODY_START__ = () => placeCaret(ed, 'fold-body-start');
     window.__NOTESYNC_CARET_AFTER_BLOCKS__ = () => placeCaret(ed, 'after-blocks');
   }

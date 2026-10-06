@@ -16,7 +16,9 @@ import {
   $getRoot,
   $getSelection,
   $insertNodes,
+  $isElementNode,
   $isRangeSelection,
+  $isTextNode,
   COMMAND_PRIORITY_EDITOR,
   type LexicalEditor,
 } from 'lexical';
@@ -72,9 +74,13 @@ function insertFoldHandler(payload: { title?: string } | undefined): boolean {
  *   拿 Lexical 节点必须用 `$getRoot()`（编辑器状态里的根节点）。
  *
  * @param where 'title-end' 标题末尾 ｜ 'body-start' 正文开头
+ * @param offset 标题内的**字符偏移**（仅 'title-end' 有效）。不传 = 末尾。
+ *   🔴 e2e 需要把光标放到标题**中间**来验"回车切开标题"（用户报障第 5 条第2 小条），
+ *   而键盘方向键在无头环境下**移不动** Lexical 内部选区（实测 cutAt 恒等于末尾），
+ *   所以必须由参数把位置**算准**，而不是靠模拟按键。
  * @returns 是否成功落到目标（false = 文档里没有折叠块）
  */
-function $caretIntoFirstFold(where: 'title-end' | 'body-start'): boolean {
+function $caretIntoFirstFold(where: 'title-end' | 'body-start', offset?: number): boolean {
   const root = $getRoot();
   const fold = root.getChildren().find((c) => $isFoldNode(c));
   if (!$isFoldNode(fold)) return false;
@@ -82,6 +88,23 @@ function $caretIntoFirstFold(where: 'title-end' | 'body-start'): boolean {
     // 🔴 标题 = 折叠块的第一个子段落（nodes.ts FoldNode 的设计，见其 createDOM 注释）
     const head = fold.getFirstChild();
     if (!head) return false;
+    if (offset === undefined) {
+      head.selectEnd();
+      return true;
+    }
+    // 落到指定字符偏移：跨多个 text node 时按累计长度找
+    if (!$isElementNode(head)) return false;
+    let acc = 0;
+    for (const k of head.getChildren()) {
+      if (!$isTextNode(k)) continue;
+      const len = k.getTextContent().length;
+      if (acc + len >= offset) {
+        const at = Math.max(0, Math.min(len, offset - acc));
+        k.select(at, at);
+        return true;
+      }
+      acc += len;
+    }
     head.selectEnd();
     return true;
   }
@@ -145,6 +168,7 @@ export function $caretInFold(): boolean {
 export function placeCaret(
   editor: LexicalEditor,
   where: 'fold-title-end' | 'fold-body-start' | 'after-blocks',
+  offset?: number,
 ): boolean {
   let ok = false;
   editor.update(
@@ -152,7 +176,7 @@ export function placeCaret(
       ok =
         where === 'after-blocks'
           ? $caretAfterAllBlocks()
-          : $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start');
+          : $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start', offset);
     },
     { discrete: true },
   );
@@ -167,9 +191,11 @@ export function placeCaret(
       rootEl.focus();
       // 🔴 focus() 之后再选一次：focus 会把 DOM caret 复位到上次位置，
       //   顺序反了的话 DOM 选区与节点选区会错位。
+      // 🔴🔴 offset **必须再传一次**：漏传会让这一次无条件落回末尾
+      //   （我第一版就漏了，于是 placeCaret(3) 实测 offset=6，前功尽弃）。
       editor.update(
         () => {
-          $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start');
+          $caretIntoFirstFold(where === 'fold-title-end' ? 'title-end' : 'body-start', offset);
         },
         { discrete: true },
       );
