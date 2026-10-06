@@ -94,41 +94,59 @@ export const EXPORT_MAX_WIDTH = 640;
 /**
  * 折叠块在导出图里的补丁样式。
  *
- * 🔴🔴 为什么必须显式补：折叠块的三角与收起态都靠 `#editor` 作用域的 ::before /
- *   `[data-open="false"]` 规则，而离屏副本**不在 #editor 里面**，一条都吃不到。
- *   老项目 v10.0.2 用户实拍报障：折叠标记在导出图里**原样显成 "[折叠]" 字**；
- *   v10.0.3 又报障：折叠正文没有缩进和左引导线（同一类根因，当时只补了三角）。
+ * 🔴🔴 为什么必须显式补：老项目 v10.0.2 用户实拍报障「折叠标记在导出图里原样显成
+ *   "[折叠]" 字」；v10.0.3 又报障「折叠正文没有缩进和左引导线」（同一类根因，
+ *   当时只补了三角）。老项目这两条能生效，是因为它的补丁与基规则**同优先级且靠后**。
  *
- * 🔴 选择器走 `[data-ns-export]` 属性而非class：编辑器 DOM 永无此属性，零渗透。
- *   （老项目用 `.ns-export` class，那会与用户正文里恰好出现的 class 名撞车。）
+ * 🔴🔴🔴 bj 与老项目的关键结构差异（上一批我写错过一次，这里是更正）：
+ *   我曾说「bj 的折叠规则锁在 `#editor` 作用域，离屏副本吃不到」—— **这句是错的**。
+ *   真相：bj 的 `.ns-fold[data-open="false"] > :not(:first-child)`
+ *   （styles.css:715）**没有锁 `#editor` 作用域**，而离屏副本是
+ *   `document.body.appendChild(wrap)`（card.ts）的**活文档**，
+ *   全局样式表对它**照吃**；`data-open="false"` 又被 `innerHTML` 原样克隆进来。
+ *   ⇒ 收起态的 `display:none` 会**跟着进导出图**，折叠正文整块丢失
+ *   （只留标题行 + ▼）。这正是用户报障第 11 条。
  *
- * 🔴 间隙必须用 px：三角挂在 font-size:0 的标记上，em 在那里归零（老项目 mockup 实锤）。
+ *   所以这里不是"副本吃不到规则"，而是**必须结构性地压过那条规则**（见下面 specificity 计算）。
  *
- * 🔴🔴 属性只准打在**折叠把手**上，绝不能打在离屏卡 wrap 上
- *   （用户报障「导出图本体…相比老版本左上角多了个箭头」，本批量化实锤）：
- *     老项目只在 `tmp.querySelectorAll('.ns-fold-mark')` 那一枚**行内小 span** 上
- *     打 `data-ns-export`（index.html:3099），所以 ▼ 只出现在折叠标题行首。
+ * 🔴🔴🔴 specificity 是这条补丁的**承重**部分，算错就静默失效：
+ *   收起态基规则 `.ns-fold[data-open="false"] > :not(:first-child)`
+ *     = .ns-fold(0,1,0) + [data-open](0,1,0) + :not(:first-child)(0,1,0)
+ *     = **(0,3,0)**    ← `:not()` 自身不贡献，取其参数的 specificity
+ *   补丁若写 `[data-ns-export-fold] > :not(:first-child)`
+ *     = (0,1,0) + (0,1,0) = **(0,2,0)** ⇒ **结构性输给它，补丁等于没写**
+ *   上一批就是这么写的，所以 425 个测试全绿、导出图照样丢正文
+ *   —— 因为既有的 8 条断言全是**正则匹配 CSS 字符串**，从不在浏览器里读 computed style。
+ *
+ *   修法（已实测四场景对照通过）：补丁选择器带上 `.ns-fold` 前缀 → **(0,3,0)** 同分，
+ *   再叠 `[data-open]` → **(0,4,0)** 结构性压过，不依赖源码顺序。
+ *   ⚠️ 别用 `!important` 糊（那是绕过问题不是解决问题，也让导出的样式没法被主题覆盖）。
+ *
+ * 🔴 间隙必须用 px：三角挂在行内，em 会随字号缩放（老项目 mockup 实锤）。
+ *
+ * 🔴🔴 属性只准打在**折叠块**上，绝不能打在离屏卡 wrap 上
+ *   （用户报障「导出图本体…相比老版本左上角多了个箭头」）：
  *     bj 此前在 buildCard 里写了 `wrap.dataset.nsExport = '1'`
  *     —— 属性落在**整张离屏卡**上，于是 `::before` 那枚 ▼ 被画在卡片正文流最前面
- *     ＝导出图左上角凭空多一个箭头；同时 `font-size:0` 还会一并作用到整张卡
- *     （那两条是给"只有 [折叠] 文本、不留字"的小 span 用的，套到卡上就是错作用域）。
- *   修法：属性下沉到折叠把手（见 buildCard），基规则改成
- *   `[data-ns-export-fold] > :first-child::before` 一条梭。
+ *     ＝导出图左上角凭空多一个箭头（那两条声明是给"只有折叠文本、不留字"的小
+ *     span 用的，套到卡上就是错作用域）。修法：属性只打在折叠块上（见 buildCard）。
  */
 export const EXPORT_FOLD_CSS = [
   // 🔴 三角：老项目出图那枚是 ▼ 字形（index.html:3104），编辑器那枚是边框画的几何
   //   三角——**两套独立画法**（老项目 v10.0.4 拍板）。
-  //   🔴🔴 bj 的折叠规则**没有锁 `#editor` 作用域**（`.ns-fold > :first-child::before`），
-  //   离屏副本会照画边框三角 ⇒ 这里不是"补一个 ▼"，而是**把边框三角换成 ▼**
-  //   （border:0 撤掉边框 + 给 content/尺寸），否则出图里会出现
-  //   "边框三角后面再跟一个 ▼"——用户看到的"多了个箭头"就是这么来的。
-  '[data-ns-export-fold] > :first-child::before{content:"\\25BC";border:0;' +
+  //   🔴 bj 的折叠规则没锁作用域 ⇒ 副本会照画边框三角，所以这里不是"补一个 ▼"，
+  //   而是**把边框三角换成 ▼**（border:0 撤掉边框 + 给 content/尺寸），
+  //   否则出图里会出现"边框三角后面再跟一个 ▼"。
+  '.ns-fold[data-ns-export-fold][data-open] > :first-child::before{content:"\\25BC";border:0;' +
   'width:auto;height:auto;font-size:12px;line-height:1.9;color:var(--muted);' +
   'vertical-align:baseline;position:static;top:auto;margin:0 7px 0 0}',
-  // 恒定展开：折叠正文在导出图里全部可见
-  '[data-ns-export-fold] > :not(:first-child){display:block}',
-  // 缩进 + 左引导线：逐字复刻基规则的 margin/padding/border-left
-  '[data-ns-export-fold] > :not(:first-child){margin-left:.5em;padding-left:1em;border-left:2px solid var(--line)}',
+  // 恒定展开：折叠正文在导出图里全部可见。
+  // 🔴🔴 选择器必须带 `.ns-fold[data-…]` 双类（0,3,0）+ 属性（0,4,0）才压得住
+  //   收起态基规则的 (0,3,0) —— 见文件头的 specificity 计算。
+  '.ns-fold[data-ns-export-fold][data-open] > :not(:first-child){display:block}',
+  // 缩进 + 左引导线：逐字复刻基规则的 margin/padding/border-left（同上，0,4,0）
+  '.ns-fold[data-ns-export-fold][data-open] > :not(:first-child){' +
+  'margin-left:.5em;padding-left:1em;border-left:2px solid var(--line)}',
 ].join('');
 
 export interface BuildCardDeps {

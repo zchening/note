@@ -21,7 +21,7 @@
 
 import { build, context } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, readdir, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, copyFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,6 +75,13 @@ const STATIC_REQUIRED = [
   'jsQR.js',
   // 二维码生成。缺 ⇒「二维码配对」弹窗一片空白。
   'qrcode-generator.js',
+  // PWA manifest。缺 ⇒ 浏览器不认为这是可安装应用，网页端装不了 PWA
+  //（用户报障第 12 条）；症状是地址栏没有"安装"图标，且**零报错**。
+  'manifest.json',
+  // PWA 图标两枚。缺 ⇒ 装完是浏览器默认图标 + 离线时 SW 预缓存拿不到。
+  'icons/icon-192.png',
+  'icons/icon-512.png',
+  'icons/icon-512-maskable.png',
 ];
 
 /**
@@ -98,11 +105,33 @@ async function materializeStatic() {
       `静态资源目录不存在：${STATIC_SRC}（${STATIC_REQUIRED.join(' / ')} 不会进 CI 产物）`,
     );
   }
-  const files = names.filter((n) => !n.startsWith('.'));
-  for (const n of files) {
-    await copyFile(join(STATIC_SRC, n), join(WWW, n));
+  const top = names.filter((n) => !n.startsWith('.'));
+  // 🔴 先量出"文件"与"目录"再动手：`stat` 要 await，不能一边遍历一边改容器。
+  const dirs = [];
+  for (const n of top) {
+    if ((await stat(join(STATIC_SRC, n))).isDirectory()) dirs.push(n);
+    else await copyFile(join(STATIC_SRC, n), join(WWW, n));
   }
-  return files;
+  // 🔴🔴 子目录必须**递归**物化，否则 icons/ 里的 PWA 图标不会进产物。
+  //   症状特别隐蔽：manifest.json 在、图标 404，构建日志里必需清单还报了缺文件，
+  //   而 index.html 里的 link 标签明明写着那个路径。（readdir 只列一层。）
+  //
+  // 🔴🔴🔴 返回值必须用**独立数组**收集，不能往 `top` 里 push：
+  //   `for (const n of top)` 迭代的是同一个数组，中途 push 会让它继续遍历新塞进去的
+  //   条目 —— 于是把 `icons/icon-192.png` 之后又轮到**目录名 `icons` 本身**，
+  //   `copyFile(dir, ...)` 直接 EPERM，构建整体失败（而 app.js 已经生成、
+  //   失败发生在最后一步 ⇒ 产物不完整却看不出）。
+  //   这个 bug 真跑过：症状是"图标目录压根没被物化 + build 以 EPERM 收尾"。
+  const out = top.filter((n) => !dirs.includes(n));
+  for (const dir of dirs) {
+    const sub = (await readdir(join(STATIC_SRC, dir))).filter((n) => !n.startsWith('.'));
+    await mkdir(join(WWW, dir), { recursive: true });
+    for (const n of sub) {
+      await copyFile(join(STATIC_SRC, dir, n), join(WWW, dir, n));
+      out.push(`${dir}/${n}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -127,6 +156,15 @@ function indexHtml(version, date, sha, css) {
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#FBFBF8">
 <meta name="referrer" content="no-referrer">
+<meta name="description" content="NoteSync · 端到端加密的多设备同步笔记">
+<!-- 🔴🔴 PWA 三件套：没有 manifest link，浏览器就不认为这是可安装应用，
+     "网页端不支持生成 PWA"（用户报障）就是缺这一行。
+     值逐字抄老项目 index.html:16-20。 -->
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="NoteSync">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <title>NoteSync</title>
 <style>
 ${css}

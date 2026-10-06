@@ -181,12 +181,15 @@ svg .gf { fill: var(--accent); stroke: none; }
  *   48px 的 SVG 塞进 17px 格子里，实际渲染成一团糊色块，还会撑开顶栏行高。
  *   老项目「HTML 里不写尺寸、用 CSS 缩放 SVG」的做法必须照搬：
  *   尺寸是**表现层**的事，不该烧进 markup（皮肤三态切换时还要复写它）。
+ *
+ * 🔴🔴 这条 clamp 是**上一批误抄进来的**，本批删除（用户报障第 5 条「logo 大小和老版本不一样」）。
+ *   老项目 index.html:102 是 `header .brand svg{width:17px;height:17px;color:var(--accent);flex-shrink:0}`
+ *   —— **恒定 17px**，且全文 `grep "clamp("` **零命中**，没有任何媒体查询覆盖它
+ *   （`:293` 只改 `header button svg`，logo 不是 button 的子元素）。
+ *   bj 这条 clamp 让视口 ≥386px 时 logo 就开始变大、≥614px 到 27px，
+ *   在 PC 上并排一眼就看出"logo 变大了"。
+ *   ⇒ 尺寸改由下面 `.ns-brand .ns-mark svg` 承担（与老项目 :102 逐值等价）。
  */
-.ns-logo-sm {
-  display: block;
-  width: clamp(17px, 4.4vw, 27px);
-  height: clamp(17px, 4.4vw, 27px);
-}
 .landing h1 { font-family: var(--serif); font-size: 34px; font-weight: 500;
               margin: 0 0 10px; letter-spacing: .05em; }
 .landing .sub { margin: 0 0 44px; font-size: 13px; color: var(--muted);
@@ -326,35 +329,31 @@ svg .gf { fill: var(--accent); stroke: none; }
 }
 .box button:not(.box-x):hover { opacity: .85; }
 .box button:not(.box-x):active { opacity: .75; }
-/* 🔴🔴🔴 「取消」这类**次要按钮**在老项目里**不是描边幽灵钮**，尽管源码 :518 写了
- *   `.box button.ghost-btn{margin-top:10px;background:none;color:var(--muted);
- *     border:1px solid var(--line);font-weight:400}`。
+/* 🔴🔴🔴 「取消」这类**次要按钮**在老项目里**和主按钮长得一模一样**（同底同字），
+ *  尽管源码 :518 写了 `.box button.ghost-btn{margin-top:10px;background:none;color:var(--muted);
+ *   border:1px solid var(--line);font-weight:400}`。
  *
- *   真浏览器量老项目自己的五个 `.ghost-btn`（#cpCancel / #bakCancel / #bakClose2 /
- *   #bakRestCancel / #updNo），五个**全部**命中四条规则：
- *     `.box button:not(.box-x)` → `.box button.ghost-btn`
- *     → **`.box button:not(:disabled):not(.box-x)`**（样式区更后面，:0 附近）
- *   最后那条 specificity (0,3,1) 压过 ghost-btn 的 (0,2,1)，
- *   于是 background / color / font-weight 全被吃回主按钮那套，
- *   只有 ghost-btn 独占的 margin-top 与 border 留了下来。
+ *   决定渲染结果的不是那段源码，而是 :1063 一条**运行时注入的 `!important` 主题覆盖**
+ *   （由 applyTheme 在 :1269 无条件挂到 documentElement，模板在 themeCssCore() :1045-1067）：
+ *     .box button:not(:disabled):not(.box-x){
+ *       background:${p.fg}!important;color:${p.bg}!important;-webkit-text-fill-color:${p.bg}!important}
+ *   specificity (0,3,1) 压过 ghost-btn 的 (0,2,1)，于是 background / color /
+ *   font-weight 全被吃回主按钮那套，**只有 ghost-btn 独占的 margin-top:10px 与 border 活下来**。
+ *   ⇒ 真实渲染：非禁用按钮一律 `--fg` 底/ `--bg` 字（深底浅字），
+ *     日间实测 rgb(28,28,26) 底 / rgb(251,251,248) 字。
  *
- *   量化对照（**相对关系**才是判据，绝对 rgb 随主题走）：
- *     老项目 #cpCancel : bg=--hover   color=--fg     fw=400  border=1px --line  margin-top:10px
- *     老项目 #cpOk    : bg=--line    color=--muted           （disabled 态）
- *   两枚都是浅底 + 深/灰字 + 细描边，**不靠"实底 vs 幽灵"区分主次**。
+ *   🔴🔴 上一批我漏读了 :1063 这条 `!important`，留下一条
+ *     `.box button:not(.box-x):not(:disabled){background:var(--hover); …}`
+ *     去"模拟 ghost-btn 观感"，**把深底顶成了浅灰淡底**（--hover 日间是
+ *     rgba(28,28,26,.05)，几乎等于页面底色）—— 这就是用户报障第 2 条
+ *     「弹窗内下方按钮颜色不对」的真实根因。该规则已删除：
+ *     按钮底色交回上面 `.box button:not(.box-x)` 的 `--upload-bg`（≡ `--fg`/`--bg` 二选一）。
+ *     教训与仓库里另外两处同源：老项目里"写了但被更具体规则（含 !important）吃掉的声明"
+ *     必须以**运行时实测**为准，照抄声明等于把 bug 一起抄进来。
  *
- *   本次一度照字面补了 `.box button.ghost-btn`（描边透明底）—— 那会让改口令弹窗
- *   多出一枚老项目根本没有的描边按钮。
- *   ⇒ 纪律：老项目源码里"写了但被更具体规则吃掉的声明"必须**照实测抄**。
- *     照抄声明等于把 bug 一起抄进来，还会被当成"对齐完成"。
- *
- *   禁用态同理照抄老项目 :522（不是"整枚变淡"）：
+ *   禁用态照抄老项目 :522（不是"整枚变淡"）：
  *     background:var(--line); color:var(--muted); opacity:1（明确写 1）
  */
-.box button:not(.box-x):not(:disabled) {
-  background: var(--hover); color: var(--fg); font-weight: 400;
-  border: 1px solid var(--line);
-}
 .box button:not(.box-x):disabled {
   background: var(--line); color: var(--muted);
   cursor: not-allowed; box-shadow: none; opacity: 1;
@@ -446,6 +445,13 @@ header.ns-top {
 /* 🔴 老项目 index.html:102：17px 见方 + flex-shrink:0。缺了尺寸则图标按 SVG 自带
    viewBox 铺开，与右侧 17px 的工具键不同高 —— 顶栏最显眼的一处"不一样"。 */
 .ns-brand .ns-mark { width: 17px; height: 17px; color: var(--accent); flex-shrink: 0; }
+/* 🔴🔴 svg 本身也要钉 17px（老项目 index.html:102 的选择器是 `header .brand svg`，
+ *   命中的就是 svg 本身）。`.ns-mark` 是包它的 span，给 span 尺寸**不会**约束内部 svg ——
+ *   SVG 没有 width/height 属性时默认占 300×150。
+ *   此前靠 `.ns-logo-sm` 那条 clamp 兜着（本批已删），删掉后必须由这条接手，
+ *   否则顶栏 logo 退回 300×150 把整行撑爆（症状：顶栏被 logo 顶成两行高）。
+ *   `.ns-logo-sm` 这个 class 已随之从 icons.ts 一并删除（无任何其它引用）。 */
+.ns-brand .ns-mark svg { display: block; width: 17px; height: 17px; flex-shrink: 0; }
 .ns-brand b { font-family: var(--serif); font-weight: 500; font-size: 13.5px;
               letter-spacing: .06em; }
 /* App 端品牌位常驻当前笔记名（App 没地址栏，看不见笔记名）。
@@ -602,8 +608,17 @@ header.ns-top {
  *   原先这里是 `display:flex` 的**整行金色块**（accent 字色 + gap 6px + padding 5px 0），
  *   整篇折叠标题全变金、并被撑成一整条可点区域 —— 与老项目并排看，
  *   正文里一出现折叠就"跳"出整块金色，是这批差异里最刺眼的一条。 */
+/* 🔴🔴 `cursor` **不许**留在这一级（用户报障第 10 条「显示小手」）。
+   老项目 index.html:386 的 `cursor:pointer` 挂的是 `span.ns-fold-mark`——
+   那个span 只包住三角（font-size:0 + padding 0 3px），**不包标题文字**。
+   真浏览器实测（老项目真页，2026-10-06）：
+     getComputedStyle(.ns-fold-mark).cursor        === 'pointer'
+     getComputedStyle(标题文字所在盒).cursor        === 'auto'   ← 标题不是小手
+   写成整行 `cursor:pointer`（本项目此前就是）⇒ 光标划过标题文字全程小手，
+   而那一行只有 14px 宽的三角是真正可点的 ⇒ 指针范围与可点范围不一致。
+   ⇒ pointer 改挂到 ::before / ::after（见下两条），标题这一级恢复 auto。 */
 .ns-fold > :first-child {
-  cursor: pointer; color: inherit;
+  color: inherit;
   touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 /* 三角用边框画，不用"▸"字形：字形比汉字小一圈，行高加再大也追不上图标。
@@ -619,8 +634,16 @@ header.ns-top {
   /* 老项目把手是 `padding:0 3px` + `margin-right:2px` 的行内小块（index.html:386）。
      三角本身是 0×0 盒（视觉全由边框构成），**不能加 padding** ——
      那会把上下 transparent 边从 4px 撑成 4+2×padding，三角直接变形。
-     所以用 margin 等效复刻那6px 让位：左 3px（=padding-left）+ 右 5px（=padding-right 3 + margin-right 2）。 */
+     所以用 margin 等效复刻那6px 让位：左 3px（=padding-left）+ 右 5px（=padding-right 3 + margin-right 2）。
+     🔴 这条 margin 是**逐值对齐老项目实测**的结果，别再"顺手改成 4px 4px"：
+     老项目真页实测 mark盒 14px 宽（= 3 padding + 8 三角 + 3 padding），
+     三角左缘距 mark 左缘 3px、三角右缘到标题文字起点 5px（= 3 + margin-right 2）。 */
   margin: 0 5px 0 3px;
+  /* 🔴 `cursor:pointer` 挂在这里（三角本体），**不挂父级**（用户报障第 10 条）。
+     老项目 pointer 在span.ns-fold-mark 上，而那个 span 只包三角不包文字。
+     伪元素是唯一能在bj 里"只圈住三角"的选择器 —— 父级那一行还含标题文字。
+     实测（老项目真页）：三角 computed cursor='pointer'，标题文字='auto'。 */
+  cursor: pointer;
 }
 .ns-fold[data-open="true"] > :first-child::before {
   border-top: 8px solid var(--muted);
@@ -629,18 +652,43 @@ header.ns-top {
   border-right: 4px solid transparent;
   top: -6px;
 }
-/* 把手 hover 底：老项目是 `span.ns-fold-mark:hover{background:var(--hover)}`，
-   底色只盖住 14×0 的小把手盒（index.html:400）。
-   🔴 本项目的把手是 0×0 的 ::before，直接 background 什么都画不出来
-     （内容盒面积为 0），故用 spread 阴影把一小块圆角底补在三角周围。
-   🔴🔴 偏移必须是 **0**（此前写的 `4px 0 0 7px` 把阴影整体右移了 4px）——
-     三角本体在 ::before 的中心，而阴影盒从元素盒左上角起算，
-     右移 4px 后底色与三角**错位**，用户看到的就是
-     「鼠标移上去三角变形/底色歪到一边」（用户报障第 5 条）。
-     spread 7px 让 0×0 的盒长成 14×14，正好盖住 8×8 的三角。 */
-.ns-fold > :first-child:hover::before {
-  border-radius: 7px;
-  box-shadow: 0 0 0 7px var(--hover);
+/* 🔴🔴 把手 hover 底：**只盖把手那 18×20 感应区，不多盖一像素**（用户报障第 7 条 b）。
+ *
+ * 老项目 index.html:400 是 `span.ns-fold-mark:hover{background:var(--hover)}`，
+ * 那个 span 的盒是 **14×0**（font-size:0 + padding 0 3px ⇒ 宽 14、高 0），
+ * 且真正的 hover 承载体是它那枚 18×20 的 ::after（index.html:399）。
+ * 真浏览器实测（老项目**真页** index.html，2026-10-06）：
+ *   · mark 盒 rect = 14 × 0
+ *   · 原样 hover：底**不可见**（0 高的盒子画不出面积）
+ *   · 对照组把该 span 强制成 `inline-block + height:20px` 后**红底立刻可见**
+ *     ⇒ 证明"不可见"是 0 高造成的，**不是探针失灵**（这一条是本段结论的地基：
+ *        我第一版探针忘了撤 `#landing`/`#mask` 遮罩，鼠标命中全被遮罩吃掉，
+ *        得出了"老项目 hover 底可见"的假结论；加了遮罩对照实验才站得住）。
+ * ⇒ 老项目桌面档 hover 的**可见范围就是那枚 18×20 感应区**，纵向 0 溢出。
+ *
+ * 🔴 本项目此前用 `box-shadow: 0 0 0 7px var(--hover)` + `border-radius:7px`
+ *   把 0×0 盒撑成 **14×14 圆角块** —— 纵向比老项目多盖 14px、山形是圆的，
+ *   而三角只有 8×8 ⇒ 底色从上下各溢出 3px（用户报障第 7 条 b 的真根因）。
+ *   box-shadow 的 spread 是**等距**的，压不到"只横向"，所以整条弃用。
+ *
+ * 🔴🔴🔴 **hover 底必须挂在 ::after（感应区）上，不能挂父段落，也不能挂 ::before**。
+ *   两个都试过，都会坏，且坏法不同
+ *   （2026-10-06 真浏览器网格扫 dx∈[-6,40] dy∈[-4,20] 步长 2，逐格读 computed background）：
+ *   ① `.ns-fold > :first-child:hover::before`（挂父段落）
+ *      ⇒ 鼠标落在**标题文字**上（同一段落内）三角就亮底 ——
+ *      实测「标题文字处(左起 34px) 有底色 = true」，而那里根本不在把手上。
+ *      老项目是 `span.ns-fold-mark:hover`，hover 域**就是把手本身**，
+ *      标题文字在 span 之外 ⇒ 鼠标移到标题上，三角不亮。
+ *   ② `.ns-fold > :first-child::before:hover`（挂伪元素自己）
+ *      ⇒ **恒不命中**：::before 的盒是 0×0（视觉全由 border 构成），
+ *      零面积盒拿不到 hover —— 网格扫 13×24 = **312 个点全灭**（无一格命中）。
+ *      ⇒ 桌面档唯一的 hover 承载体就是那枚 18×20 的 ::after。
+ *
+ * 结论：`::after:hover` —— hover 域 = 18×20 感应区（= 老项目把手的可点域），
+ * 标题文字在域外不亮底、三角在域内亮底，与老项目语义一致。
+ * 窄屏档（≤560px）感应区放大到 44×44，hover 域随之放大（老项目同款）。 */
+.ns-fold > :first-child::after:hover {
+  background: var(--hover);
 }
 /* 命中区放大：老项目 index.html:399 在把手上挂一枚absolute 的透明 ::after
    （18×20）——因为三角改用边框画之后 span 自身盒高恒为 0，桌面唯一命中面
@@ -649,6 +697,14 @@ header.ns-top {
 .ns-fold > :first-child { position: relative; }
 .ns-fold > :first-child::after {
   content: ""; position: absolute; left: -4px; top: -15px; width: 18px; height: 20px;
+  /* 🔴 感应区也归pointer 管：老项目那枚 ::after 是 `.ns-fold-mark` 的子伪元素，
+     继承 span 的 `cursor:pointer`（index.html:386+399）。
+     bj 的 ::after 直接挂在标题段落上，不写这一条就退回 auto ——
+     三角本体（::before）是小手、旁边 18×20 的感应区却是默认箭头，
+     用户在同一枚把手上看到两种指针（实测elementFromPoint 命中同一把手）。
+     ⚠️ 命中区**不能**比三角更宽地吃指针：18px 已含右缘 2px 余量，
+     再宽就会盖到标题首字上（老项目 index.html:393 实测右缘 132px vs 首字 133px）。 */
+  cursor: pointer;
 }
 /* 正文：往里缩进 + 左侧引导线（--line 令牌，非新色；老项目 v9.1.1 同款）。
    🔴 缩进必须是 1em 不是 14px：老项目 index.html:402 是
@@ -926,6 +982,40 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .row-btn { flex: none; min-height: 32px; padding: 4px 12px; border-radius: 8px; font-size: 12.5px;
            border: 1px solid var(--line); background: var(--bg); }
 .row-btn:hover { background: var(--hover); }
+/* 🔴🔴🔴 必须有一条**更特异**的规则把历史行按钮从弹窗通栏规则里救出来。
+ *
+ * 病根：历史版本行住在 `.box menu-box` 里（menu.ts:203 `class="box menu-box"`，
+ *   历史页 body 在 menu.ts:379），而 styles.css:321 的弹窗主按钮规则是
+ *   `.box button:not(.box-x){width:100%;height:46px;padding:0 14px;border-radius:10px;
+ *     font-size:15px;…}` —— specificity **(0,2,1)**，**命中**历史行按钮。
+ *   `.row-btn` 自己只有 **(0,1,0)**，被压得几乎只剩min-height。
+ *
+ * 量化实测（真浏览器，`.box.menu-box` 内放一条同构历史行，2026-10-06）：
+ *   before：按钮 131×46（width 130.812px / height 46px）、padding 0 14px、radius 10px、font-size 15px
+ *   after ↓（本条修复后）：按钮 **51×32**、padding 4px 12px、radius 8px、font-size 12.5px
+ *   —— 51×32 与老项目 `.hist-btns button{min-height:32px;padding:4px 12px;font-size:12.5px}`
+ *      在 420px 宽容器内实测一致。
+ *
+ * 🔴 为什么不用 `.box button.row-btn` 就够：那条是 (0,2,1)，
+ *   与被压的 `.box button:not(.box-x)` **同分** ⇒ 只能靠源码顺序取胜，
+ *   而弹窗那条写在样式区**前面**（:321 vs :977），赢不了。
+ *   `.box .list-row .hist-btns button.row-btn` 是 (0,4,1)，**结构性地压过**，
+ *   不依赖顺序 ⇒ 以后有人在后面再加一条 .box 按钮规则也不会把它打回去。
+ *   同样刻意避开 `.box button:not(.box-x)` 里的 :not() 排除写法：
+ *   那样只是"同分靠后"，同样脆弱。 */
+.box .list-row .hist-btns button.row-btn {
+  width: auto; height: auto; min-height: 32px;
+  padding: 4px 12px; border-radius: 8px; font-size: 12.5px;
+  background: var(--bg); color: var(--fg); font-weight: 400;
+  letter-spacing: normal;
+}
+/* 同理，hover/active 的 opacity 通路也来自通栏规则（styles.css:327-328），
+   老项目 `.hist-btns button` 没有 opacity 过渡，只有背景色变化。 */
+.box .list-row .hist-btns button.row-btn:hover { opacity: 1; background: var(--hover); }
+.box .list-row .hist-btns button.row-btn:active { opacity: 1; }
+.box .list-row .hist-btns button.row-btn:disabled {
+  background: var(--line); color: var(--muted); cursor: not-allowed;
+}
 /* ---------- 历史版本「预览」内联展开（老项目 index.html:456 `.hist-preview` 逐字）----------
  * 🔴 用户报障第 4 条「历史版本页面没有预览按钮」——功能缺失，这一块是它的容器。
  *   逐值抄老项目：背景 --hover、左侧 2px 金色竖条（"这是内容不是按钮"的语义）、
@@ -1632,3 +1722,71 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
   border: 1px solid var(--line); border-radius: 50%; background: none;
   color: var(--muted); font-size: 15px; line-height: 1;
   display: flex; align-items: center; justify-content: center; }
+
+/* ---------- PWA 安装引导条（老项目 index.html:171-183 逐值）----------
+ * 🔴 用户报障第 12 条「网页端不支持生成 PWA」：manifest 齐了之后，
+ *   `beforeinstallprompt` 才会真的发出来，而它**只发一次且不告诉用户任何事** ——
+ *   不接住它就等于"能装但没人知道能装"。
+ *
+ * 逐值抄老项目（:171-183）：fixed 底部居中 / 18px 圆角 / rise 入场 /
+ * 30px 金色 logo / 衬线标题 + 52px 金线 / 两枚 44px 触控区按钮。
+ * 🔴 入场动画用**专用** `@keyframes nsInstRise`（to 帧 `transform:none`），
+ *   不是老项目那条通用 `rise` —— 通用 rise 的 to 帧会把 translateX(-50%) 抹掉，
+ *   条会钉在屏幕正中。老项目那条 .instcard 复用了 .instRise（自己的），同款。
+ */
+#installBar { position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: 16px; z-index: 55; max-width: 92vw; }
+#installBar.hidden { display: none; }
+.instcard { position: relative; background: var(--box-bg); border: 1px solid var(--line);
+  border-radius: 18px; box-shadow: var(--shadow-box); padding: 20px 24px 18px;
+  width: min(88vw, 340px); text-align: center;
+  animation: nsInstRise .5s cubic-bezier(.2,.7,.3,1) both; }
+@keyframes nsInstRise { from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); } }
+.inst-logo { width: 30px; height: 30px; color: var(--accent); display: block;
+  margin: 0 auto 4px; }
+.inst-logo > svg { width: 30px; height: 30px; display: block; }
+#installTitle { font-family: var(--serif); font-size: 16.5px; font-weight: 600;
+  letter-spacing: .02em; color: var(--fg); }
+#installTitle::after { content: ''; display: block; width: 52px; height: 1px;
+  background: var(--accent); margin: 9px auto 0; opacity: .8; }
+#installMsg { font-size: 12.5px; line-height: 1.7; color: var(--muted);
+  margin: 10px 0 14px; }
+.inst-btns { display: flex; gap: 10px; }
+.inst-btns button { flex: 1; min-height: 44px; padding: 12px 0; font-size: 15px;
+  font-weight: 500; border-radius: 10px; cursor: pointer;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  border: 1px solid var(--line); background: none; color: var(--fg); }
+.inst-btns button:active { opacity: .8; }
+#installGo { background: var(--upload-bg); color: var(--bg); border-color: transparent; }
+#installGo.hidden { display: none; }
+/* 关闭 ×：绝对定位浮在卡内右上（同 .box-x 的做法，不参与标题行排版） */
+#installDismiss { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px;
+  display: grid; place-items: center; background: none; border: none;
+  color: var(--muted); cursor: pointer; border-radius: 8px; padding: 0;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+#installDismiss:hover { background: var(--hover); color: var(--fg); }
+
+/* ---------- 每日一句话气泡（老项目 index.html:114-115 逐值）----------
+ * 位置是**顶部居中**（top:54px），不是正文上方 —— 用户报障第 5 条
+ * 「夜深了，写完这条就睡」的图标/文案位置不对，根因之一是把问候做成了正文浮层。
+ *
+ * 🔴 z-index 54 **低于**草稿/冲突条的 55：问候是"锦上添花"，
+ *   绝不能盖住用户正在处理的数据冲突（老项目注释明确写了这条优先级）。
+ * 🔴 阴影复用 `--shadow-ask` 令牌（theme.ts:196 的值与老项目 :114 逐字节相同
+ *   `0 10px 30px rgba(20,20,18,.14)`），不写字面量 —— 纪律闸 S4-T7 禁颜色字面量。
+ */
+#nsDayToast {
+  position: fixed; top: 54px; left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  z-index: 54; max-width: min(86vw, 360px);
+  padding: 10px 16px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--box-bg); color: var(--fg);
+  font: 400 13px/1.5 var(--serif); letter-spacing: .01em;
+  box-shadow: var(--shadow-ask);
+  opacity: 0; pointer-events: none;
+  transition: opacity .32s, transform .32s;
+  text-align: center; white-space: normal;
+}
+#nsDayToast.show { opacity: 1; transform: translateX(-50%) translateY(0); }

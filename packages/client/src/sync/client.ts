@@ -48,8 +48,33 @@ export interface SyncDeps {
   setDoc: (d: Doc) => void;
   /** 状态变化通知（驱动底栏） */
   onSnapshot: (s: SyncSnapshot) => void;
-  /** 出错提示 */
+  /**
+   * 出错提示 ——🔴 **用户可见文案**，会被main.ts:1567-1569 直接
+   * `footStatus('offline', msg)` 推到屏幕底栏。
+   *
+   * ⇒ 只有"用户能据此行动"的错误才能走这里（口令不对、解析失败、429…）。
+   * **内部异常 / 编程错误绝不许走这里**：老项目的底栏文案是一份 30 句白名单
+   *（`grep -o "setStatus(\(true\|false\), *'[^']*'" index.html | sort -u` 可复现），
+   * 里面**从来没有**"非法状态转移"这种词；把内部异常塞进来等于给用户看调试信息。
+   * 内部错误请走 {@link SyncDeps.onInternalError}。
+   */
   onError: (msg: string) => void;
+  /**
+   * 内部/编程错误通道 —— **不进 UI**，只做可观测。
+   *
+   * 🔴🔴 为什么必须有它（不能"反正没人看就吞掉"）：静默吞掉会让状态机变成
+   *   不可观测的黑洞，症状是"同步偶尔不推、也不报错、也不提示"，
+   *   也就是本文件头列的那类静默降级。所以内部错误必须**看得见**，
+   *   只是不能**让用户看见**。
+   *
+   * 选它的理由：SyncDeps 上原有的两条通道都会污染底栏 ——
+   *   onSnapshot 驱动底栏文案（main.ts:1560-1565），onError 直接 footStatus。
+   *   没有任何一条既有通道能"可观测但不打扰用户"，所以必须新增一条。
+   *
+   * 不传时退化为 `console.warn`（开发态可见、线上不打扰用户），
+   * 因此**不传也不会丢日志**，且不必让 main.ts 立刻配合就能修掉用户报障。
+   */
+  onInternalError?: (msg: string, err: unknown) => void;
   /** 网络层是否可达（测试注入用；默认读 navigator.onLine） */
   isOnline?: () => boolean;
   /**
@@ -116,13 +141,38 @@ export class SyncClient {
     try {
       next = reduce(this.state, ev);
     } catch (e) {
-      // 🔴 非法转移是代码 bug。要让测试看得见，所以上报而不是静默吞掉。
-      this.d.onError(e instanceof Error ? e.message : String(e));
+      // 🔴🔴🔴 非法转移是**代码 bug**，不是用户错误。此前这里调`this.d.onError(msg)`，
+      //   而 main.ts:1567-1569 的 onError 是 `footStatus('offline', msg)`
+      //   —— 直接把内部异常消息当用户可见文案推到屏幕底栏。
+      //   用户报障原文：「底部状态栏快速闪出红点 +『最后同步：非法状态转移：…』」。
+      //   老版本不会有这个现象，因为它**根本没有状态机**，底栏只有 setStatus(on, text)
+      //   （index.html:1723）一个函数，文案是 30 句固定白名单，
+      //   SSE 收到推送后的动作是 `sseSource.onmessage = () => { poll(); }`
+      //   （index.html:10047）—— **重新拉一次，永远不报状态错误**。
+      //
+      //   ⇒ 改走 onInternalError：可观测（不许黑洞），但不污染底栏。
+      //   fsm.ts 已按老项目口径补齐 6 条真实时序会踩到的边，
+      //   这里仍兜住，是为了让"再有新漏的边"退化成控制台一行日志而非用户可见红点。
+      this.reportInternal(`同步状态机非法转移：${this.state} --${ev}-->`, e);
       return;
     }
     this.state = next;
     this.snap = snapshotOf(next);
     this.d.onSnapshot(this.snap);
+  }
+
+  /**
+   * 上报内部/编程错误：**可观测，但不进 UI**。
+   *
+   * 不传 onInternalError 时退化为 console.warn —— 开发态能在控制台看到，
+   * 线上不会打扰用户；因此调用方不配合也不会把日志丢掉。
+   */
+  private reportInternal(msg: string, err: unknown): void {
+    if (this.d.onInternalError) {
+      this.d.onInternalError(msg, err);
+      return;
+    }
+    console.warn(`[notesync] ${msg}`, err);
   }
 
   getState(): SyncState {
@@ -516,6 +566,15 @@ export class SyncClient {
       // 🔴 只在"自己没在推"时才自动重拉。正在 push 时收到广播会来回震荡
       //   （推 → 广播 → 拉 → 合并 → 推 …），实测能把服务端打满。
       if (this.state === 'pushing' || this.state === 'syncing') return;
+      // 🔴🔴 conflict 态**同样不自动重拉** —— 与老项目 index.html:9947 同款：
+      //   `if (pendingRemoteNote) { pendingRemoteNote = note; return; }`
+      //   （:9955、:9966 三处同款守卫，注释写"挂起期不消费版本、不应用"）
+      //   语义是"存起来等用户拍板"，**不是**趁用户还没裁决就再合并一次。
+      //   探针实测 E3'：不挡的话，一次推送会在 conflict 态连抛两条异常
+      //   （conflict --remote-arrived-->，以及随后的 conflict --merge-conflict-->），
+      //   而第二条意味着用户没拍板文档就被改了 —— 比报错更糟。
+      //   注意 fsm.ts 里 conflict 态**故意没有** remote-arrived 边，两处是配套的。
+      if (this.state === 'conflict') return;
       this.send('remote-arrived');
       void this.pull();
     };

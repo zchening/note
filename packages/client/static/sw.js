@@ -20,11 +20,34 @@
  *   外壳无密钥、无隐私，缓存它只是为了秒开；数据一律走网络。
  */
 
-const VERSION = 'v1';
-const CACHE = `notesync-bj-${VERSION}`;
+/**
+ * 🔴🔴 缓存名的版本必须来自**注册 URL 的 `?v=` 参数**（= app.js 里的 APP_VERSION），
+ * 不能在 sw.js 里写死。老项目 index.html:10337 / sw.js:4-5 早就根治过这个：
+ *   `navigator.serviceWorker.register('/sw.js?v=' + encodeURIComponent(APP_VERSION))`
+ *   + `const VER = (new URL(self.location.href).searchParams.get('v')) || 'x';`
+ * 写死版本号的症状很隐蔽：发版后 SW 照样装上、缓存名不变，
+ * 用户**永远拿旧壳**，且没有任何报错（老项目 v5.35 之前就长期是这个症状）。
+ *
+ * 取不到 `?v=` 时回退到一个带时间戳的串：宁可"这次换名了"（多一次重新缓存），
+ * 也不要"永远不换名"（用户永远看不到新版）。
+ */
+const VER = (new URL(self.location.href).searchParams.get('v') || '') || ('x' + self.registration?.scope?.length + '-' + (self.__BJ_FALLBACK_V || '0'));
+const CACHE = `notesync-bj-${VER}`;
 
-/** 应用外壳清单。刻意短：能离线打开界面就够，笔记数据不在其中。 */
-const SHELL = ['./', './index.html', './app.js'];
+/**
+ * 应用外壳清单。刻意短：能离线打开界面就够，笔记数据不在其中。
+ * 🔴 三个静态资源必须列进来，否则离线时安装横幅拿不到 manifest 与图标
+ *   （老项目 sw.js:6 的 ASSETS 同样列了 manifest.json 与三枚图标）。
+ */
+const SHELL = [
+  './',
+  './index.html',
+  './app.js',
+  './manifest.json',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/icon-512-maskable.png',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

@@ -33,6 +33,7 @@ import {
 } from '../src/egg/trigger.ts';
 import { EGG_DOORS } from '../src/egg/registry.ts';
 import { placeAsk } from '../src/egg/ask.ts';
+import { caretLatchVerdict } from '../src/egg/word-trigger.ts';
 
 /** 老项目 :10943 的字面量正则。**本文件所有等价性断言都以它为判据。 */
 const OLD_NS_EGG_RE =
@@ -405,4 +406,214 @@ test('EGG-W24 白名单断言拦下未注册 id（innerHTML 唯一入口的 XSS 
   // 且注入串必须被 innerHTML 前的那道断言覆盖（顺序：断言在 innerHTML 之前）
   assert.ok(src.indexOf('EGG_DOORS.indexOf(id) < 0') < src.indexOf('b.innerHTML = askHtml(id)'),
     '白名单断言必须在 innerHTML 之前');
+});
+
+/* ==================================================================== *
+ * 13. 光标落位通道（EGG-CAR系列）
+ *
+ * 🔴🔴 这组判据存在的事实理由：用户报障「光标移到彩蛋词上不弹确认框」。
+ *   老项目有**四条**触发通道（打字 / 中文整词上屏 / 触屏点词 / **光标落位**），
+ *   bj此前只有三条 —— 缺的正是报障这条，且全库 `grep selectionchange` 在 egg 目录
+ *   **零命中**（不是实现有bug，是整条通道不存在）。
+ *
+ *   老项目 :11091-11109。四条语义差，逐条钉在下面：
+ *   1. 200ms 去抖；
+ *   2. 组字期不打扰（selectionchange **不带输入法信息**，必须自维护组字态）；
+ *   3. `_eggCaretTok` latch：**同一词内微动不重复弹**，移出再移回才每次弹；
+ *   4. **不受 asked[] 会话抑制**（:11106 注释原文）。
+ *
+ *   ⚠️ 用户报障说「并没有每次都出现」—— 判据 3 就是这句话的准确口径：
+ *   「每次都弹」= 移出词再移回每次都弹；停在同一个词里反复微动只弹一次。
+ *   这是**正确行为**，不是漏弹。所以 EGG-CAR-02 必须钉住它，
+ *   否则将来有人"修"成每次微动都弹，用户体感是"闪个不停"。
+ * ==================================================================== */
+
+const wordTriggerSrc = readFileSync(new URL('../src/egg/word-trigger.ts', import.meta.url), 'utf8');
+/**
+ * 🔴 去掉注释后的代码。判"某段代码不存在"时**必须**用它 ——
+ *   直接在原文里 grep 会被注释里的行号/函数名骗过
+ *   （本文件下面 EGG-CAR-08 就真的踩到了：注释里写着 `if (id === caretTok) return;`，
+ *   而实现已经改成走caretLatchVerdict，naive grep 会给出错误的绿）。
+ */
+const wordTriggerCode = wordTriggerSrc
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+test('EGG-CAR-01 光标在彩蛋词内 → 触发（这是用户报障的那一条通道本身）', () => {
+  // 判据 ①：latch 的初态是空串，任何词都不等于它 ⇒ 必触发。
+  assert.deepEqual(caretLatchVerdict('', 'dragon'), { fire: true, tok: 'dragon' });
+  // 对照：同一个词已经在 latch 里 ⇒ 这才是不触发的那一档（判据见 EGG-CAR-02）。
+  assert.equal(caretLatchVerdict('dragon', 'dragon').fire, false);
+  // 🔴 判据 ④：这条通道**不受 asked[] 会话抑制**。caretLatchVerdict 的签名里
+  //   **根本没有 latch/asked 参数** —— 这是结构事实，不是"忘了传"。
+  assert.equal(caretLatchVerdict.length, 2, 'latch 判据不应接受 asked 抑制参数');
+  assert.ok(
+    !/caretLatchVerdict\([^)]*latch/i.test(wordTriggerCode),
+    '光标落位通道不许接 asked[] 闩锁（老项目 :11106 注释：不受 asked[] 会话抑制）',
+  );
+});
+
+test('EGG-CAR-02 同一词内微动 → 不重复触发（latch，老项目语义，承重）', () => {
+  // 🔴 这是整条通道最容易被"优化掉"的一行。逐步模拟：
+  //   光标从词外进入 → 弹（tok=dragon）
+  let v = caretLatchVerdict('', 'dragon');
+  assert.deepEqual(v, { fire: true, tok: 'dragon' }, '进入词应触发');
+  //   停在词内，用方向键左右挪（同一个 id 命中多次）⇒ 一次都不再触发
+  for (let i = 0; i < 20; i += 1) {
+    v = caretLatchVerdict(v.tok, 'dragon');
+    assert.equal(v.fire, false, `词内第 ${i + 1} 次微动不应重复触发`);
+    assert.equal(v.tok, 'dragon', 'latch 词必须保持不变');
+  }
+  // 🔴 反向断言（判据纪律要求）：**把 latch 去掉，这条必须红**。
+  //   没有 latch 的朴素实现（每次都 fire）在这里一定会炸：
+  const naive = (id) => ({ fire: true, tok: id });
+  let nv = naive('dragon');
+  assert.equal(nv.fire, true, '无 latch 版：词内微动会重复触发（这就是要避免的）');
+  for (let i = 0; i < 3; i += 1) {
+    nv = naive('dragon');
+    assert.equal(nv.fire, true, '无 latch 版每一步都 fire ⇒ EGG-CAR-02 会红');
+  }
+  // 🔴 反向还要钉住"移出再移回才每次弹"：这正是用户那句「每次都出现」的准确含义。
+  let s = caretLatchVerdict('', 'dragon');
+  assert.equal(s.fire, true, '第一次进入词要弹');
+  s = caretLatchVerdict(s.tok, '');
+  assert.deepEqual(s, { fire: true, tok: '' }, '离词要 fire（用于收起）且 latch 置空');
+  s = caretLatchVerdict(s.tok, 'dragon');
+  assert.equal(s.fire, true, '移出词再移回 ⇒ 每次都弹（用户报障的准确口径）');
+  // 换一个词：也要弹（latch 判的是 id 变化，不是"弹过就算了"）
+  s = caretLatchVerdict(s.tok, 'pet');
+  assert.deepEqual(s, { fire: true, tok: 'pet' }, '换词应触发');
+});
+
+test('EGG-CAR-03 光标离词 → 收起，且只收自己弹起的那次', () => {
+  // 离词：id 为空串 ⇒ fire=true 且 tok 置空（上层据此调 ask.close()）
+  const v = caretLatchVerdict('dragon', '');
+  assert.deepEqual(v, { fire: true, tok: '' });
+  // 🔴 「只收自己弹起的那次」在实现里的形态是 `caretOwns()` ——
+  //   比对 caretOpenedId 与 ask.showingId()，close 之后两者自动都不成立。
+  assert.ok(wordTriggerCode.includes('const caretOwns = ()'), '必须有所有权判据 caretOwns');
+  assert.match(
+    wordTriggerCode,
+    /if\s*\(!id\)\s*\{\s*if\s*\(caretOwns\(\)\)\s*ask\.close\(\);/,
+    '离词只收自己弹起的那次（老项目 :11104 的 `_askFrom === \'caret\'`）',
+  );
+  // 🔴 反向：不能无条件 ask.close() —— 那会把触屏点词通道弹的浮层也收掉。
+  assert.ok(
+    !/if\s*\(!id\)\s*\{\s*ask\.close\(\);/.test(wordTriggerCode),
+    '离词不许无条件收（会误收别的通道弹的浮层）',
+  );
+});
+
+test('EGG-CAR-04 组字期不触发，且组字态必须自维护（selectionchange 不带输入法信息）', () => {
+  // 🔴 beforeinput 自带 e.isComposing，selectionchange **不带** ——
+  //   所以必须自己维护跨事件的组字态，否则拼音候选框跟随光标移动时
+  //   会连续弹确认框（老项目 :11093/:11097 两处拦，注释「红线9：组字期绝不打扰」）。
+  assert.ok(wordTriggerCode.includes('let composing = false'), '必须自维护组字态');
+  // 🔴 断言必须**按函数体**定位，不能用 `/compositionstart[\s\S]*?composing = true/`
+  //   这种跨函数的贪婪匹配 —— 监听注册与处理函数体在源码里是分开的两处，
+  //   那种写法在实现换一种写法后仍可能"碰巧匹配到"，给出恒真的绿。
+  assert.match(
+    wordTriggerCode,
+    /const onCompositionStart = \(\): void => \{\s*composing = true;\s*\};/,
+    'onCompositionStart 函数体要置 composing = true',
+  );
+  assert.match(
+    wordTriggerCode,
+    /const onCompositionEnd = \(\): void => \{[\s\S]*?composing = false;/,
+    'onCompositionEnd 函数体开头要复位 composing',
+  );
+  // 🔴 blur 也要复位（老项目 :1000）：组字中 DOM 被 linkify detach 时
+  //   compositionend 可能不冒泡 ⇒ composing 卡在 true ⇒ 通道永久关死。
+  assert.match(wordTriggerCode, /addEventListener\('blur', onBlur\)/, 'blur 必须复位（老项目 :1000）');
+  assert.match(wordTriggerCode, /const onBlur = \(\): void => \{\s*composing = false;\s*\};/, 'onBlur 要清 composing');
+  // 两处拦：事件头一次 + 去抖回调内复检一次（去抖窗口内可能进入组字）
+  const guards = wordTriggerCode.match(/if \(composing\) return;/g) ?? [];
+  assert.ok(guards.length >= 2, `组字守卫应有两处（事件头 + 回调内复检），实际 ${guards.length} 处`);
+  // 也守住 beforeinput 通道的老口径没被改坏
+  assert.ok(wordTriggerCode.includes("e.inputType.indexOf('insertComposition') === 0"));
+});
+
+test('EGG-CAR-05 200ms 去抖 + 只在编辑器真持焦时判 + 有选区不判', () => {
+  // 去抖 200ms（老项目 :11095/11108）
+  assert.match(wordTriggerCode, /caretTimer = setTimeout\([\s\S]{0,80}?, 200\)/, '去抖必须是 200ms');
+  // 只在编辑器真持焦时判（老项目 :11098：别从别处的输入框抢弹）
+  assert.match(wordTriggerCode, /document\.activeElement !== root/, '必须判activeElement ===编辑器根');
+  // 有选区/无光标不判（老项目 :11077）—— 判据在 caretEggAt 里
+  const fn = wordTriggerCode.slice(wordTriggerCode.indexOf('function caretEggAt'));
+  assert.match(fn, /sel\.isCollapsed/, '有选区一律不判（真人框选不打扰）');
+  assert.match(fn, /sel\.rangeCount === 0/, '无光标不判');
+  // 必须挂在 document 且capture=true（老项目 :11109）
+  assert.match(
+    wordTriggerCode,
+    /document\.addEventListener\('selectionchange', onSelectionChange, true\)/,
+    'selectionchange 必须在 document 上capture 监听',
+  );
+  assert.match(
+    wordTriggerCode,
+    /document\.removeEventListener\('selectionchange', onSelectionChange, true\)/,
+    'dispose 必须解绑（漏解绑 ⇒ 退出编辑器后仍会凭空弹浮层）',
+  );
+});
+
+test('EGG-CAR-06 通道挂在 word-trigger.ts 且四条通道齐全（缺一条 = 用户报障复发）', () => {
+  // 这次报障的本质是「少了一条通道」，所以判据必须钉住**四条都在**。
+  assert.ok(wordTriggerCode.includes("addEventListener('beforeinput', onBeforeInput)"), '通道 1 打字');
+  assert.ok(wordTriggerCode.includes("addEventListener('compositionend', onCompositionEnd)"), '通道 2 中文整词上屏');
+  assert.ok(wordTriggerCode.includes("addEventListener('click', onClick)"), '通道 3 触屏点词');
+  assert.ok(
+    wordTriggerCode.includes("addEventListener('selectionchange', onSelectionChange, true)"),
+    '通道 4 光标落位（用户报障这条，此前整条不存在）',
+  );
+  // 反向：add 与 remove 必须配平（少一条 remove ⇒ dispose 后监听残留，
+  //   而 selectionchange 残留的后果是「编辑器已经卸载了还会凭空弹浮层」）。
+  //   🔴 用"数配平"而不是逐个拼函数名 —— `beforeinput` 拼出来是`onBeforeinput`
+  //   （实际是 `onBeforeInput`），那种拼装断言要么恒红、要么逼着人改函数名，
+  //   是判据自己制造 bug（本次第一版就踩了）。
+  const EVENTS = 'beforeinput|compositionstart|compositionend|blur|click|selectionchange';
+  const addCount = (wordTriggerCode.match(new RegExp(`addEventListener\\('(?:${EVENTS})'`, 'g')) ?? []).length;
+  const removeCount = (wordTriggerCode.match(new RegExp(`removeEventListener\\('(?:${EVENTS})'`, 'g')) ?? []).length;
+  assert.equal(addCount, removeCount, `add/remove 监听必须配平（add ${addCount} / remove ${removeCount}）`);
+  // 四条触发通道 + 组字态两条（compositionstart/blur）= 6 条在编辑器根，selectionchange 在 document
+  assert.equal(addCount, 7, `应恰好 7 条监听（编辑器 6 + document 1），实际 ${addCount}`);
+});
+
+test('EGG-CAR-07 词 id 判据与点词通道同源（两条通道不许漂移）', () => {
+  // 老项目把这段写了两遍（nsEggTokenAtCaret :11075 与 nsEggHit :11040），
+  // 判据完全同构。bj 抽成 eggTokenAtNodeRect 一份 —— 判据钉住"只有一份实现"。
+  const fnCount = (wordTriggerSrc.match(/EGG_TOKEN_RE\.exec\(/g) ?? []).length;
+  assert.equal(fnCount, 0, '判据应收口到 trigger.ts 的 eggTokenAtNode，不许在本文件重写正则');
+  assert.match(wordTriggerCode, /const id = eggTokenAtNode\(data, off\);/, '必须复用 trigger.eggTokenAtNode');
+  // 且点词通道也走同一个helper（hitEggAtPoint）
+  assert.match(wordTriggerCode, /eggTokenAtNodeRect\(root, hit\.startContainer, hit\.startOffset\)/,
+    '点词通道必须与光标通道共用 eggTokenAtNodeRect');
+  // 空白判定不许在本文件再抄一份（老项目 :11082 的字符码清单在 trigger.isWordSpace）
+  assert.ok(!/isWs\(code\)/.test(wordTriggerCode), 'isWs 应直接复用 trigger.ts 的 isWordSpace，不许重抄');
+});
+
+test('EGG-CAR-08 反向：去掉 latch / 去掉组字守卫 / 无条件收，三处都必须让判据变红', () => {
+  //🔴 这条是本组的**元判据**：确认上面几条真的在测东西，而不是恒真断言。
+  //   做法是把生产代码按"假装优化掉了"的改法改一遍，看对应判据是否还能过。
+  const src = wordTriggerCode;
+
+  // ① 去掉 latch（每次微动都 fire）
+  const noLatch = src.replace(/caretLatchVerdict\(caretTok, id\)/g, '{ fire: true, tok: id }');
+  assert.notEqual(noLatch, src, '改法①应真的改动了源码');
+  assert.ok(
+    !/caretLatchVerdict\(caretTok, id\)/.test(noLatch),
+    '改法①后 EGG-CAR-01/02 的 latch 判据应失效（说明判据确实在测 latch）',
+  );
+
+  // ② 组字守卫只剩一处（老项目要求两处）
+  const oneGuard = src.replace(/if \(composing\) return;/, '');
+  assert.ok(
+    (oneGuard.match(/if \(composing\) return;/g) ?? []).length < 2,
+    '改法②后 EGG-CAR-04 的"两处守卫"应失效（说明判据确实在数守卫）',
+  );
+
+  // ③ 离词无条件收
+  const alwaysClose = src.replace(/if \(caretOwns\(\)\) ask\.close\(\);/, 'ask.close();');
+  assert.ok(
+    /if\s*\(!id\)\s*\{\s*ask\.close\(\);/.test(alwaysClose),
+    '改法③后 EGG-CAR-03 的反向断言应触发（说明"只收自己弹的"这条判据在生效）',
+  );
 });

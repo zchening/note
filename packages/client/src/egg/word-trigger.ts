@@ -23,9 +23,21 @@
  *   在 beforeinput 里同步读也可以，但**绝不能**在 beforeinput 里改 DOM ——
  *   那会让光标跳到别处，用户看到"字打不进去"。
  *
- * 🔴 触发通道只有**打字**与**触屏点词**两条。**不移植 hover**：
+ * 🔴 触发通道共**四条**：**打字** / **中文整词上屏** / **触屏点词** /
+ *   **光标落位**（selectionchange）。**不移植 hover**：
  *   老项目 v9.4.1（用户拍板，:11059）在 PC 端去掉了「鼠标悬停即弹」，
  *   扫过 /pet /dragon 不再弹。本项目照此口径。
+ *
+ * 🔴🔴 光标落位通道（老项目 :11091-11109）是**第四条独立通道**，不是打字通道的
+ *   附属品。三条语义差在手就能感到，必须钉住：
+ *   1. **不看 `asked[]`**（老项目 :11106 注释原文「不受 asked[] 会话抑制」）——
+ *      用户主动把光标移回词上是**主动行为**，与"又打了一遍"不是一回事。
+ *   2. **latch 的是「词」而不是「位置」**（`_eggCaretTok`）：停在同一个词内
+ *      反复微动（方向键左右挪、同词里点不同位置）**只弹一次**；
+ *      「移出词再移回」才每次都弹。用户报障说的「并没有每次都出现」
+ *      准确口径就是这个 —— 不是漏弹，是同词内微动被latch 挡掉了（且这是对的）。
+ *   3. **只收自己弹起的那次**（`_askFrom === 'caret'`）：点词弹的浮层不该被
+ *      光标路收走，反之亦然。老项目 :11104 就是这个判据。
  */
 
 import {
@@ -33,6 +45,7 @@ import {
   eggTokenAtNode,
   eggVerdictAtCaret,
   caretCtxFromParts,
+  isWordSpace,
   type AskLatch,
   type CaretCtx,
 } from './trigger.ts';
@@ -48,6 +61,13 @@ export interface EggWordDeps {
 export interface EggWordBinding {
   /** 手动跑一次打字通道判定（给 e2e 钩子用）。 */
   check: () => void;
+  /**
+   * 手动跑一次**光标落位通道**判定（跳过 200ms 去抖，给 e2e 钩子用）。
+   *
+   * 🔴 为什么单独暴露：这条通道的判据全在 `window.getSelection()` 上，
+   *   真机上手动挪光标去对位置太脆，测试需要能直接驱动。
+   */
+  caretCheck: () => void;
   /** 收起浮层。 */
   hide: () => void;
   /** 浮层是否在展示。 */
@@ -130,6 +150,69 @@ function caretCtx(
 }
 
 /**
+ * 光标落位通道的闩锁判定（老项目 `_eggCaretTok` :11091-11102 的**纯逻辑部分**）。
+ *
+ * 🔴🔴 抽成纯函数是刻意的：这条通道的全部承重语义就是下面这四行，
+ *   而它们原本埋在 `selectionchange` 的 setTimeout 回调里 —— 那段代码在 node 里
+ *   不可测（要 DOM + 定时器），于是"latch 被优化掉了"这种回归**没有任何判据能拦住**。
+ *   抽出来之后 `EGG-CAR-*` 系列能直接 import 它做穷举对跑。
+ *
+ * @param prevTok 上一次判定时的词 id（离词时为 `''`）
+ * @param id 本次光标所在词（离词 / 非文本节点 / 有选区时为 `''`）
+ * @returns `fire=false` = 同词内微动，不重复弹；`fire=true` = 该弹（或该收）
+ */
+export function caretLatchVerdict(prevTok: string, id: string): { fire: boolean; tok: string } {
+  // 老项目 :11101 `if (id === _eggCaretTok) return;`
+  if (id === prevTok) return { fire: false, tok: prevTok };
+  // 老项目 :11102 `_eggCaretTok = id;` —— 注意**离词时 id 为空串，latch 被置空**，
+  // 这正是「移出词再移回，每次都弹」的实现方式（注释见老项目 :11101）。
+  return { fire: true, tok: id };
+}
+
+/**
+ * 「文本节点 + 节点内偏移」→ 该偏移所在的彩蛋词 + 该词的矩形。
+ *
+ * 🔴🔴 这是**光标落位通道**（老项目 `nsEggTokenAtCaret` :11075-11089）与
+ *   **触屏点词通道**（`nsEggHit` :11040-11056）**共用**的那一步 ——
+ *   两个通道的判据本就同构（同一个 `NS_EGG_HOVER_RE`、同一套空白切词），
+ *   老项目只是把它写了两遍。抽出来是为了让「两条通道不许漂移」成为结构事实。
+ */
+function eggTokenAtNodeRect(
+  root: HTMLElement,
+  node: Node | null,
+  offsetInNode: number,
+): { id: string; rect: DOMRect | null } {
+  const empty = { id: '', rect: null as DOMRect | null };
+  // 🔴 必须是可见文本节点：命中元素节点说明点在字与字的缝上（老项目 :11047/:11080）。
+  if (!node || node.nodeType !== 3 || !root.contains(node)) return empty;
+  // nodeType === 3 不做类型收窄，TS 仍视其为 Node —— 必须显式 `instanceof Text`
+  // 才能读 `.data`（老项目是纯 JS 才敢直接读）。
+  if (!(node instanceof Text)) return empty;
+  const data: string = node.data;
+  const off = Math.max(0, Math.min(offsetInNode, data.length));
+  // 词 id 判据复用 trigger.ts 的 `eggTokenAtNode`（内含空白切词 + EGG_TOKEN_RE），
+  // 空白判定与老项目 :11082 的字符码清单同源（`isWordSpace`）。
+  const id = eggTokenAtNode(data, off);
+  if (!id) return empty;
+  // 锚定矩形：老项目 :11088 —— 用**同一个词范围**建 Range，而不是光标那一个字符。
+  //   少了这一步浮层会锚在词首字符上，「弹在词旁」就变成了「弹在词头上」。
+  let i = off;
+  while (i > 0 && !isWordSpace(data.charCodeAt(i - 1))) i -= 1;
+  let j = off;
+  while (j < data.length && !isWordSpace(data.charCodeAt(j))) j += 1;
+  let rect: DOMRect | null = null;
+  try {
+    const rg = document.createRange();
+    rg.setStart(node, i);
+    rg.setEnd(node, Math.min(j, data.length));
+    rect = rg.getBoundingClientRect();
+  } catch {
+    rect = null;
+  }
+  return { id, rect };
+}
+
+/**
  * 绑定彩蛋词表触发。
  *
  * @param root 编辑器根 DOM（`#editor-host`，即 `editor.getRootElement()`）
@@ -146,6 +229,62 @@ export function bindEggWordTrigger(root: HTMLElement, deps: EggWordDeps): EggWor
     }
   };
   const ask: EggAsk = buildEggAsk({ refocus: deps.refocus, launch: deps.launch, hoverFine }, latch);
+
+  /**
+   * 🔴 组字期标记（老项目模块级 `isComposing` :983-1000 的等价物）。
+   *
+   *   为什么打字通道不用它、只有光标通道用：`beforeinput` 事件自带 `e.isComposing`
+   *   与 `inputType` 前缀，逐事件判就够（见 onBeforeInput）。但 `selectionchange`
+   *   **不带任何输入法信息** —— 组字过程中浏览器会连续派发它（拼音候选框跟随光标移动），
+   * 老项目 :11093 与 :11097 两处都拦，注释写明「红线9：组字期绝不打扰」。
+   *   ⇒ 必须自己维护一份跨事件的持续态。
+   *
+   *   `blur` 也要复位（老项目 :1000，注释记了真实故障）：组字中 DOM 被 linkify 手术
+   *   detach 掉时 `compositionend` 可能不冒泡，标记卡在 true 会把这条通道**永久关死**。
+   */
+  let composing = false;
+
+  /** 组字开始（老项目 :984）。 */
+  const onCompositionStart = (): void => {
+    composing = true;
+  };
+
+  /**
+   * 🔴 组字中失焦即复位（老项目 :1000，注释里记了真实故障）。
+   *   漏了这条：linkify 的 DOM 手术 detach 掉组字目标节点时 `compositionend`
+   *   可能不冒泡，`composing` 卡在 true ⇒ 光标落位通道**永久关死**，
+   *   症状是「偶发再也不弹」，极难归因。
+   */
+  const onBlur = (): void => {
+    composing = false;
+  };
+
+  /**
+   * 🔴 老项目 `_askFrom`（:11103-11105）的等价物：**当前浮层是不是光标路弹的**。
+   *
+   * 老项目那行是三档（`hover`/`tap`/`caret`）的字符串比较；bj 没有 hover 通道
+   * （v9.4.1 已去，:11059），所以只剩 caret 一档要判。**为什么用「id 比对」而不是
+   * 一个 `_askFrom` 变量**：老项目 `hideAsk` 会顺手把 `_askFrom` 清空，
+   * 而 bj 的 `ask.close()`（ask.ts）**不碰**这个状态 —— 用单一变量的话，
+   * 「点 ✕ 关掉后」这个边缘态会误判成"还是光标路弹的"，下次离词就去收一个
+   * 别的通道弹的浮层。比对 `showingId()` 则 close 之后自动不成立，无需手工清。
+   */
+  let caretOpenedId = '';
+
+  /**
+   * 老项目 `_eggCaretTok`（:11091）：光标落位通道的**词闩锁**。
+   *
+   * 🔴🔴 这是整条通道最容易被"优化掉"的一行，而它承载的正是老项目
+   *   :11101 注释写明的语义：「光标停在同一个彩蛋词内微动不重复弹；
+   *   离开词会置空，下次再进来才弹」。
+   *   去掉它 ⇒ 方向键在词内左右挪一下就重弹一次（用户看到的是"闪个不停"）。
+   */
+  let caretTok = '';
+  /** 在途的 200ms 去抖定时器。`undefined` = 无在途。 */
+  let caretTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+
+  /** 当前展示的浮层是不是光标路弹起的（老项目 :11104 `_askFrom === 'caret'`）。 */
+  const caretOwns = (): boolean => caretOpenedId !== '' && ask.showingId() === caretOpenedId;
 
   /** 打字通道判定（老项目 `nsWordTriggerAtCaret` :10958）。 */
   const check = (): void => {
@@ -185,6 +324,10 @@ export function bindEggWordTrigger(root: HTMLElement, deps: EggWordDeps): EggWor
      Chromium 拼音 commit 不派 insertText，只发 compositionend。
      漏这条 ⇒ 中文状态下敲 /mirror 永不弹（老项目 v8.3.1 闸二 CDP 真机实锤）。 */
   const onCompositionEnd = (): void => {
+    // 🔴 组字态复位（老项目 :986 `isComposing = false` 在最前面）。
+    //   顺序承重：必须**先**复位再排 setTimeout(0)，否则那次 check 跑的时候
+    //   composing 仍是 true，光标落位通道会在组字刚结束时误判。
+    composing = false;
     setTimeout(() => {
       try {
         check();
@@ -217,24 +360,112 @@ export function bindEggWordTrigger(root: HTMLElement, deps: EggWordDeps): EggWor
     if (b && !b.contains(e.target as Node)) ask.close();
   };
 
+  /* ---- 通道 4：光标落位。老项目 :11091-11109 ----
+     🔴 这是用户报障「光标移到彩蛋词上不弹确认框」的那一条，
+        bj 此前**完全没有**（全库无selectionchange 监听）。
+
+     语义逐条照抄老项目：
+       - 200ms 去抖（:11095/11108）：方向键连按时 selectionchange 连发，不去抖会狂弹。
+       - 组字期两次拦（:11093 事件头+ :11097 回调内复检）：去抖窗口内可能进入组字。
+       - 只在编辑器真持焦时判（:11098）：别从别处的输入框抢弹。
+       - `_eggCaretTok` latch（:11101-11102）：**同一词内微动不重复弹**。
+         这正是用户说「并没有每次都出现」的准确口径 —— 移出词再移回每次都弹，
+         停在同一个词里反复微动只弹一次（这是对的，不是漏弹）。
+       - 离词只收**自己弹起的那次**（:11104）。
+       - **不受 asked[] 会话抑制**（:11106 注释原文）：主动把光标移回词上是主动行为。
+     */
+  const caretVerdict = (): void => {
+    try {
+      if (composing) return; // 红线9复检（老项目 :11097）
+      if (document.activeElement !== root) return; // 只在编辑器真持焦时判（:11098）
+      const h = caretEggAt(root);
+      const id = h.id;
+      // 🔴 latch 比的是**词 id**，不是位置。老项目 :11101-11102
+      //   「离开词会置空，下次再进来才弹」—— 置空就发生在下面 tok 那行。
+      const v = caretLatchVerdict(caretTok, id);
+      caretTok = v.tok;
+      if (!v.fire) return;
+      // 离词 → 收，且**只收自己弹起的那次**（老项目 :11104 的 `_askFrom === 'caret'`）。
+      if (!id) {
+        if (caretOwns()) ask.close();
+        return;
+      }
+      caretOpenedId = id;
+      ask.open(id, h.rect);
+    } catch {
+      /* 判定失败绝不能打断输入 */
+    }
+  };
+
+  const onSelectionChange = (): void => {
+    if (composing) return; // 红线9（老项目 :11093）
+    if (caretTimer !== undefined) clearTimeout(caretTimer);
+    caretTimer = setTimeout(() => {
+      caretTimer = undefined;
+      caretVerdict();
+    }, 200);
+  };
+
   root.addEventListener('beforeinput', onBeforeInput);
+  root.addEventListener('compositionstart', onCompositionStart);
   root.addEventListener('compositionend', onCompositionEnd);
+  root.addEventListener('blur', onBlur);
   root.addEventListener('click', onClick);
   document.addEventListener('click', onDocClick);
+  // 🔴 capture=true（老项目 :11109）：selectionchange 不冒泡，但捕获阶段能收到，
+  //   且能抢在任何冒泡监听之前。
+  document.addEventListener('selectionchange', onSelectionChange, true);
 
   return {
     check,
+    caretCheck: () => {
+      if (caretTimer !== undefined) clearTimeout(caretTimer);
+      caretTimer = undefined;
+      caretVerdict();
+    },
     hide: () => ask.close(),
     isOpen: () => ask.isOpen(),
     showingId: () => ask.showingId(),
     dispose: () => {
       root.removeEventListener('beforeinput', onBeforeInput);
+      root.removeEventListener('compositionstart', onCompositionStart);
       root.removeEventListener('compositionend', onCompositionEnd);
+      root.removeEventListener('blur', onBlur);
       root.removeEventListener('click', onClick);
       document.removeEventListener('click', onDocClick);
+      document.removeEventListener('selectionchange', onSelectionChange, true);
+      // 🔴 在途去抖定时器必须撤：dispose 后它再跑一次会凭空弹出一个浮层，
+      //   而外壳已经拆了 —— 表现为「退出游戏后编辑器上方凭空冒出个胶囊」。
+      if (caretTimer !== undefined) clearTimeout(caretTimer);
+      caretTimer = undefined;
+      caretTok = '';
+      caretOpenedId = '';
       ask.close();
     },
   };
+}
+
+/**
+ * 光标落位通道的「取词 + 取词矩形」。老项目 `nsEggTokenAtCaret`（:11075-11090）
+ * 的 DOM 取值部分；判定部分复用 `eggTokenAtNodeRect`（与点词通道同源）。
+ */
+function caretEggAt(root: HTMLElement): { id: string; rect: DOMRect | null } {
+  const empty = { id: '', rect: null as DOMRect | null };
+  let sel: Selection | null = null;
+  try {
+    sel = window.getSelection();
+  } catch {
+    return empty;
+  }
+  // 🔴 有选区或无光标一律不判（老项目 :11077）。真人框选时绝不该弹。
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return empty;
+  let r: Range;
+  try {
+    r = sel.getRangeAt(0);
+  } catch {
+    return empty;
+  }
+  return eggTokenAtNodeRect(root, r.startContainer, r.startOffset);
 }
 
 /** 指针命中彩蛋词。老项目 `nsEggHit`（:11062）。 */
@@ -261,32 +492,8 @@ function hitEggAtPoint(
     }
   }
   if (!hit) return empty;
-  const node: Node | null = hit.startContainer;
-  // 🔴 必须是可见文本节点（老项目 :11066）：命中元素节点说明点在字与字的缝上。
-  //   🔴 `nodeType === 3` 不做类型收窄，TS 仍视其为 Node —— 必须显式
-  //   `instanceof Text`（老项目是纯 JS 才敢直接读 `.data`）。
-  if (!(node instanceof Text) || !root.contains(node)) return empty;
-  const data: string = node.data;
-  const off = Math.max(0, Math.min(hit.startOffset, data.length));
-  // 空白边界与老项目 :11079 的 isWs 同款（用字符码而非正则）
-  let i = off;
-  while (i > 0 && !isWs(data.charCodeAt(i - 1))) i -= 1;
-  let j = off;
-  while (j < data.length && !isWs(data.charCodeAt(j))) j += 1;
-  const id = eggTokenAtNode(data, off);
-  if (!id) return empty;
-  let rect: DOMRect | null = null;
-  try {
-    const rg = document.createRange();
-    rg.setStart(node, i);
-    rg.setEnd(node, Math.min(j, data.length));
-    rect = rg.getBoundingClientRect();
-  } catch {
-    rect = null;
-  }
-  return { id, rect };
-}
-
-function isWs(code: number): boolean {
-  return code === 32 || code === 9 || code === 10 || code === 13 || code === 12288;
+  // 🔴 命中判定与矩形**全部**委托给 eggTokenAtNodeRect ——
+  //   老项目把这段写了两遍（nsEggHit :11048-11055 与 nsEggTokenAtCaret :11081-11089），
+  //   两份判据同构。这里收口成一份，让「两条通道不许漂移」成为结构事实。
+  return eggTokenAtNodeRect(root, hit.startContainer, hit.startOffset);
 }

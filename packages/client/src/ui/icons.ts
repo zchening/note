@@ -347,14 +347,22 @@ export const LOGO = (): string =>
  * 🔴🔴 尺寸被老项目用 CSS **按视口 clamp** 到 17–27px；原新项目写死 `width="48"`，
  *   而顶栏格只有 17px 高 —— 一个 48px 的 SVG 塞进 17px 格子里，
  *   实际渲染成一团糊的色块，还会把顶栏行高撑开。
- *   ⇒ 这里**不写死 width/height**，尺寸交给 CSS 的 clamp（见 styles.css 的 `.ns-logo-sm`），
- *   与老项目「用 CSS 缩放 SVG、HTML 里不写尺寸」的做法一致。
+ *   ⇒ 这里**不写死 width/height**，尺寸交给 CSS（见 styles.css 的 `.ns-brand .ns-mark svg`），
+ *   与老项目「用 CSS 缩放 SVG、HTML 里不写尺寸」的做法一致。**恒定 17px，不随视口变。**
  *
  * 🔴 描边 3.6 而不是 2.3：小尺寸下必须加粗才看得见弧环，
  *   这是老项目"同一枚 logo 两档描边"的原意（顶栏档 3.6 / 落地页档 2.3）。
+ *
+ * 🔴🔴 2026-10-07 删掉了 svg 上的 `class="ns-logo-sm"`（用户报障第 5 条
+ *   「左上角 Logo 大小和老版本不一样」）。此前那条 class 挂着一份
+ *   `width:clamp(17px,4.4vw,27px)`，让视口 ≥386px 时 logo 就开始变大、
+ *   ≥614px 到 27px；**老项目 index.html:102 是恒定 17px，全文零 clamp**。
+ *   现在尺寸由 `.ns-brand .ns-mark svg` 承担（与老项目 :102 逐值等价）。
+ *   ⚠️ 删 clamp 的同时**必须**有那条规则接手：SVG 没有 width/height 属性时
+ *   默认占 300×150，只给外层 span 定尺寸是约束不住它的。
  */
 export const LOGO_SM = (): string =>
-  '<svg class="ns-logo-sm" viewBox="0 0 48 48" fill="none" aria-hidden="true">' +
+  '<svg viewBox="0 0 48 48" fill="none" aria-hidden="true">' +
   '<g stroke="currentColor" stroke-width="3.6" stroke-linecap="round">' +
   '<path d="M40.5 14.5A19 19 0 0 1 14.5 40.5"/>' +
   '<path d="M7.5 33.5A19 19 0 0 1 33.5 7.5"/>' +

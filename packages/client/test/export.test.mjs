@@ -79,9 +79,16 @@ test('EXPORT-05 🔴 折叠补丁必须覆盖三角 + 恒定展开 + 缩进引�
   //   早先写的是 `[data-ns-export]::before`，而 buildCard 把该属性打在了**整张离屏卡**上
   //   ⇒ ▼ 被画在卡片正文流最前面 ＝ 用户报障「导出图左上角多了个箭头」。
   //   （那条整卡规则的正向判据已移到 visual-parity 的 VP-10，与反向断言同处一处。）
+  // 🔴🔴 选择器必须带 `.ns-fold[data-ns-export-fold]` 前缀，只写属性那一段会输：
+  //   收起态基规则 `.ns-fold[data-open="false"] > :not(:first-child)` 是 **(0,3,0)**
+  //   （`:not()` 取其参数 specificity，自身不贡献），
+  //   而 `[data-ns-export-fold] > :not(:first-child)` 只有 **(0,2,0)** ⇒ 补丁失效，
+  //   导出图里收起的折叠块**整块正文丢失**（用户报障第 11 条）。
+  //   上一批就是写短了，而且既有断言全是正则匹配字符串、从不读 computed style，
+  //   所以 425 个测试全绿也照样漏过去。
   assert.match(
     EXPORT_FOLD_CSS,
-    /\[data-ns-export-fold\] > :first-child::before/,
+    /\.ns-fold\[data-ns-export-fold\]\[data-open\] > :first-child::before/,
     '三角补丁必须挂在折叠把手上，不许打在整张卡上',
   );
   assert.match(EXPORT_FOLD_CSS, /25BC/, '缺 ▼ 字形');
@@ -207,12 +214,17 @@ test('EXPORT-15 🔴 借壳反色护栏：图片 filter 必须内联 !important 
 test('EXPORT-16 卡片结构：外衬卡 + 内衬 + 页头 + 页脚各就位', () => {
   // 🔴 这是**结构**判据，不是样式判据：老项目 v9.5.0 之前是"裸正文平铺"，
   //   用户打回后才改成书纸卡。少任何一层都算功能回退。
-  for (const needle of [
-    "mat.setAttribute(\n    'style',\n    'background:var(--bg)",
-    "wrap.setAttribute(\n    'style',\n    'position:absolute;left:-9999px",
-  ]) {
-    assert.ok(CARD_SRC.includes(needle), `卡片层缺失：${needle.slice(0, 30)}`);
-  }
+  // 🔴🔴 用**空白无关**的正则，不要硬编码多行缩进：
+  //   原判据写死 `"mat.setAttribute(\n    'style',\n    ..."`，
+  //   只要有人给这行换个缩进（或跑 prettier），判据就红 —— 而卡片层其实好好地在那儿。
+  //   这类"对排版过敏"的断言会在无关改动时制造假红，久了就没人信它了。
+  //   （memory 纪律：判据要钉**产物**，钉到会被无关改动影响的地方就是钉歪了。）
+  assert.match(CARD_SRC, /mat\.setAttribute\(\s*'style',\s*'background:var\(--bg\)/, '内衬 mat 层缺失');
+  assert.match(
+    CARD_SRC,
+    /wrap\.setAttribute\(\s*'style',\s*'position:absolute;left:-9999px/,
+    '外衬 wrap 层缺失',
+  );
   // 页脚必须含品牌与题句两处
   assert.match(CARD_SRC, /wmB\.textContent = 'NoteSync'/, '页脚缺品牌落款');
   assert.match(CARD_SRC, /tail\.textContent = pickTagline\(\)/, '页脚缺随机题句');

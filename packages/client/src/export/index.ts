@@ -107,7 +107,12 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
     //   那是老项目里不存在的文案，且弹在预览浮层**背后**，用户压根看不见，
     //   等于凭空多一次状态切换（预览层盖住提示条，关闭后又闪一下）。
     if (kind === 'preview') return kind;
-    deps.onStatus('ok', COPY.exportOkMsg(kind), deps.okMs);
+    // 🔴🔴 触屏上剪贴板档不能给「Ctrl+V」（手机没这个动作）。
+    //   触屏判据与 dismissKeyboardForTouch 同一套，不用 UA sniff。
+    const touch =
+      typeof matchMedia === 'function' &&
+      matchMedia('(hover: none) and (pointer: coarse)').matches;
+    deps.onStatus('ok', (touch ? COPY.exportOkMsgTouch : COPY.exportOkMsg)(kind), deps.okMs);
     return kind;
   } catch (e) {
     // 🔴 SecurityError 是外链图片跨域的典型症状，必须说人话而不是回显英文
@@ -159,6 +164,20 @@ export function showPreview(blob: Blob): void {
   //   —— 与 .link-hint（11.5px/1.6）**不是**同一条规则，别混用。
   tip.setAttribute('style', 'font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0');
 
+  // 🔴🔴 触屏补一行「怎么进微信」（用户报障第 13 条）。
+  //   移动端几乎必然落在预览档：剪贴板被 WebView 拒、canShare 又常为 false。
+  //   而老项目那句「长按图片可保存或发送」没点名"转发给微信"，
+  //   用户看到图只会以为导出失败。桌面端不加（桌面有分享面板与 Ctrl+V）。
+  const touch =
+    typeof matchMedia === 'function' &&
+    matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const wechatTip = document.createElement('p');
+  wechatTip.textContent = COPY.exportPreviewTipTouch;
+  wechatTip.setAttribute(
+    'style',
+    'font-size:12px;color:var(--muted);line-height:1.7;margin:6px 0 0',
+  );
+
   // 🔴 老项目 index.html:2982-2988：按钮行与两个按钮全是内联样式，
   //   描边胶囊 `padding:10px 22px;border:1px solid var(--line);border-radius:999px;font-size:13px`，
   //   「完 成」按钮只补 `padding:10px 22px`（其余靠 row-btn 的 class 兜）。
@@ -182,6 +201,7 @@ export function showPreview(blob: Blob): void {
   box.appendChild(h);
   box.appendChild(img);
   box.appendChild(tip);
+  if (touch) box.appendChild(wechatTip);
   box.appendChild(btnRow);
   overlay.appendChild(box);
   document.body.appendChild(overlay);

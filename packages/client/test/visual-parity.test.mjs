@@ -136,20 +136,39 @@ test('VP-05 `.box input` 必须是元素选择器（老项目 :513 不带属性�
   assert.doesNotMatch(CSS_BODY, /\.box input\[type=/, '.box input 不许收窄到某个 type');
 });
 
-test('VP-06 弹窗次要按钮/禁用态按**实测**对齐，不是按源码字面（老项目 :518/:522）', () => {
-  // 🔴🔴 老项目源码 :518 写着 `.box button.ghost-btn{background:none;color:var(--muted)…}`，
-  //   但**真浏览器量它自己的五个 .ghost-btn，五个全都命中**
-  //   `.box button:not(:disabled):not(.box-x)`（specificity 0,3,1，压过 ghost-btn 的 0,2,1）
-  //   ⇒ background/color/font-weight 被吃回主按钮那套，只有 margin-top / border 留下。
-  //   照字面补 ghost-btn 会做出老项目根本没有的描边透明按钮。
+test('VP-06 弹窗按钮底色由老项目 :1063 的 !important 决定（非禁用一律 --fg 底 / --bg 字）', () => {
+  // 🔴🔴🔴 本条原先断言「次要按钮底色走 --hover」，**那个前提是错的**，
+  //   上一批因此留了一条 `.box button:not(.box-x):not(:disabled){background:var(--hover)}`，
+  //   把深底刷成浅灰淡底 —— 用户报障第 2 条「弹窗内下方按钮颜色不对」的真实根因。
+  //
+  //   真相：老项目**运行时注入**了一条 `!important` 主题覆盖
+  //   （applyTheme 在 index.html:1269 无条件挂上，模板在 themeCssCore() :1045-1067），
+  //   其中 :1063 是：
+  //     .box button:not(:disabled):not(.box-x){
+  //       background:${p.fg}!important;color:${p.bg}!important;-webkit-text-fill-color:${p.bg}!important}
+  //   specificity (0,3,1) + !important ⇒ ghost-btn（0,2,1）的
+  //   background/color/font-weight 全被吃回，**只有 margin-top 与 border 活下来**。
+  //   日间实测：底 rgb(28,28,26)=--fg，字 rgb(251,251,248)=--bg。
+  //
+  //   ⇒ 判据改成钉这条：非禁用按钮**没有**单独的覆写规则，底色由
+  //     `.box button:not(.box-x)` 的 --upload-bg（≡ --fg/--bg 二选一）决定。
   const ghostless = CSS_BODY.match(/\.box button\.ghost-btn\s*\{/g) ?? [];
   assert.deepEqual(ghostless, [], '老项目那条 ghost-btn 实际不生效，不许照字面实现');
-  const sec = rule('.box button:not(.box-x):not(:disabled)');
-  assert.ok(sec, '缺次要按钮态规则');
-  assert.match(sec, /background:\s*var\(--hover\)/, '老项目实测：次要按钮底色走 --hover');
-  assert.match(sec, /color:\s*var\(--fg\)/);
-  assert.match(sec, /font-weight:\s*400/);
-  assert.match(sec, /border:\s*1px solid var\(--line\)/);
+
+  // 反向钉死：不得存在任何"非禁用按钮另刷底色"的规则。
+  // 这是本条判据的**金标**——把 --upload-bg 改成 --hover 就会红，避免再次回归。
+  const override = CSS_BODY.match(/\.box button:not\(\.box-x\):not\(:disabled\)\s*\{/g) ?? [];
+  assert.deepEqual(override, [], '非禁用按钮的老项目真实渲染由 :1063 的 !important 决定，不许再叠加一条覆写');
+
+  // 金标：底色走 --upload-bg、字色走 --bg（与老项目 --fg 底 / --bg 字等价）
+  const base = rule('.box button:not(.box-x)');
+  assert.ok(base, '缺 .box button:not(.box-x) 基础规则');
+  assert.match(base, /background:\s*var\(--upload-bg\)/, '弹窗按钮底色必须走 --upload-bg（老项目 :1063 的 --fg）');
+  assert.match(base, /color:\s*var\(--bg\)/, '弹窗按钮字色必须走 --bg（老项目 :1063 的 --bg）');
+
+  // 反向：--hover 是"浅灰淡底"（日间 rgba(28,28,26,.05)），绝不能出现在按钮底色上
+  assert.doesNotMatch(base, /--hover/, '按钮底色不许走 --hover：那会把深底刷成浅灰淡底');
+
   const dis = rule('.box button:not(.box-x):disabled');
   assert.match(dis, /background:\s*var\(--line\)/, '老项目 :522 禁用底色走 --line');
   assert.match(dis, /color:\s*var\(--muted\)/);
@@ -229,11 +248,21 @@ test('VP-10 导出卡不许把 data-ns-export 打在 wrap 上（老项目 :3098-
   // 反向：CSS 里也不许再有作用于整张卡的那条 [data-ns-export] 基规则
   assert.doesNotMatch(EXPORT_FOLD_CSS, /\[data-ns-export\]\{/, '不许有打在整张卡上的 [data-ns-export] 基规则');
   // 折叠把手上必须有 ▼（老项目 :3104）且要撤掉编辑器那枚边框三角
-  assert.match(EXPORT_FOLD_CSS, /\[data-ns-export-fold\] > :first-child::before/);
+  // 🔴 选择器必须带 `.ns-fold[data-ns-export-fold][data-open]` 前缀（0,4,0），
+  //   才压得住收起态基规则的 (0,3,0) —— 见 export.test.mjs EXPORT-05 的 specificity 计算。
+  assert.match(
+    EXPORT_FOLD_CSS,
+    /\.ns-fold\[data-ns-export-fold\]\[data-open\] > :first-child::before/,
+    '补丁选择器短了 ⇒ 压不过收起态的 display:none ⇒ 导出图丢折叠正文（报障第 11 条）',
+  );
   assert.match(EXPORT_FOLD_CSS, /25BC/, '导出图折叠三角必须是 ▼ 字形');
   assert.match(EXPORT_FOLD_CSS, /border:0/, '必须把边框三角撤掉，否则出现两个三角');
   // 恒定展开 + 缩进引导线仍在
-  assert.match(EXPORT_FOLD_CSS, /\[data-ns-export-fold\] > :not\(:first-child\)\{display:block\}/);
+  assert.match(
+    EXPORT_FOLD_CSS,
+    /\.ns-fold\[data-ns-export-fold\]\[data-open\] > :not\(:first-child\)\{display:block\}/,
+    '恒定展开规则的选择器同样必须带 .ns-fold 前缀',
+  );
   assert.match(EXPORT_FOLD_CSS, /border-left:2px solid var\(--line\)/);
 });
 

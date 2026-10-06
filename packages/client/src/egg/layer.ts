@@ -97,7 +97,9 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
   const defs: Record<string, () => AnyGame> = {
     mirror: () => mirrorGame(),
     snake: () => snakeGame(() => ({ body: h.bodyText(), favs: h.favs(), cur: h.curNote() })),
-    dragon: () => dragonGame(() => ({ body: h.bodyText(), favs: h.favs() })),
+    // 🔴 `cur`（当前笔记名）是dragon 开场站牌「未命名笔记 · N 字」的素材
+    //   （老项目 :11801 `title().length * 128`）。漏传则站牌恒显示「未命名笔记」。
+    dragon: () => dragonGame(() => ({ body: h.bodyText(), favs: h.favs(), cur: h.curNote() })),
     brick: () => brickGame(() => ({ body: h.bodyText(), favs: h.favs() })),
     satoshi: () => satoshiGame(),
     bitcoin: () => bitcoinGame(),

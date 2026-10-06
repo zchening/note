@@ -94,6 +94,13 @@ const edge = (from: SyncState, ev: SyncEvent): string => `${from}>${ev}`;
  * 设计要点：**没有"任何状态都能做的事"**。locked 态只有 unlock / lock 两条边 ——
  * 没有密钥时编辑、重拉、推送在语义上都是无意义的。老项目就是在这里让人
  * "锁着也能改、改了不保存"，最后靠用户自己发现，已知 bug。
+ *
+ * 🔴🔴 判据是「这条边在**真实网络时序**下会不会发生」，不是「理论上能否想象」。
+ *   本文件此前漏了 6 条必然踩到的边（offline--remote-arrived、pushing--push、
+ *   dirty--pushed/pulled/merge-clean/merge-conflict），
+ *   症状统一是 main.ts:1567 把内部异常消息当用户文案推到底栏，
+ *   用户看到「最后同步：非法状态转移：…」+ 红点 —— 探针实测见 client.ts send() 的注释。
+ *   补边的依据一律是老项目对应行号，逐条写在各边注释里，不靠推理。
  */
 const EDGES: ReadonlySet<string> = new Set<string>([
   // 未解锁：只有解锁一条路
@@ -119,17 +126,56 @@ const EDGES: ReadonlySet<string> = new Set<string>([
   edge('dirty', 'refresh'),
   edge('dirty', 'edit'),
   edge('dirty', 'network-fail'),
+  // 🔴🔴 dirty 的**迟到结论**三条边。共同成因：pull() 是异步的，
+  //   等它 await 回来时用户可能又打字了（syncing --edit--> dirty）。
+  //   探针实测（tools/probe 系列的 E5）：这么打一次，
+  //   onError 里就多一条「非法状态转移：dirty --merge-clean-->」⇒ 底栏闪红点。
+  //   老项目同一时序的处理见 index.html:9306
+  //   `if (busy) { ...; pendingResave = true; return; }`
+  //   —— 在途期间的新输入**挂起重存**，绝不报错。所以这三条必须是合法边。
+  edge('dirty', 'pulled'),
+  edge('dirty', 'merge-clean'),
+  edge('dirty', 'merge-conflict'),
+  // 🔴 dirty --pushed-->：push 在途时用户又打了字（pushing --edit--> dirty），
+  //   POST 回来才发 pushed。此时**那批字还没推上去**，绝不能因为一次
+  //   pushed 就宣称已同步 —— 那是"静默降级"的典型：用户以为存上了。
+  //   ⇒ 停在 dirty，交给 noteEdit 已经挂好的去抖定时器再推一次。
+  edge('dirty', 'pushed'),
 
   // pushing：成功 → idle；网络挂 → offline；推的过程中用户又打字 → dirty（回到 dirty 重推）
   edge('pushing', 'pushed'),
   edge('pushing', 'network-fail'),
   edge('pushing', 'edit'),
   edge('pushing', 'remote-arrived'),
+  // 🔴🔴 pushing --push-->：**合并干净后自动重推**那条路径必然踩到。
+  //   client.ts decryptAndMerge 末尾 `send('merge-clean')` 把状态推到 pushing，
+  //  紧接着 `await this.push()`，而 push() 第一句就是 `send('push')`
+  //   —— 于是变成 pushing --push-->，之前无此边，抛异常。
+  //   探针实测 E1'：PC 与手机改**不同处**（不是冲突路径，是最常见的正常协作路径）
+  //   必红一次。老项目允许这个重入且写明了理由，见 index.html:9486-9490：
+  //   「PUT 期间占住保存互斥……busy 重复置位无害」，
+  //   且 :9488 明确说「入口拦会误杀 409 合并路径」。
+  //   ⇒ 语义上确实该有，且只能自环（仍在推，不许倒退）。
+  edge('pushing', 'push'),
 
   // offline：编辑照常留本地；网络恢复或手动刷新 → 去拉
   edge('offline', 'edit'),
   edge('offline', 'online'),
   edge('offline', 'refresh'),
+  // 🔴🔴🔴 offline --remote-arrived-->：**用户报障第1 条的正身**。
+  //   SSE 连接还活着（所以推送收得到），但先前某次 fetch 失败把状态落在 offline。
+  //   client.ts openStream 只挡 pushing/syncing（:518），offline 漏在挡外，
+  //   于是 `send('remote-arrived')` 抛异常 → onError → main.ts:1567
+  //   footStatus('offline', 内部消息) ⇒ 底栏闪红点 +「非法状态转移：…」。
+  //
+  //   老项目口径：收到推送**一律重拉，从不报状态错误** ——
+  //     index.html:10047 `sseSource.onmessage = () => { poll(); }`（无任何状态判断）
+  //     index.html:9930-9932 poll 的守卫只有 busy / inflightWrites / !cryptoKey / bakMode
+  //     index.html:10026-10030 poll 的 catch 把失败归成
+  //       已锁定 / 离线 / 同步中断 —— **30 句白名单里没有"非法状态转移"**
+  //   ⇒ 对应到 bj 就是这条边：去重拉一次。拉不成pull 自己会 network-fail 回offline
+  //   （syncing --network-fail--> offline 是既有边），闭环。
+  edge('offline', 'remote-arrived'),
 
   // conflict：只能由用户裁决或重拉解除，不许自己恢复
   //（自己恢复 = 用户根本不知道自己的内容被合并改过）
@@ -137,6 +183,14 @@ const EDGES: ReadonlySet<string> = new Set<string>([
   edge('conflict', 'resolve-remote'),
   edge('conflict', 'refresh'),
   edge('conflict', 'network-fail'),
+  // 🔴 conflict 态**故意没有** remote-arrived / pulled / merge-* 边。
+  //   不是漏了，是老项目的对应行为根本不是"再合并一次"，而是**存起来等用户拍板**：
+  //     index.html:9947 `if (pendingRemoteNote) { pendingRemoteNote = note; return; }`
+  //     index.html:9955、:9966 三处同款守卫，注释写"挂起期不消费版本、不应用 rem"
+  //   ⇒ bj 侧由 client.ts openStream 在 conflict 时**不重拉**来对齐（见该处注释），
+  //     而不是给状态机开一条边让pull() 在用户没拍板时又改一次文档。
+  //   探针实测 E3'：开着这条边时，冲突期间一次 SSE 会连抛两条
+  //   （conflict --remote-arrived--> 与随后的 conflict --merge-conflict-->）。
 
   // 锁定：任何非锁态都能发生（用户点"退出锁定"）
   edge('idle', 'lock'),
@@ -194,19 +248,30 @@ export function reduce(from: SyncState, ev: SyncEvent): SyncState {
       if (ev === 'remote-arrived' || ev === 'refresh') return 'syncing';
       if (ev === 'edit') return 'dirty';
       if (ev === 'network-fail') return 'offline';
-      return 'locked'; // lock
+      // 🔴 迟到的结论：绝不清 dirty（见 EDGES 里那几条边的注释）。
+      //   pulled  保持 dirty：那批字还没推，绝不能宣称已同步。
+      //   merge-clean     → pushing：合并干净，本地确有改动要推上去。
+      //   merge-conflict  → conflict：真冲突，回退到"等用户裁决"。
+      if (ev === 'merge-clean') return 'pushing';
+      if (ev === 'merge-conflict') return 'conflict';
+      //🔴 pulled / pushed 落回 dirty，但**lock 必须仍然回 locked**——
+      //   写成 `return 'dirty'` 会把 lock 一起吞掉，用户点"退出锁定"于是锁不掉。
+      //   （S3-37 钉的就是这条；这条边界是补边时最容易踩的坑。）
+      if (ev === 'lock') return 'locked';
+      return 'dirty'; // pulled / pushed
 
     case 'pushing':
       if (ev === 'pushed') return 'idle';
       if (ev === 'network-fail') return 'offline';
       if (ev === 'edit') return 'dirty';
       if (ev === 'remote-arrived') return 'syncing';
+      if (ev === 'push') return 'pushing'; // 合并干净后的自动重推：仍在推，自环
       return 'locked'; // lock
 
     case 'offline':
       if (ev === 'edit') return 'offline'; // 继续攒本地改动，不尝试推送
       if (ev === 'lock') return 'locked';
-      return 'syncing'; // online / refresh
+      return 'syncing'; // online / refresh / remote-arrived（老项目：收到推送就重拉）
 
     case 'conflict':
       if (ev === 'resolve-local') return 'dirty';

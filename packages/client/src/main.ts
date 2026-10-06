@@ -68,6 +68,8 @@ import { ReminderUI } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
 import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
+import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
+import { dayGreet } from './egg/fx.ts';
 import { mountPet, unmountPet } from './egg/pet.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
@@ -935,6 +937,26 @@ function onTopbar(act: TopbarAction): void {
  *   解密是异步的，在 mountEditor 内部拉会出现"编辑器先显示空的，
  *   稍后内容才闪进来"的中间态，而用户在这半秒内打字就会被打断。
  */
+/**
+ * 进笔记时递一句「每日一句话」（老项目 index.html:3481/3512/10323 三处调用）。
+ *
+ * 🔴 为什么要延 1000ms：老项目三处调用点全是 `setTimeout(..., 1000)`
+ *   （index.html:3481 注释写明「v5.44：与 PWA 安装条同帧不抢」）——
+ *   问候与安装条、节日雨都挤在"进笔记"这一刻，不让开就会互相盖。
+ *
+ * `dayGreet` 内部自带幂等（同日同篇不重复）与错峰判断
+ * （冲突条/更新条在场时跳过），这里只管调用时机。
+ */
+function greetThisNote(noteId: string): void {
+  window.setTimeout(() => {
+    try {
+      dayGreet(noteId);
+    } catch {
+      /* 问候是装饰，绝不能影响进笔记 */
+    }
+  }, 1000);
+}
+
 function mountEditor(name: string, initialDoc?: Doc): void {
   currentNote = name;
   // 🔴 收藏态与收藏夹列表必须在**挂菜单之前**算好：菜单是打开时读这两个值的，
@@ -944,6 +966,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   menuState.favList = favListOf(favStore);
 
   const shell = buildShell(app, {
+    // 🔴 顶栏品牌位在移动端显示笔记名（App 没有地址栏，PC 看 URL 即知）。
+    //   老项目 index.html:10135 的条件是 `noteId && (isNativeApp() || !CHIP_HOVER_OK)`；
+    //   不传这个字段时 shell 会判成首页（字标显示、笔记名不显示），不会崩，
+    //   但用户报障第 3 条「移动端左上角没有显示笔记名」就不会好。
+    noteId: name,
     onTopbar: (act) => void onTopbar(act),
     onMenu: () => {
       // 打开前重算一次：可能在别的笔记里加过收藏（换设备/开两个标签）
@@ -1565,7 +1592,21 @@ async function startSyncFor(name: string): Promise<void> {
       if (s.state === 'conflict') showConflictHint();
     },
     onError: (msg) => {
+      // 🔴🔴 这里**只放用户能据此行动的错误**（口令不对、数据无法解析、429…）。
+      //   内部/编程错误（状态机非法转移、断言失败）走下面的 onInternalError ——
+      //   此前两者共用这一条通道，导致「非法状态转移：offline --remote-arrived-->（无此边）」
+      //   这种内部消息被当成用户文案推到底栏，闪一个红点（用户报障第 1 条）。
+      //   老项目底栏只有 30 句固定白名单（index.html 的 setStatus 全集），
+      //   压根不存在"把异常消息显示给用户"这种口径。
       footStatus('offline', msg);
+    },
+    // 🔴 内部错误：可观测（不许黑洞 —— 静默吞掉等于把同步状态变成不可观测的黑洞，
+    //   也就是老项目里"同步偶尔不推、也不报错、也不提示"那类问题的温床），
+    //   但**不进 UI**。不传这一条时 client.ts 会退化成 console.warn，
+    //   写在这里是为了线上日志能直接捞到。
+    onInternalError: (msg, err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[notesync] 内部错误（不影响用户）：' + msg, err);
     },
     // 🔴 自动快照：每次推送成功后把"刚被覆盖的那一版"存进快照环。
     //   节流在 pushAutoHistory 里（60s，老项目 :8469 同值同理由）。
@@ -2170,6 +2211,10 @@ function showPass(name: string): void {
       sessionPass = pass;
       pendingFresh = r.fresh;
       mountEditor(name, r.doc);
+      // 🔴 解锁成功才弹 PWA 安装引导（老项目 index.html:3476 同位置）：
+      //   落地页就弹 = 一进门先推安装广告，是最招人烦的那种。
+      tryShowInstallBar();
+      greetThisNote(name);
       return null;
     },
     onClose: () => {
@@ -2277,6 +2322,9 @@ function route(): void {
       if (rec.passphrase) sessionPass = rec.passphrase;
       pendingFresh = false;
       mountEditor(name, rec.doc);
+      // 🔴 同上：记忆解锁也是"解锁成功"，同样该弹安装引导
+      tryShowInstallBar();
+      greetThisNote(name);
       return;
     }
     showPass(name);
@@ -2307,12 +2355,18 @@ function boot(): void {
 
 /**
  * 注册 ServiceWorker。
- * 🔴 APK 内不注册（见文件头）。策略两条：缓存名带版本、失败不影响使用。
+ *
+ * 🔴🔴 注册 URL **必须带 `?v=<APP_VERSION>`**，缓存名由 sw.js 从自身 URL 读它
+ *   （老项目 index.html:10337 + sw.js:4-5 是同一套单源驱动）。
+ *   不带版本号 ⇒ 缓存名写死在 sw.js 里 ⇒ 发版后用户永远拿旧壳，
+ *   而且**零报错**（这正是 bj 此前 `const VERSION = 'v1'` 的状态）。
+ *
+ * 🔴 APK 内不注册（见文件头）。
  */
 function registerSW(): void {
   if (window.__NOTESYNC_NATIVE__) return;
   if (!('serviceWorker' in navigator)) return;
-  const url = new URL('sw.js', location.href);
+  const url = new URL('sw.js?v=' + encodeURIComponent(APP_VERSION), location.href);
   navigator.serviceWorker.register(url).catch((e: unknown) => {
     // 注册失败不能影响使用：离线能力是增强项，不是前提
     console.warn('[notesync] SW 注册失败（不影响使用）', e);
@@ -2322,6 +2376,9 @@ function registerSW(): void {
 try {
   boot();
   registerSW();
+  // 🔴 PWA 安装引导：监听必须在 boot 之后立刻挂（`beforeinstallprompt` 可能很早来），
+  //   但**显示**要等解锁成功（老项目 index.html:3476 的调用点在解锁回调里）。
+  initInstallPrompt();
 } catch (e) {
   console.error('[notesync] 启动失败', e);
   const box = document.createElement('div');

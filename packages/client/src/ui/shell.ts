@@ -63,6 +63,13 @@ export interface ShellCallbacks {
   onRefresh: () => void;
   /** 七连点切皮肤后回调，参数是新皮肤名。 */
   onSkin?: (skin: SkinName) => void;
+  /**
+   * 🔴 当前笔记名（老项目 index.html:10135 那个 `noteId`）。
+   *
+   * 空串 = 首页，老项目首页**维持「NoteSync」字标**，不显示笔记名。
+   * 非空时按老项目 :10135 的判据决定：App 内或非桌面级指针设备 → 顶栏品牌位显示笔记名。
+   */
+  noteId?: string;
 }
 
 export interface Shell {
@@ -101,6 +108,54 @@ export function footText(state: FootState, detail?: string): string {
   return detail || COPY.statusSynced;
 }
 
+/**
+ * 顶栏品牌位要不要让位给笔记名 —— 老项目 index.html:10135 的判据，逐字翻译。
+ *
+ * 🔴🔴 判据是 `noteId && (isNativeApp() || !CHIP_HOVER_OK)`，**不是**视口宽度：
+ *   `CHIP_HOVER_OK`（老项目 :6490）是 `(hover: hover) and (pointer: fine)`，
+ *   即「桌面级输入设备」。所以：
+ *   - App 内无条件显示（老项目 v7.3.2：App 无地址栏，看不见笔记名）；
+ *   - 手机网页也显示（老项目 v7.4.0 推翻过「网页端零感知」，用户拍板扩到移动网页）；
+ *   - PC 网页（有精确指针 + 可 hover）维持「NoteSync」字标不动。
+ *
+ * 🔴 桌面/手机是**互斥**而不是并存：命中时必须把 `#brandWord`（字标 `b`）藏掉。
+ *   两者同显就是「NoteSync + 笔记名」并排，老项目专门在 :10133 注释里为此藏 `b`。
+ *   `max-width:560px` 媒体查询只藏 `header .brand b`、**不碰 `#brandNote`**
+ *   （老项目 :293对 :104-106 的刻意取舍），所以窄屏靠本函数显示、宽屏靠媒体查询藏字标，
+ *   两侧共同保证「手机上只看到笔记名，桌面上只看到 NoteSync」。
+ *
+ * @param noteId 当前笔记名；空串 = 首页（老项目首页维持字标，不显示笔记名）
+ * @param hoverFine `matchMedia('(hover: hover) and (pointer: fine)').matches` 的结果
+ * @param isNativeApp 是否在 App 壳内（`window.__NOTESYNC_NATIVE__ === true`）
+ */
+export function shouldShowBrandNote(noteId: string, hoverFine: boolean, isNativeApp: boolean): boolean {
+  return noteId !== '' && (isNativeApp || !hoverFine);
+}
+
+/**
+ * 笔记名的展示形态 —— 老项目 index.html:10136-10137 的 `decodeURIComponent` 兜底。
+ *
+ * 🔴 首页名只允许 `[A-Za-z0-9_-]`（老项目 :10132），所以解码**只**为兼容二维码配对
+ *   留下来的历史中文名。老项目用 try/catch 兜住非法百分号，手敲 `/a%zz` 会走到这条。
+ */
+export function brandNoteText(noteId: string): string {
+  try {
+    return decodeURIComponent(noteId);
+  } catch {
+    return noteId;
+  }
+}
+
+/** `(hover: hover) and (pointer: fine)` 的安全读取。老项目 :6490 直读 matchMedia，
+ *  但 jsdom/老 WebView 上 matchMedia 可能不存在 —— 那时按"非桌面"处理（显示笔记名）。 */
+function isHoverFine(): boolean {
+  try {
+    return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches);
+  } catch {
+    return false;
+  }
+}
+
 export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
   // 🔴 顶栏按钮的 HTML 一次性拼好；themeBtn / lock **必须画出来**（靠 CSS 隐藏）。
   const visible = TOPBAR_ITEMS.map(
@@ -137,12 +192,30 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
   const main = host.querySelector<HTMLElement>('#nsMain');
   const brand = host.querySelector<HTMLElement>('#brand');
   const brandWord = host.querySelector<HTMLElement>('#brandWord');
+  const brandNote = host.querySelector<HTMLElement>('#brandNote');
   const foot = host.querySelector<HTMLElement>('.ns-foot');
   const dot = host.querySelector<HTMLElement>('#syncDot');
   const syncText = host.querySelector<HTMLElement>('#syncText');
   const skinFx = host.querySelector<HTMLElement>('#skinFx');
-  if (!root || !main || !brand || !brandWord || !foot || !dot || !syncText || !skinFx) {
+  if (!root || !main || !brand || !brandWord || !brandNote || !foot || !dot || !syncText || !skinFx) {
     throw new Error('应用外壳结构不完整：buildShell 与模板不同源');
+  }
+
+  /* ---- 移动端顶栏显示笔记名（老项目 index.html:10135-10145）----
+   * 🔴🔴 这一段原先**整段缺失**：模板里画了 `<span id="brandNote" class="hidden">`、
+   *   CSS 也抄了老项目 :106 的样式，但全仓库没有任何代码给它写值或去掉 hidden
+   *   ⇒ 那个 span 永远 display:none，手机端顶栏只有一枚 logo（用户报障第3 条）。
+   *
+   * 判据必须是 `isNativeApp() || !CHIP_HOVER_OK`，**不能**换成视口宽度判断：
+   * 那样「窄窗桌面」会既显示笔记名又被媒体查询藏掉字标，或反之。
+   */
+  const noteId = cb.noteId ?? '';
+  if (shouldShowBrandNote(noteId, isHoverFine(), window.__NOTESYNC_NATIVE__ === true)) {
+    brandNote.textContent = brandNoteText(noteId);
+    brandNote.classList.remove('hidden');
+    // 老项目 :10142-10143 `document.querySelector('header .brand b').style.display='none'`
+    // 宽屏时避免「NoteSync + 笔记名」同显；≤560px 时 b 已被 CSS 藏，再设也无副作用。
+    brandWord.style.display = 'none';
   }
 
   // 编辑器宿主：Lexical 的 root 元素。
