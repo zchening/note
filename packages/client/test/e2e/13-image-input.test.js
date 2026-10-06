@@ -44,12 +44,19 @@ const CLOUD = {
   folder: 'notesync_bj',
 };
 
-/** 云端算法**独立重算**（不 import 被测实现）。 */
+/**
+ * 云端算法**独立重算**（不 import 被测实现）。
+ *
+ * 🔴 与 06-image.test.js 同款替身，**必须忠实于真 Cloudinary 规范**：
+ *   字典序拼串 + `SHA1(串 + secret)`（不是 HMAC）。
+ *   我上一版这里写成 HMAC + `timestamp&folder&upload_preset`，与我们的实现错得一样，
+ *   于是两端一起错 ⇒ 校验恒绿，线上 401 一直没人发现。
+ */
 function cloudSignature({ timestamp, folder, uploadPreset }) {
-  const parts = [`timestamp=${timestamp}`];
-  if (folder) parts.push(`folder=${folder}`);
-  parts.push(`upload_preset=${uploadPreset}`);
-  return crypto.createHmac('sha1', CLOUD.secret).update(parts.join('&')).digest('hex');
+  const params = { timestamp, upload_preset: uploadPreset };
+  if (folder) params.folder = folder;
+  const str = Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join('&');
+  return crypto.createHash('sha1').update(str + CLOUD.secret).digest('hex');
 }
 
 /** 假签发端点 + 假图床。签名按云端算法重算，算不出就400（与 06 同款）。 */

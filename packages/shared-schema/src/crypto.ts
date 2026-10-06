@@ -124,7 +124,12 @@ export async function deriveKey(passphrase: string, saltB64?: string): Promise<D
  * AAD 用途标签：把"这份密文是什么"绑进 GCM 认证。
  * 老项目所有数据用同一把密钥、无 AAD，密文可跨用途重放。
  */
-export type AadTag = 'note' | 'meta' | 'rem' | 'egg';
+/**
+ * 'pass' = 本机「口令保险箱」用的标签（client/sync/pass-vault.ts）。
+ * 单独一个标签而不是复用 'note'：口令与正文是**两种不同用途**的明文，
+ * 共用 AAD 就等于允许跨用途重放（把一段正密文当口令保险箱喂进去也能通过认证）。
+ */
+export type AadTag = 'note' | 'meta' | 'rem' | 'egg' | 'pass';
 
 export async function encryptString(
   plaintext: string,

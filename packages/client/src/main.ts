@@ -606,6 +606,22 @@ function pickImage(): void {
  *   用户正在打字时误触图片上传，编辑器一失焦、光标就丢了。
  *   判据用「粗指针 + 无精确指针」，即 (hover: none) 且 (pointer: coarse)。
  */
+/**
+ * 是不是触屏设备（决定手机号点下去拨不拨号）。
+ *
+ * 🔴 判据与上面 dismissKeyboardForTouch 同一套（`(hover: none) and (pointer: coarse)`），
+ *   不另发明一套 UA 嗅探 —— 两套判定一定会漂移，而漂移的表现是
+ *   "PC 上能拨号 / 手机上拨不了号"，两边都是用户一眼看穿的错。
+ *   matchMedia 不可用（老 WebView）时按**桌面**处理：宁可点不动，也不要在 PC 上弹空白页。
+ */
+function isTouchDevice(): boolean {
+  try {
+    return !!window.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
+  } catch {
+    return false;
+  }
+}
+
 function dismissKeyboardForTouch(): void {
   try {
     if (!window.matchMedia('(hover: none) and (pointer: coarse)').matches) return;
@@ -1167,6 +1183,36 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   自己写通常会漏这个分支 ⇒ 想改链接却总被新标签抢走。
   //   反向判据见 test/e2e/19-link-click.test.js 的 LINK-E03。
   registerClickableLink(ed, namedSignals({ disabled: false, newTab: true }));
+
+  // 🔴🔴 `tel:` 必须**从可点链接里摘出来单独处理**（用户报障第 1 条：
+  //   「手机号在 PC 端不该点得动，只在移动端」）。
+  //
+  //   病根：`registerClickableLink` 对所有 `<a>` 一律 `window.open(url, '_blank')`
+  //   （LexicalLink.dev.js:1310-1341）。对 https:// 这是对的；对 `tel:` 就成了
+  //   **桌面端也去开一个新标签** —— 桌面上没有拨号处理器，开出来的是空白页/白闪一下。
+  //   老项目不是这么做的：index.html:2789 走的是 `location.href = a.href`，
+  //   移动端由系统接管拨号，桌面端浏览器没有 tel: 处理器 ⇒ 静默无事发生。
+  //
+  //   所以这里在**捕获阶段**拦下 tel: 点击（早于 registerClickableLink 的冒泡监听），
+  //   触屏设备才真的发起拨号，桌面端直接吞掉。
+  //
+  //   🔴 为什么用捕获 + stopPropagation：两个监听都在 editorHost 上，
+  //   捕获阶段先到，stopPropagation 后它那个冒泡监听就不会再跑 ⇒
+  //   不会再有 window.open('tel:...', '_blank')。
+  editorHost.addEventListener(
+    'click',
+    (e) => {
+      const t = e.target as HTMLElement | null;
+      const a = t?.closest?.('a[href^="tel:"]') as HTMLAnchorElement | null;
+      if (!a) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // 🔴 触屏才拨号（老项目同款：location.href = ...）。
+      //   桌面端什么都不做 —— 这正是用户要的"PC 端点不动"。
+      if (isTouchDevice()) location.href = a.href;
+    },
+    true,
+  );
   // 🔴🔴 行为注册必须在 setRootElement 之后、任何 update 之前。
   //   漏掉它 = 编辑器能显示但打不了字，且**零报错**（详见 behaviors.ts 文件头）。
   //   deps.uploadImage 指向 main.ts 里那**唯一**的上传入口，
@@ -1904,6 +1950,24 @@ function openScanner(): void {
       },
       onClosed: () => {
         scanBusyAt = 0;
+        // 🔴🔴 收场必须把底栏**恢复成真实同步状态**（用户报障第 10 条）。
+        //
+        //   病：取景期曾往底栏写过"识别中…"，而底栏那一行是同步状态的位置
+        //   （scanFeedback 用的是 setFootStatus('offline', …) ⇒ 红点）。
+        //   收场时没人把它收回去 ⇒ 用户取消扫码后看到
+        //   「红点 + · 最后同步：识别中…」，而那之前是「绿点 + 已同步」。
+        //
+        //   🔴 顺序是安全的：layer.ts 的失败路径是**先 onClosed() 后 onHint(reason)**，
+        //   所以这里的恢复不会把"相机起不来"这类**终态原因**擦掉 ——
+        //   原因总是在恢复之后才到达。
+        if (scanMsgTimer !== null) {
+          clearTimeout(scanMsgTimer);
+          scanMsgTimer = null;
+        }
+        footHoldUntil = 0;
+        footHoldText = '';
+        const f = footFor(lastSyncState);
+        setFootStatus?.(f.s, f.d);
       },
     });
   } catch (e) {
@@ -2174,6 +2238,10 @@ function route(): void {
   void (async () => {
     const rec = await unlockIfRemembered(name);
     if (rec && rec.ok) {
+      // 🔴 记忆解锁也要把口令交给 sessionPass，否则「点扫码配对/扫码换机还要输口令」。
+      //   （此前只有"本次会话手输过口令"才有值 ⇒ 记忆进来的用户每次都被卡。）
+      //   口令来自本机保险箱（./sync/pass-vault.ts），与密钥同生共死、锁定即失效。
+      if (rec.passphrase) sessionPass = rec.passphrase;
       pendingFresh = false;
       mountEditor(name, rec.doc);
       return;

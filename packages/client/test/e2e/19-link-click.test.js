@@ -102,15 +102,20 @@ test('LINK-E 网址/手机号点得动', async (t) => {
     }
   });
 
-  await t.test('LINK-E02 🔴🔴 手机号点击必须真的发起 tel: 导航', async () => {
+  await t.test('LINK-E02 🔴🔴 桌面端点手机号必须**点不动**（不开新标签、不导航）', async () => {
     const page = await openEditor(browser, h.baseUrl(), 'linkE02', '测试口令');
-    // 🔴🔴 判据钉 `window.open` 的**入参**，不是"新标签页出现了"。
-    //   桌面 Chromium **没有 tel: 协议处理器**，`window.open('tel:...')` 会被直接
-    //   丢弃 —— 既不开页面、URL 也不变（我第一版等 context 的 'page' 事件，
-    //   死等 6s 后误判成"点击链路没接上"，其实链路是通的）。
-    //   ⇒ 能验的等效事实是"产品代码真的拿 tel: 地址发起了导航"，
-    //   而这恰好就是移动端会跳拨号的那条路径（老项目 index.html:3751
-    //   `a.href = 'tel:' + mt.text`，移动端由系统接管同一个地址）。
+    // 🔴🔴 这条此前是**反的**：它断言 `window.open('tel:...')` 被调用，
+    //   而那正是用户报的 bug —— `registerClickableLink` 对 tel: 也走新标签 open，
+    //   桌面端没有拨号处理器 ⇒ 开出的是空白标签页（用户第 1 条：
+    //   「手机号在 PC 端不该点得动，只支持移动端」）。
+    //
+    //   老项目的真实口径是 `location.href = a.href`（index.html:2789）：
+    //   移动端由系统接管拨号，桌面端浏览器无 tel: 处理器 ⇒ **静默无事发生**。
+    //   ⇒ 判据应钉"桌面端没有任何副作用"，而不是"发起了 open"。
+    //
+    //   🔴 判据仍钉 `window.open` 的入参（而不是"新标签页出现了"）：
+    //   桌面 Chromium 没有 tel: 处理器，open 会被直接丢弃 ——
+    //   既不开页面、URL 也不变，等 context 的 'page' 事件会死等（我第一版就栽在这）。
     try {
       await typeInto(page, '打给我 13800138000');
       await waitLinkify(page);
@@ -130,30 +135,32 @@ test('LINK-E 网址/手机号点得动', async (t) => {
         const orig = window.open;
         window.open = function (u, t) {
           window.__OPEN__.push({ url: String(u), target: String(t) });
-          // 🔴 真机上要真打开；这里返回 null 即可（桌面无 tel: 处理器，真开也没用），
-          //   但**不能抛异常** —— 抛了会让"点击有没有走到 window.open"这件事变成不可判。
+          // 🔴 真机上要真打开；这里返回 null 即可，但**不能抛异常** ——
+          //   抛了会让"点击有没有走到 window.open"这件事变成不可判。
           return null;
         };
         window.__OPEN_ORIG__ = orig;
       });
 
+      const urlBefore = page.url();
+      const pagesBefore = page.context().pages().length;
       await page.click('#editor-host a[href^="tel:"]');
-      await withTimeout(
-        page.waitForFunction(() => window.__OPEN__.length > 0, { timeout: 5_000 }),
-        8_000,
-        '点手机号应发起 window.open（移动端据此跳拨号）',
-      );
+      // 🔴 反向断言要给它一点时间"有机会发生"：立刻量等于什么都没测
+      //   （点击的副作用是异步的，恒绿才是最大的风险）。
+      await page.waitForTimeout(600);
+
       const opened = await page.evaluate(() => window.__OPEN__);
       assert.equal(
-        opened[0].url,
-        'tel:13800138000',
-        `应以 tel: 地址发起导航（老项目 :3751），实得 ${opened[0].url}`,
+        opened.length,
+        0,
+        `桌面端点手机号不该走 window.open（会开出空白标签页），实际发了 ${JSON.stringify(opened)}`,
       );
-      // newTab:true 对齐节点上的 target=_blank；老项目 tel: 链接没设 target（默认当前标签）。
-      // ⇒ 这里只钉"确实发起了导航"，不钉 target —— 那是设计选择，不是缺陷。
-      await page.evaluate(() => {
-        window.open = window.__OPEN_ORIG__;
-      });
+      assert.equal(page.url(), urlBefore, '桌面端点手机号不该改变当前地址');
+      assert.equal(
+        page.context().pages().length,
+        pagesBefore,
+        '桌面端点手机号不该多出标签页/窗口',
+      );
     } finally {
       await page.close();
     }

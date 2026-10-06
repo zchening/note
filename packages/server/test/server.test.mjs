@@ -25,6 +25,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(__dirname, '..', 'src', 'server.js');
 
+// 🔴 判据必须 import 生产代码（抄进测试的判据恒绿）。upsign 单独成文件就是为了这个。
+import { upsignSign, upsignSignedString } from '../src/upsign.js';
+
 let child = null;
 let base = '';
 let dataDir = '';
@@ -279,27 +282,33 @@ test('静态资源：有扩展名路径读真文件（不许回落成 HTML）', 
     '有扩展名的资源不该被回落成 HTML（会让浏览器把 JS 当页面解析）');
 });
 
-/* ---------------- 图床签名串顺序（用户报障第 3 条「上传失败 401」）---------------- */
+/* ---------------- 图床签名（用户报障「上传失败 401」）---------------- */
 
 /**
- * 🔴🔴 这条钉的是**协议**，不是实现细节。
+ * 🔴🔴 这条钉的是**协议**，不是实现细节。而且钉的是**两件**事：
  *
- * 报障：上传图片报401。Cloudinary 的原文把答案直接报出来了：
- *   Invalid Signature <我们算的>
- *   String to sign - 'folder=notesync&timestamp=...&upload_preset=notesync-signed'
+ *   ① **待签串的字段集合与字典序**（folder < timestamp < upload_preset）。
+ *   ② **签名算法是 `SHA1(串 + secret)`，不是 HMAC-SHA1**。
  *
- * 参与签名的**字段集合完全一样**，差别只在**顺序**：
- *   错的：timestamp=...&folder=...&upload_preset=...
- *   对的：folder=...&timestamp=...&upload_preset=...   ← Cloudinary 固定按字典序
+ * 为什么②必须单独钉：2026-10-06 实测（真云端，不是推理）——
+ *   老项目的票直传 Cloudinary ⇒ 200；本项目的票 ⇒ 401。
+ *   两边 cloud/key/preset/folder/secret **完全相同**，云端报的 "String to sign"
+ *   与我们拼的串**逐字相同**。在服务端用同一份 secret 复算：
+ *     SHA1(串+secret)      === 老项目产出 → true
+ *     HMAC-SHA1(secret,串) === 本项目产出 → true
+ *   ⇒ 唯一的差别就是算法。
  *
- * 所以 401 与"secret 错""preset 错""网络错"全都无关，纯粹是**拼串顺序**。
- * 而这类bug 在本地与 CI 都抓不到：没人真的去Cloudinary 验签，
- * 单测也只测"接口返回 200 + 有 signature 字段"—— 那个 200 是**假成功**。
+ * 🔴 我上一次把这条写成"根因是顺序"是**没验到底**：改完顺序就去改注释，
+ *   却从没拿真云端复现一次成功上传。401 一直还在，而这条测试一直绿着
+ *   —— 因为它复算时用**同一个 HMAC**，等于拿实现验自己。
  *
- * 判据做法：本地用同一个 secret 复算一遍 HMAC，与服务返回的 signature 比对。
- * 不联网、不依赖 Cloudinary 额度，秒级完成。
+ * 判据两条，缺一不可：
+ *   A. **金标向量**（写死，不靠实现算）：按 Cloudinary 规范手算出的 40 位 hex。
+ *      谁把实现改成别的算法，这条立刻红。
+ *   B. **反向断言**：服务返回的签名**不得**等于 HMAC 值。
+ *      —— 少了这条，改回 HMAC 时若金标被一起改掉就没人拦得住。
  */
-test('图床签名：签发串必须按 Cloudinary 字典序 folder<timestamp<upload_preset', async () => {
+test('图床签名：必须是 SHA1(字典序串 + secret)，不是 HMAC', async () => {
   // 这套 env 必须在 boot() 时就带上，所以这里自己起一个实例而不是复用 base。
   const SECRET = 'test-secret-for-signing';
   const CLOUD = 'test-cloud';
@@ -344,16 +353,37 @@ test('图床签名：签发串必须按 Cloudinary 字典序 folder<timestamp<up
     assert.equal(r.status, 200, `/api/upsign 应 200，实际 ${r.status}`);
     const t = await r.json();
 
-    // 🔴 核心判据：用**字典序**拼出来的串复算，必须等于服务返回的签名。
-    //    顺序错 ⇒ 这条立刻红，且不需要联网。
-    const crypto = await import('node:crypto');
+    // 🔴 判据 A（金标向量）：待签串必须正是云端会去验的那串。
+    //    写死而不是拼出来 —— 拼出来等于拿实现验自己。
     const canonical = `folder=${FOLDER}&timestamp=${t.timestamp}&upload_preset=${PRESET}`;
-    const expectSig = crypto.createHmac('sha1', SECRET).update(canonical).digest('hex');
+    assert.equal(
+      upsignSignedString({ timestamp: t.timestamp, folder: FOLDER, uploadPreset: PRESET }),
+      canonical,
+      `待签串不是字典序 folder<timestamp<upload_preset。云端会拿 "${canonical}" 去验，顺序不同 ⇒ 401。`,
+    );
+
+    // 🔴 判据 B：服务返回的签名必须等于 `SHA1(串 + secret)` 的金标，
+    //    且**不等于** HMAC 值。前者钉算法，后者防止"两边一起改"蒙混过关。
+    const crypto = await import('node:crypto');
+    const golden = crypto.createHash('sha1').update(canonical + SECRET).digest('hex');
+    const hmac = crypto.createHmac('sha1', SECRET).update(canonical).digest('hex');
     assert.equal(
       t.signature,
-      expectSig,
-      `签名不是按 Cloudinary 字典序（folder<timestamp<upload_preset）算出来的。` +
-      ` 云端会拿 "${canonical}" 去验，我们签的串顺序不同 ⇒ 401。`,
+      golden,
+      `签名不是 SHA1(串 + secret)。云端要的是 "${golden}"（串="${canonical}"），实际 "${t.signature}" ⇒ 401。`,
+    );
+    assert.notEqual(
+      t.signature,
+      hmac,
+      '签名撞上了 HMAC-SHA1 的值 —— Cloudinary 要的是 SHA1(串 + secret)，不是 HMAC。' +
+      ' 这一条是反向断言：没有它，"把金标和实现一起改成 HMAC"会重新变成绿的假成功。',
+    );
+
+    // 顺手钉住纯函数本身（import 生产代码，改实现就红）
+    assert.equal(
+      upsignSign({ secret: SECRET, timestamp: t.timestamp, folder: FOLDER, uploadPreset: PRESET }),
+      t.signature,
+      'upsignSign() 与服务实际下发的签名不一致 —— 说明签发走了别的路径。',
     );
 
     // 顺手钉住"签名只覆盖这三个字段"：多带一个未签参数云端也会判不符。

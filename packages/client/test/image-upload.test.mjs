@@ -12,12 +12,21 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, '..', 'src', 'image', 'upload.ts');
+
+// 🔴 判据一律 import 生产代码（UPLOAD-06 / 06b）。
+//   签名模块 2026-10-06 从 server.js 拆到 upsign.js（为了可 import，
+//   server.js 是会自动 listen 的入口），所以这里引的是新路径。
+import {
+  upsignSignedString as _upsignSignedString,
+  upsignSign as _upsignSign,
+} from '../../server/src/upsign.js';
 
 const src = readFileSync(SRC, 'utf8');
 
@@ -120,19 +129,22 @@ test('UPLOAD-03 🔴 任一必需字段缺失必须判不完整，不能带 unde
  *   这是「两边算出来一样才算对」的**交叉验证**测试。
  *   如果直接 import 被测实现，测试只会证明"实现等于它自己"，
  *   永远抓不到"两边都算错成一样"（改错了 field 顺序、漏了 folder）。
- *   期望值按 Cloudinary 签名算法原文手推，代码放在一起肉眼可核。
+ *
+ * 🔴🔴 2026-10-06 订正：我上一版这份"独立重算"抄的是 `timestamp→folder→upload_preset`，
+ *   也就是**和当时的错误实现错得一模一样**（云端要的是字典序 folder<timestamp<upload_preset）。
+ *   独立重算写成错的，交叉验证就变成"两个人一起错 ⇒ 还是绿" ——
+ *   这正是线上 401 长期没人发现的直接原因。现在按真云端口径写。
  */
 function cloudSignedString({ timestamp, folder, uploadPreset }) {
-  const parts = [`timestamp=${timestamp}`];
-  if (folder) parts.push(`folder=${folder}`);
-  parts.push(`upload_preset=${uploadPreset}`);
-  return parts.join('&');
+  const params = { timestamp, upload_preset: uploadPreset };
+  if (folder) params.folder = folder;
+  return Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join('&');
 }
 
-test('UPLOAD-04 签名串顺序：timestamp → folder → upload_preset', () => {
+test('UPLOAD-04 签名串顺序：folder → timestamp → upload_preset（字典序）', () => {
   assert.equal(
     cloudSignedString({ timestamp: 1759600000, folder: 'notesync_bj', uploadPreset: 'bj_signed' }),
-    'timestamp=1759600000&folder=notesync_bj&upload_preset=bj_signed',
+    'folder=notesync_bj&timestamp=1759600000&upload_preset=bj_signed',
   );
 });
 
@@ -150,24 +162,17 @@ test('UPLOAD-05 🔴 folder 为空时必须**省略该段**（不是拼空串）
 });
 
 test('UPLOAD-06 🔴 服务端签名串必须按 Cloudinary 字典序 folder<timestamp<upload_preset', () => {
-  const srv = readFileSync(resolve(HERE, '..', '..', 'server', 'src', 'server.js'), 'utf8');
-
-  // 🔴🔴 这条原来断言的是三段**字面量模板串**（`timestamp=${timestamp}` 等），
-  //   只能证明"三段都在"，**证明不了顺序** —— 而顺序恰恰就是 401 的真因：
+  // 🔴🔴 这条钉的是 401 的两层成因之一（另一层是算法，见 UPLOAD-06b）。
+  //
+  //   历史：第一版断言三段**字面量模板串**（`timestamp=${timestamp}` 等），
+  //   只能证明"三段都在"、**证明不了顺序** —— 而顺序恰恰是 401 的一个真因：
   //   Cloudinary 固定按参数名字典序拼 "String to sign"（folder→timestamp→upload_preset），
   //   原实现签的是 timestamp→folder→upload_preset，字段集合一模一样、顺序不同 ⇒ 必然 401。
   //   （云端原文：Invalid Signature …. String to sign - 'folder=notesync&timestamp=…&upload_preset=…'）
   //
-  //   判据改成**真的把服务端的拼串函数跑一遍**，而不是在源码里搜三段字符串。
-  //   服务端是 .js 且无 export，所以这里用正则抠出函数体、new Function 求值 ——
-  //   钉的是**运行结果**，源码怎么重构都有效。
-  const fnMatch = srv.match(/function upsignSignedString\(\{[^}]*\}\)[\s\S]*?\n}/);
-  assert.ok(fnMatch, '未找到服务端 upsignSignedString 函数（改名/重构了？）');
-
-  // eslint-disable-next-line no-new-func
-  const upsignSignedString = new Function(
-    `${fnMatch[0]}; return upsignSignedString;`,
-  )();
+  //   第二版改成正则抠函数体 —— 也不可靠：一重构（把函数挪去 upsign.js）就红。
+  //   现在直接 import 生产模块（它已 export），钉的是**运行结果**且不会因挪文件失效。
+  const upsignSignedString = _upsignSignedString;
 
   const got = upsignSignedString({
     timestamp: 1700000000,
@@ -211,6 +216,49 @@ test('UPLOAD-06 🔴 服务端签名串必须按 Cloudinary 字典序 folder<tim
       `客户端不应 append ${bad}（未签参数会让云端判签名不符）`,
     );
   }
+});
+
+/**
+ * UPLOAD-06b 🔴🔴 签名算法必须是 `SHA1(串 + secret)`，不是 HMAC-SHA1。
+ *
+ * 这是 2026-10-06「上传图片 401」的**真正根因**，也是我上一次修漏掉的一半。
+ *
+ * 实测（不是推理）：
+ *   老项目（同机 8080）签的票直传 Cloudinary ⇒ 200
+ *   本项目签的票直传同一地址 ⇒ 401，云端原话
+ *     Invalid Signature …. String to sign - 'folder=notesync&timestamp=…&upload_preset=notesync-signed'
+ *   两边 cloud / api_key / preset / folder / secret **完全相同**，待签串**逐字相同**
+ *   ⇒ 唯一剩下的变量就是算法。
+ *   在服务端用同一份 secret 双向复算确认：
+ *     SHA1(串+secret) === 老项目产出 → true ／ === 本项目产出 → false
+ *     HMAC-SHA1(secret,串) === 老项目产出 → false ／ === 本项目产出 → true
+ *
+ * 🔴 判据两条缺一不可：金标（钉算法）+ 反向断言（不等于 HMAC 值）。
+ *   只写金标的话，"把金标和实现一起改成 HMAC"会重新变成绿的假成功。
+ */
+test('UPLOAD-06b 🔴🔴 签名必须是 SHA1(串 + secret)，绝不能是 HMAC', () => {
+  const SECRET = 'test-upsign-secret';
+  const str = 'folder=notesync&timestamp=1700000000&upload_preset=notesync-signed';
+
+  const got = _upsignSign({
+    secret: SECRET,
+    timestamp: 1700000000,
+    folder: 'notesync',
+    uploadPreset: 'notesync-signed',
+  });
+
+  // 金标：按真云端规范**独立**算出来的值（与被测实现无关）
+  const golden = crypto.createHash('sha1').update(str + SECRET).digest('hex');
+  assert.equal(got, golden, `签名算法不是 SHA1(串 + secret)。期望 ${golden}，实得 ${got}`);
+
+  // 反向断言：撞上 HMAC 就是错的
+  const hmac = crypto.createHmac('sha1', SECRET).update(str).digest('hex');
+  assert.notEqual(
+    got,
+    hmac,
+    '签名撞上了 HMAC-SHA1 的值 —— Cloudinary 要的是 SHA1(串 + secret)。' +
+    '（2026-10-06 线上 401 就是这么来的：串与凭据全对，只错在算法）',
+  );
 });
 
 /* ------------------------------------------------------------------ *

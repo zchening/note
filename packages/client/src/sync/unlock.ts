@@ -43,6 +43,7 @@ import {
   cacheKeyOf,
   type CachedEnvelope,
 } from './local-cache.ts';
+import { dropPassVault, readPassVault, savePassVault } from './pass-vault.ts';
 
 export { clearCache, readCache, writeCache, cacheKeyOf };
 export type { CachedEnvelope };
@@ -70,6 +71,17 @@ export interface UnlockOk {
   doc: Doc;
   /** 本次是否需要立刻落缓存（新笔记 or 远端版本更新） */
   shouldCache: boolean;
+  /**
+   * 从本机保险箱里解出来的口令（记忆解锁时才有）。
+   *
+   * 🔴 有它 ⇒ 配对码/换机码**免输口令**即可生成（用户报障：每次点都要输）。
+   *   没有（undefined）⇒ 与老项目"本机没留"同款，退回问一次口令。
+   *   见 ./pass-vault.ts 的安全口径注释：它与密钥同生共死，锁定即失效。
+   *
+   * 🔴 显式含 `| undefined` 而不是 `?:`：本仓开了 `exactOptionalPropertyTypes`，
+   *   `?:` 不接受"显式赋值 undefined"，而 readPassVault 解不开时正是这么表达。
+   */
+  passphrase: string | undefined;
 }
 
 export interface UnlockFail {
@@ -122,6 +134,10 @@ export async function unlockIfRemembered(noteId: string): Promise<UnlockOk | und
   const rec = await resolveKey(noteId);
   if (!rec) return undefined;
   const dk: DerivedKey = { key: rec.key, saltB64: rec.salt, iter: rec.iter };
+  // 🔴 记忆解锁也必须拿得出**口令**，否则配对码/换机码会退化成"每次都要输"
+  //   （用户报障原话）。保险箱解不开（换过口令/清过 IndexedDB）就当没有，
+  //   退回问一次 —— 与"记忆失效"同一条兜底路径，不新增失败形态。
+  const vaultPass = await readPassVault(noteId, rec.key);
   // 🔴🔴 必须**先**判断缓存存在，再去解。
   //   顺序反了会踩这个坑：openCache 解不开时会顺手清掉坏缓存，
   //   于是"本来就没缓存"与"缓存坏了被清掉"两种情况读出来都是 undefined，
@@ -130,14 +146,14 @@ export async function unlockIfRemembered(noteId: string): Promise<UnlockOk | und
   const cached = readCache(noteId);
   if (cached === undefined) {
     // 只有密钥没有缓存：记忆有效，文档暂空，交给 sync 去拉远端
-    return { ok: true, key: rec.key, dk, fresh: false, doc: emptyDoc(), shouldCache: false };
+    return { ok: true, key: rec.key, dk, fresh: false, doc: emptyDoc(), shouldCache: false, passphrase: vaultPass };
   }
   const plain = await openCache(noteId, rec.key);
   if (plain === undefined) {
     // 缓存有却解不开（换过口令 / 缓存被篡改）→ 记忆无效，退回要求输入口令
     return undefined;
   }
-  return { ok: true, key: rec.key, dk, fresh: false, doc: parseDoc(plain), shouldCache: false };
+  return { ok: true, key: rec.key, dk, fresh: false, doc: parseDoc(plain), shouldCache: false, passphrase: vaultPass };
 }
 
 /** 真正的解锁：用户刚输了口令。 */
@@ -173,9 +189,11 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
       return { ok: false, reason: 'broken', message: '云端数据无法解析' };
     }
     await putKey({ id: noteId, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+        // 🔴 记住口令（封在本笔记密钥里）—— 否则下次「记忆解锁」进来点配对/换机又要输一次。
+        await savePassVault(noteId, passphrase, dk);
     // 远端是权威版本，本地缓存必须跟着更新（否则下次离线打开是旧内容）
     writeCache(noteId, remote.env);
-    return { ok: true, key: dk.key, dk, fresh: false, doc, shouldCache: true };
+    return { ok: true, key: dk.key, dk, fresh: false, doc, shouldCache: true, passphrase };
   }
 
   /* --- 情况二：远端是空的（新笔记），但本地有缓存 --- */
@@ -189,7 +207,9 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
         const plain = await decryptString(envelopeOf(c), dk.key, 'note');
         const doc = parseDoc(plain);
         await putKey({ id: noteId, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
-        return { ok: true, key: dk.key, dk, fresh: false, doc, shouldCache: false };
+        // 🔴 记住口令（封在本笔记密钥里）—— 否则下次「记忆解锁」进来点配对/换机又要输一次。
+        await savePassVault(noteId, passphrase, dk);
+        return { ok: true, key: dk.key, dk, fresh: false, doc, shouldCache: false, passphrase };
       } catch {
         clearCache(noteId);
         // 落到下面"全新笔记"分支
@@ -203,7 +223,9 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
       return { ok: false, reason: 'pass', message: PASS_ERROR };
     }
     await putKey({ id: noteId, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
-    return { ok: true, key: dk.key, dk, fresh: true, doc: emptyDoc(), shouldCache: true };
+        // 🔴 记住口令（封在本笔记密钥里）—— 否则下次「记忆解锁」进来点配对/换机又要输一次。
+        await savePassVault(noteId, passphrase, dk);
+    return { ok: true, key: dk.key, dk, fresh: true, doc: emptyDoc(), shouldCache: true, passphrase };
   }
 
   /* --- 情况三：断网 --- */
@@ -222,6 +244,7 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
           fresh: false,
           doc: parseDoc(plain),
           shouldCache: false,
+          passphrase: await readPassVault(noteId, rec.key),
         };
       }
     }
@@ -230,7 +253,7 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
       try {
         const dk = await deriveKey(passphrase, c.salt);
         const plain = await decryptString(envelopeOf(c), dk.key, 'note');
-        return { ok: true, key: dk.key, dk, fresh: false, doc: parseDoc(plain), shouldCache: false };
+        return { ok: true, key: dk.key, dk, fresh: false, doc: parseDoc(plain), shouldCache: false, passphrase };
       } catch {
         // 口令确实不对
       }
@@ -268,6 +291,10 @@ export async function changePassphrase(
   });
   if (!res.ok) return { ok: false, message: OFFLINE_MSG };
   await putKey({ id: noteId, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+  // 🔴 记住**新**口令（封在新密钥里）。此处必须是 newPass 而不是 oldPass：
+  //   改完口令后旧的那团保险箱密文已经被新密钥解不开了，不重存就会出现
+  //   "改了口令之后点配对码又变成要输口令"。
+  await savePassVault(noteId, newPass, dk);
   writeCache(noteId, env);
   return { ok: true };
 }
@@ -275,6 +302,9 @@ export async function changePassphrase(
 /** 锁定：删掉本机密钥与缓存。**只清本机**，云端数据不动。 */
 export async function lockNote(noteId: string): Promise<void> {
   clearCache(noteId);
+  // 🔴 口令保险箱必须与密钥一起删。只删密钥不删它，下次解锁时会残留一团
+  //   解不开的密文（无害）；只删它不删密钥，则"锁定后仍能出配对码"复活。
+  dropPassVault(noteId);
   try {
     await delKey(noteId);
   } catch {

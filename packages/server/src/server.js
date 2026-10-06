@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
 import * as failmap from './failmap.js';
+import { upsignSign } from './upsign.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -257,43 +258,17 @@ const UPSIGN_KEY = process.env.NS_BJ_UPSIGN_KEY || '';
 const CLOUD_NAME = process.env.NS_BJ_CLOUD_NAME || '';
 
 /**
- * 🔴 签名参数清单 —— **只覆盖 Cloudinary 签名 preset 实际参与签名的那些字段**。
+ * 签名算法**不在本文件**，见 `./upsign.js`。
  *
- * 多带一个未签参数，云端就判签名不符（400，且提示含糊到没法查）。
- * 老项目原注释：「签名只覆盖 folder+timestamp+upload_preset 三项，
- * public_id 交云端随机生成，前端无从控制」。
+ * 🔴 为什么要拆出去：判据必须 `import` 生产代码，而本文件是会自动 listen 的入口，
+ *   import 它会顺带起一个服务。拆成纯函数才能被单测直接引用。
+ *   ⚠ 部署时必须把 upsign.js 与 server.js 一起上传（同级目录）。
  *
- * 🔴🔴 字段顺序必须是**字典序**（folder → timestamp → upload_preset），不是随手写的顺序。
- *   用户报障第 3 条「上传图片失败 401」的真因就在这。Cloudinary 实测返回：
- *     {"error":{"message":"Invalid Signature <我们算的>。
- *       String to sign - 'folder=notesync&timestamp=1791251662&upload_preset=notesync-signed'."}}
- *   它把**它自己要验的串**原样报了出来 —— 我们签的是
- *     timestamp=...&folder=...&upload_preset=...
- *   参与签名的字段**集合一模一样**，只是**顺序不同** ⇒ HMAC 必然对不上。
- *   Cloudinary 固定按参数名字典序拼 "String to sign"，所以顺序是**协议的一部分**，
- *   不是风格问题。写死顺序比依赖调用方排序更不容易错（调用方漏排一个就静默失效）。
- *
- * 🔴 另一条纪律：改这里必须同步改客户端 FormData（image/upload.ts）——
- *   多传/少传一个未签参数同样会被判不符。
+ * 🔴 2026-10-06 订正：这里**曾经**写成 HMAC-SHA1，而 Cloudinary 要的是
+ *   `SHA1(待签串 + api_secret)`。同 cloud/key/preset/folder/secret 下，
+ *   老项目的票直传 200、我们的票 401 —— 实测证据与推导过程见 upsign.js 文件头。
+ *   （我上一次只改了拼串顺序就宣告"根因是顺序"，是没验到底；两个 bug 是独立的。）
  */
-function upsignSignedString({ timestamp, folder, uploadPreset }) {
-  // 🔴 按 Cloudinary 的字典序拼（folder < timestamp < upload_preset）。
-  //   用对象 + 排序而不是手写数组下标：加参数时排序自动就位，
-  //   不会又出现"新加的那个忘了排到第几位"这类静默错误。
-  const params = { timestamp, upload_preset: uploadPreset };
-  if (folder) params.folder = folder;
-  return Object.keys(params)
-    .sort()
-    .map((k) => `${k}=${params[k]}`)
-    .join('&');
-}
-
-function upsignSign(timestamp) {
-  return crypto
-    .createHmac('sha1', UPSIGN_SECRET)
-    .update(upsignSignedString({ timestamp, folder: UPSIGN_FOLDER, uploadPreset: UPSIGN_PRESET }))
-    .digest('hex');
-}
 
 /** upsign 配额闸门（按 IP，老项目同款内存 Map + 120s 过期清理）。 */
 const upsignQuotaMap = new Map();
@@ -610,7 +585,12 @@ async function route(req, res) {
       return sendJson(res, 429, { error: 'too many', retryAfter: q.retryAfter });
     }
     const ts = Math.floor(Date.now() / 1000);
-    const sig = upsignSign(ts);
+    const sig = upsignSign({
+      secret: UPSIGN_SECRET,
+      timestamp: ts,
+      folder: UPSIGN_FOLDER,
+      uploadPreset: UPSIGN_PRESET,
+    });
     // 🔴 日志只记时间与归属笔记，**绝不记 secret / 签名**。
     const note = typeof o.note === 'string' && validId(o.note) ? o.note : '-';
     console.log(`[upsign] ts=${ts} note=${note}`);

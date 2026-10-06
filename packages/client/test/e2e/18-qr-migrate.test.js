@@ -539,6 +539,98 @@ test('QR-M 扫码换机', async (t) => {
     }
   });
 
+  /**
+   * QR-M11 🔴🔴 **记忆解锁**进来点「扫码换机」也必须免输口令
+   *
+   * 这是用户实际踩的那条路，此前**根本没有覆盖**：
+   *   QR-M01 的 openEditor 是"手输口令"进去的 ⇒ sessionPass 有值 ⇒ 本来就免输；
+   *   而真实用户绝大多数是**记忆解锁**（刷新/下次打开，口令只活在 IndexedDB 的
+   *   不可导出密钥里）⇒ sessionPass 为空 ⇒ 面板退回问口令 ——
+   *   用户看到的正是「点扫码换机还是要输入口令」。
+   *
+   * 判据做法是**重载一次**：重载后 route() 走 unlockIfRemembered，
+   * 这才是"记忆解锁"的真身。不重载就永远测不到这条路径。
+   */
+  await t.test('QR-M11 🔴🔴 记忆解锁（重载后）点扫码换机同样免输口令、直接出码', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qm11', PASS);
+    try {
+      await waitEditor(page);
+      await typeBody(page, ['记忆解锁换机源']);
+
+      // 🔴 重载 = 新会话，口令不再来自本次输入，只能来自本机保险箱
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitEditor(page);
+      // 反向自证：重载后确实**没走口令页**（否则下面测的是另一条路径）
+      const passPageVisible = await page.evaluate(() => {
+        const el = document.getElementById('pw');
+        return el ? !el.classList.contains('hidden') : false;
+      });
+      assert.equal(passPageVisible, false, '重载后应仍是记忆解锁，不该退回口令页');
+
+      await page.click('#menuBtn');
+      await withTimeout(page.waitForSelector('#menuBackup', { timeout: 8000 }), 10_000, '等菜单项');
+      await page.click('#menuBackup');
+      await withTimeout(page.waitForSelector('#migrateMask', { timeout: 8000 }), 10_000, '等换机浮层');
+
+      const hasPassBox = await page.$('#migratePass');
+      if (hasPassBox) {
+        assert.equal(
+          await hasPassBox.isVisible(),
+          false,
+          '记忆解锁时「扫码换机」不该再问口令 —— 用户报的就是这一条',
+        );
+      }
+      await withTimeout(
+        page.waitForFunction(() => {
+          const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
+          return c.startsWith('nsbak1:');
+        }, { timeout: 20_000 }),
+        25_000,
+        '记忆解锁时点扫码换机应直接出码',
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
+  /**
+   * QR-M12 🔴🔴 记忆解锁时「扫码配对」必须直接出二维码，
+   *         绝不能再出现「本机未保留口令，无法生成配对码」
+   *
+   * 老项目没有这句提示（grep 全文无此文案），它是新项目的产物 ——
+   * 出现它就说明"拿不出配对载荷"，正是用户报的原话。
+   */
+  await t.test('QR-M12 🔴🔴 记忆解锁时扫码配对直接出码，不再显示「本机未保留口令」', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qm12', PASS);
+    try {
+      await waitEditor(page);
+      await typeBody(page, ['配对源文本']);
+
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitEditor(page);
+
+      // 🔴 扫码配对是**顶栏**第 7 个键（#qrBtn），不在左下角菜单里 ——
+      //   我第一版按菜单找 #menuPair，等 8 秒超时，白白跑错一轮。
+      await page.click('#qrBtn');
+      await withTimeout(page.waitForSelector('#pairMask', { timeout: 8000 }), 10_000, '等配对浮层');
+
+      // 🔴 反向断言：那句"本机未保留口令"**绝不能**出现
+      const holderText = await page.textContent('#qrHolder');
+      assert.ok(
+        !String(holderText || '').includes('未保留口令'),
+        `配对区不该出现「本机未保留口令」，实际="${String(holderText || '').slice(0, 120)}"`,
+      );
+      // 正向断言：二维码画布真的画出来了
+      await withTimeout(
+        page.waitForSelector('#qrCanvas', { timeout: 15_000 }),
+        20_000,
+        '记忆解锁时配对弹窗应直接画出二维码',
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
   await t.test('QR-M10 整轮零页面异常', async () => {
     const page = await openEditor(browser, h.baseUrl(), 'qm10', PASS);
     const errs = [];

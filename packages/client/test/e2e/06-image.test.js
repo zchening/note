@@ -35,12 +35,25 @@ const CLOUD = {
   folder: 'notesync_bj',
 };
 
-/** 云端算法**独立重算**（不 import 被测实现，见image-upload.test.mjs UPLOAD-06 同理）。 */
+/**
+ * 云端算法**独立重算**（不 import 被测实现，见 image-upload.test.mjs UPLOAD-06 同理）。
+ *
+ * 🔴🔴 这份是**真 Cloudinary 的替身**，所以必须忠实于云端规范，不能忠实于我们的实现：
+ *   1. 待签串按**参数名字典序**（folder < timestamp < upload_preset）
+ *      —— 云端 401 时把 "String to sign" 原样报回来过，就是这个顺序。
+ *   2. 签名是 **`SHA1(串 + secret)`，不是 HMAC**（2026-10-06 实测：
+ *      老项目票直传 200、我们票 401，cloud/key/preset/folder/secret 全同，
+ *      唯一差别就是这个算法）。
+ *
+ *   我上一版这里写的是 HMAC + `timestamp&folder&upload_preset` —— 与我们的实现
+ *   **错得一模一样**，于是"两端一起错" ⇒ 这条校验**恒绿**，线上 401 一直没人发现。
+ *   替身漂移比没有替身更危险：它给出的是**假的绿灯**。
+ */
 function cloudSignature({ timestamp, folder, uploadPreset }) {
-  const parts = [`timestamp=${timestamp}`];
-  if (folder) parts.push(`folder=${folder}`);
-  parts.push(`upload_preset=${uploadPreset}`);
-  return crypto.createHmac('sha1', CLOUD.secret).update(parts.join('&')).digest('hex');
+  const params = { timestamp, upload_preset: uploadPreset };
+  if (folder) params.folder = folder;
+  const str = Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join('&');
+  return crypto.createHash('sha1').update(str + CLOUD.secret).digest('hex');
 }
 
 /** 真源的 canonical 字节（复用页面里已加载的 canonicalize，不手写第二份）。 */

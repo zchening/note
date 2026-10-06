@@ -402,22 +402,24 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
     }
     startLoop();
     deps.onDiag(newDiag());
-    // 🔴🔴 「识别中…」必须排在 aborted 检查**之后**（用户报障第 1 条
-    //   「取消扫码弹窗后出现不符合预期的『识别中…』」）。
+
+    // 🔴🔴 **这里不许再往宿主发"识别中…"**（用户报障第 10 条：
+    //   「扫一扫 → 取消 → 底栏原本的绿点+"已同步"变成了红点+"· 最后同步：识别中…"」）。
     //
-    //   病根：这一整段是**异步 IIFE**（getUserMedia → video.play() 都是 await），
-    //   用户在这段窗口里点了「取消」：
-    //     abortScan() → cleanup() → aborted=true → deps.onClosed()（面板已收）
-    //   但 IIFE 并不因此停下，它照样往下跑完 play()、跑过 aborted 检查，
-    //   然后**在这行把"识别中…"写到已经收掉的面板上**。
-    //   于是用户看到：弹窗关了，底下却留着一行"识别中…"——
-    //   症状是"关不掉/还在转"，但真因是**收尾之后又发了一次状态**。
+    //   两层病，缺一层都会复发：
+    //   ① **异步收尾**：这一整段是 IIFE（getUserMedia / video.play() 都是 await），
+    //      用户在这段窗口里点「取消」⇒ abortScan() → cleanup() → aborted=true → onClosed()，
+    //      但 IIFE 不会因此停下，照样跑到这一行往**已经收掉的面板**写状态。
+    //      ⇒ 任何在 cleanup 之后才到达的 continuation 都不许再发 UI 状态。
+    //   ② **不该发本身就是错**：`onHint` 在宿主侧是往**底栏**写（main.ts scanFeedback），
+    //      而底栏那一行是**同步状态**的位置。把取景进度写进去，
+    //      用户看到的就是"同步坏了"—— 即便不取消，这也是错的。
+    //      「识别中…」由本层自己的 `reveal()` → `setHint()` 显示在浮层里，
+    //      宿主那份根本不需要。
     //
-    //   🔴 这与"要不要再补一次 if (aborted)"无关：真正要守的是
-    //   **任何在 cleanup 之后才到达的异步 continuation 都不许再发 UI 状态**。
-    //   所以下面两行都包进同一个门闩，而不是只门住 onHint。
+    //   ⇒ 所以这里不是"加个 if (aborted) 再发"，而是**压根不发**。
+    //     aborted 检查留着是为了守住同批的 onDiag（它同样不许在收尾后到达）。
     if (aborted) return;
-    deps.onHint(COPY.scanIdentifying);
   })();
 
   return {
