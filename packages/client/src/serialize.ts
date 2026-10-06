@@ -258,7 +258,9 @@ interface InlineCtx {
  * 用户在编辑器里连续打字产生的多个 TextNode 若原样导出成多个 span，
  * 另一端导入再导出会合成一条，两端 canonical 字节不等 = 一次假冲突。
  */
-function nodesToSpans(nodes: readonly LexicalNode[], ctx: InlineCtx = {}): Span[] {
+// 🔴 导出供 main.ts 的折叠标题回写用（同一套映射 ⇒ span 属性自然对齐，
+//   不会像"在导出侧另写一份"那样丢加粗/提醒标记）。
+export function nodesToSpans(nodes: readonly LexicalNode[], ctx: InlineCtx = {}): Span[] {
   const out: Span[] = [];
 
   // 🔴 push 必须接收 InlineCtx 参数，不能闭包捕获外层 ctx：

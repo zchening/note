@@ -32,13 +32,14 @@ import {
   type EditorState,
   type LexicalEditor,
 } from 'lexical';
-import { $createParagraphNode, $createTextNode, $getRoot } from 'lexical';
+import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode } from 'lexical';
 
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
 import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
+import { $isFoldNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
-import { docToLexical, lexicalToDoc } from './serialize.ts';
+import { docToLexical, lexicalToDoc, nodesToSpans } from './serialize.ts';
 import { canonicalize, deriveKey, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
 import { SyncClient } from './sync/client.ts';
 import {
@@ -1170,7 +1171,44 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     // 🔴🔴 每次导出后**立刻对账**：用户改完正文，对账要马上算出提醒的增删，
     //   并把下划线 / 删除线挂回 span。漏了这一步的症状是"改了时间，提醒列表不变"，
     //   而界面上没有任何提示 —— 与"对账算错了"表现完全一样，极难自查。
+    // 🔴🔴🔴 折叠标题回写：必须在**导出之前**把标题段落的实时文字同步回 __titleJson。
+    //
+    //   病根：FoldNode 的标题存在 `__titleJson` **字段**里，而导出侧 `nodeToBlock`
+    //   **优先取 __titleJson**（注释写"权威"），只有它为空才回退到 children[0] 的文字。
+    //   而 `setTitle()` 全项目只有 serialize.ts 反序列化时调用过 ——
+    //   用户在标题行的任何编辑都**never**被写回 ⇒ 导出时仍按旧 title 走 ⇒ 改动被丢弃。
+    //   症状：光标放进折叠标题、打字，真源一个字不变（老项目明确支持"改标题"，
+    //   还专门用「第几处折叠」序号做身份，好让改标题不换身份）。
+    //
+    //   🔴 为什么不在**导出侧**改（我先试过，更差）：nodeToBlock 里把标题改从
+    //   children[0] 取，会踩两个坑（属性测试 S3-21/S3-23 逐个抓出来）：
+    //     ① 多 span 标题被压成一段；② 每个 span 的加粗/提醒标记属性丢失。
+    //   「字段是权威」这个设计本身是对的（标题不是"块内的一个段落"，它是这个块的把手），
+    //   所以正确做法是**让字段跟上编辑**，而不是让导出侧去猜。
+    //
+    //   判据：只改**文字**、保留原 span 属性；标题段落为空时不动字段
+    //   （canonical 会省略空 title，硬写空串会让往返少字段）。
+    // 🔴🔴🔴 折叠标题回写必须走**独立的 editor.update**，不能塞在下面那次
+    //   editorState.read() 里 —— read() 拿到的是**冻结快照**，
+    //   在里面 setTitle() 不产生新的 editor state，导出仍按旧 __titleJson 走。
+    //   （实测：探针能看到标题文字已是「折叠块ZZZ」，而真源仍是「折叠块」——
+    //     DOM 变了、模型没变，正是这个原因。）
+    //   写回自身不引起无限循环：title 没变时 JSON 相同，直接跳过。
+    ed.update(() => {
+      for (const node of $getRoot().getChildren()) {
+        if (!$isFoldNode(node)) continue;
+        const head = node.getFirstChild();
+        if (!head || !$isElementNode(head)) continue;
+        const spans = nodesToSpans(head.getChildren());
+        // 标题被清空 ⇒ 不动（保留占位「折叠块N」之类）
+        if (spans.length === 0) continue;
+        if (JSON.stringify(spans) !== node.titleJson) node.setTitle(spans);
+      }
+    });
+
     const exported = normalize(lexicalToDoc(editorState, latestDoc.reminders ?? []));
+
+
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
     shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);

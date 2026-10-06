@@ -226,3 +226,54 @@ test('FOLD-06 点正文不触发展开（只有标题才是把手）', async () 
     await page.close();
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 折叠标题可编辑（2026-10-06 发现的未报 bug）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴 报障原话里没有这条，是做 C1 时顺带挖出来的：
+ *   **折叠标题根本改不了** —— 光标放进标题、打字，DOM 变了而真源一个字不变。
+ *
+ *   病根：FoldNode 标题存`__titleJson` **字段**，导出侧优先取它；
+ *   而 `setTitle()` 此前全项目只有 serialize.ts 反序列化时调过，
+ *   用户在标题行的编辑永远不会被写回。
+ *
+ * 🔴🔴 修法的关键是**回写必须走独立的 `editor.update`**：
+ *   我第一版把setTitle() 放进导出前那次 `editorState.read()` 里 ——
+ *   read() 拿到的是**冻结快照**，在里面改不产生新的 editor state，
+ *   于是「DOM 已变、模型未变」，症状与"修复无效"一模一样。
+ *   （探针证据：read 里能看到 spans=[{t:"折叠块ZZZ"}]，而真源仍是「折叠块」。）
+ *   写回自身不引起无限循环：title 没变时 JSON 相同，直接跳过。
+ */
+test('FOLD-TITLE1折叠标题可以直接改（真源跟着变）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'foldTitle', 'pw');
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('X');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+
+    const before = await page.evaluate(() => {
+      const d = window.__NOTESYNC_DOC__();
+      return (d.blocks.find((b) => b.t === 'fold') || {}).title?.[0]?.t ?? '';
+    });
+    assert.ok(before.length > 0, '新建折叠块应有默认标题');
+
+    // 用钩子把光标放到标题末尾（设 DOM Range 不会同步 Lexical 内部选区）
+    assert.equal(await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__()), true,
+      '选区定位钩子应成功');
+    await new Promise((r) => setTimeout(r, 250));
+    await page.keyboard.type('ZZZ');
+    await new Promise((r) => setTimeout(r, 700));
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const title = (doc.blocks.find((b) => b.t === 'fold') || {}).title?.[0]?.t ?? '';
+    assert.ok(
+      title.includes('ZZZ'),
+      `改标题后真源应含新文字，实际 title="${title}"（原"${before}"）—— 又变回"DOM 变了模型没变"`,
+    );
+  } finally {
+    await page.close();
+  }
+});

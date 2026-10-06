@@ -436,7 +436,12 @@ test('PAIR-23 解析器钩子只回显结构、不回显口令（不是泄露入
   assert.ok(anchor > 0, '应存在正式钩子 __NOTESYNC_PARSE_PAIR__');
   // 🔴 切片要从钩子一路带到 resolveScan 收尾 —— 口令长度是在 resolveScan 里
   //   组装的，只截钩子那一行会漏检（这正是本条判据第一版假绿的原因）。
-  const end = main.indexOf('\n}\n', main.indexOf('function resolveScan', anchor));
+  // 🔴🔴 收尾定位**必须与行尾无关**：本文件(main.ts)在 Windows checkout 下是 CRLF,
+  //   写死\n}\n 永远匹配不到 \r\n}\r\n ⇒ end === -1 ⇒ 这条判据恒红。
+  //   （实测：它在我改动之前就已经红了，是判据自身的脆弱点，不是产品问题。）
+  //   正解：用正则找**行首**的 }，两种行尾都能命中。
+  const relEnd = /\r?\n\}/.exec(main.slice(main.indexOf('function resolveScan', anchor)));
+  const end = relEnd ? main.indexOf('function resolveScan', anchor) + relEnd.index : -1;
   assert.ok(end > anchor, '应存在 resolveScan 且其收尾可定位');
   const seg = main.slice(anchor, end);
   assert.ok(seg.includes('passLen'), '应回显口令长度供 e2e 判往返');
