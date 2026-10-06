@@ -278,3 +278,91 @@ test('静态资源：有扩展名路径读真文件（不许回落成 HTML）', 
   assert.ok(!/text\/html/.test(r.headers.get('content-type') ?? ''),
     '有扩展名的资源不该被回落成 HTML（会让浏览器把 JS 当页面解析）');
 });
+
+/* ---------------- 图床签名串顺序（用户报障第 3 条「上传失败 401」）---------------- */
+
+/**
+ * 🔴🔴 这条钉的是**协议**，不是实现细节。
+ *
+ * 报障：上传图片报401。Cloudinary 的原文把答案直接报出来了：
+ *   Invalid Signature <我们算的>
+ *   String to sign - 'folder=notesync&timestamp=...&upload_preset=notesync-signed'
+ *
+ * 参与签名的**字段集合完全一样**，差别只在**顺序**：
+ *   错的：timestamp=...&folder=...&upload_preset=...
+ *   对的：folder=...&timestamp=...&upload_preset=...   ← Cloudinary 固定按字典序
+ *
+ * 所以 401 与"secret 错""preset 错""网络错"全都无关，纯粹是**拼串顺序**。
+ * 而这类bug 在本地与 CI 都抓不到：没人真的去Cloudinary 验签，
+ * 单测也只测"接口返回 200 + 有 signature 字段"—— 那个 200 是**假成功**。
+ *
+ * 判据做法：本地用同一个 secret 复算一遍 HMAC，与服务返回的 signature 比对。
+ * 不联网、不依赖 Cloudinary 额度，秒级完成。
+ */
+test('图床签名：签发串必须按 Cloudinary 字典序 folder<timestamp<upload_preset', async () => {
+  // 这套 env 必须在 boot() 时就带上，所以这里自己起一个实例而不是复用 base。
+  const SECRET = 'test-secret-for-signing';
+  const CLOUD = 'test-cloud';
+  const PRESET = 'notesync-signed';
+  const FOLDER = 'notesync';
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bj-srv-up-'));
+  const www = fs.mkdtempSync(path.join(os.tmpdir(), 'bj-www-up-'));
+  fs.writeFileSync(path.join(www, 'index.html'), '<!doctype html><html><body></body></html>', 'utf8');
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const up = spawn(process.execPath, [SERVER], {
+    env: {
+      ...process.env,
+      NS_BJ_PORT: String(port),
+      NOTESYNC_BJ_DATA_DIR: dir,
+      NOTESYNC_BJ_WWW: www,
+      NS_BJ_UPSIGN_SECRET: SECRET,
+      NS_BJ_CLOUD_NAME: CLOUD,
+      NS_BJ_UPSIGN_KEY: '12345',
+      NS_BJ_UPSIGN_PRESET: PRESET,
+      NS_BJ_UPSIGN_FOLDER: FOLDER,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const upBase = `http://127.0.0.1:${port}`;
+  try {
+    let up_ = null;
+    for (let i = 0; i < 100; i++) {
+      try {
+        const r = await fetch(`${upBase}/healthz`);
+        if (r.ok) { up_ = r; break; }
+      } catch { /* 还没起来 */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(up_, '图床签名测试用的服务端没起来');
+
+    const r = await fetch(`${upBase}/api/upsign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'signprobe' }),
+    });
+    assert.equal(r.status, 200, `/api/upsign 应 200，实际 ${r.status}`);
+    const t = await r.json();
+
+    // 🔴 核心判据：用**字典序**拼出来的串复算，必须等于服务返回的签名。
+    //    顺序错 ⇒ 这条立刻红，且不需要联网。
+    const crypto = await import('node:crypto');
+    const canonical = `folder=${FOLDER}&timestamp=${t.timestamp}&upload_preset=${PRESET}`;
+    const expectSig = crypto.createHmac('sha1', SECRET).update(canonical).digest('hex');
+    assert.equal(
+      t.signature,
+      expectSig,
+      `签名不是按 Cloudinary 字典序（folder<timestamp<upload_preset）算出来的。` +
+      ` 云端会拿 "${canonical}" 去验，我们签的串顺序不同 ⇒ 401。`,
+    );
+
+    // 顺手钉住"签名只覆盖这三个字段"：多带一个未签参数云端也会判不符。
+    assert.equal(t.uploadPreset, PRESET, 'upload_preset 应原样下发');
+    assert.equal(t.folder, FOLDER, 'folder 应原样下发');
+    assert.equal(t.cloudName, CLOUD, 'cloud_name 应原样下发');
+  } finally {
+    up.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(www, { recursive: true, force: true });
+  }
+});

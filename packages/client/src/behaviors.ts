@@ -75,6 +75,17 @@ import {
 } from 'lexical';
 
 import { registerList } from '@lexical/list';
+// 🔴🔴 历史栈（Ctrl+Z / Ctrl+Y）。**缺它= 撤回功能对用户完全不存在**（用户报障第 4 条）。
+//   病根不是"没实现"，是**依赖压根没装**：`@lexical/history` 不在 package.json 里，
+//   而 `registerHistory` 是 Lexical 唯一提供撤销栈的地方 —— `lexical` 主包只导出
+//   `UNDO_COMMAND` / `REDO_COMMAND` / `CAN_UNDO_COMMAND` 这些**命令常量**，
+//   **没有任何处理器监听它们**。于是 Ctrl+Z 派发出去，一路无人认领，静默消失。
+//   （实测：真浏览器里输入 ABCDE 后按 Ctrl+Z，textContent 仍是 "ABCDE"。）
+//
+//   🔴 为什么从深路径 `@lexical/history` 主入口引而不是别处：
+//   `lexical` 与 `@lexical/rich-text` 都**不** re-export 它，必须单独装这个包。
+//   版本与全家桶一致（0.52.0）—— 混版本会在 import 期就炸。
+import { createEmptyHistoryState, registerHistory } from '@lexical/history';
 import { registerRichText } from '@lexical/rich-text';
 // 🔴 只取 `signal` 这一个纯函数，**从深路径 `@lexical/extension/signals.js` 引**。
 //   从 `@lexical/extension` 主入口引会把整个 Extension 包（AutoFocus / History /
@@ -84,6 +95,17 @@ import { registerRichText } from '@lexical/rich-text';
 //   且它与 `@lexical/rich-text` 内部用的是**同一份** signals-core 实例（同一 resolved 文件），
 //   所以 signal 的语义与 richText 内部一致，不会出现"两份响应式系统"。
 import { signal } from '@lexical/extension/signals.js';
+
+/**
+ * 撤销栈的**合并窗口**（毫秒）。
+ *
+ * 🔴 为什么是 300：连续打字在 300ms 内视为同一"撤销单元"。取小值的症状是
+ *   用户按一次退格只删一个字（撤销栈被拆成一堆单字步骤），取大值则反过来——
+ *   打完一整段话只能一次性全撤。300ms 是 Lexical 自己的默认值，
+ *   与老项目"停笔后才落一次快照"的节奏同量级（老项目 index.html 的 undoStack
+ *   是在 `saveLocal` 落盘时才压栈的，本项目是真源即时更新，节奏本就更密）。
+ */
+const HISTORY_MERGE_DELAY_MS = 300;
 
 import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
 import { registerLinkify } from './linkify/deferred.ts';
@@ -175,6 +197,24 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): Be
   // 列表：Tab / Shift+Tab 缩进与反缩进、Enter 新建条目、Backspace 退出列表。
   const unregisterList = registerList(editor);
 
+  // 🔴🔴 撤销/重做栈（用户报障第 4 条「不支持 Ctrl+Z 撤回」）。
+  //   必须注册，且必须排在 richText **之前** ——
+  //   `registerRichText` 自带 UNDO/REDO 的兜底处理，而 Lexical 的命令是
+  //   「后注册者先询问」：history 若排在它后面，richText 会先抢到事件。
+  //   （`registerHistory` 内部只监听 UNDO_COMMAND/REDO_COMMAND，与谁先谁后都能收，
+  //    但保持"专用处理器在前、兜底在后"这条本文件既有纪律，别在顺序上留隐性依赖。）
+  //
+  // 🔴🔴 `registerHistory(editor, historyState, delay, ...)` 的**第二个参数是必填的
+  //   HistoryState 实例**，不是 delay（我第一次按老版签名传 (editor, 300) 直接
+  //   `TS2554: Expected 3-6 arguments`）。必须用 `createEmptyHistoryState()` 新建，
+  //   且**这个实例要留着**—— 共享历史（多编辑器）场景要靠它对齐；
+  //   本项目只有一篇笔记编辑器，但它同时是"远端合并进来的真源"回放时的重放基准，
+  //   复用同一个实例才不会让撤销栈在远端合并后错位。
+  //   `delay=300` 与老项目 index.html 的撤销合并窗口同量级：太短会把连续打字
+  //   拆成一堆撤销步（按一次退格只删一个字），太长则合并过度。
+  const historyState = createEmptyHistoryState();
+  const unregisterHistory = registerHistory(editor, historyState, HISTORY_MERGE_DELAY_MS);
+
   // 折叠块：点标题行开合 + 光标在折叠块内按 Enter 自动展开。
   // 🔴🔴 必须注册在 list 之后、richText 之前：Lexical 的命令是「后注册者先询问」，
   //   折叠的点击处理若排在 richText 之后，会被 richText 的兜底抢走。
@@ -209,6 +249,7 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): Be
     dispose: () => {
       // 逆序注销，与注册顺序严格相反
       unregisterRichText();
+      unregisterHistory();
       unregisterImageInput();
       unregisterFoldAuto();
       unregisterFold();

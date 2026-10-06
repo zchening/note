@@ -154,7 +154,12 @@ svg .gf { fill: var(--accent); stroke: none; }
               margin: 0 0 10px; letter-spacing: .05em; }
 .landing .sub { margin: 0 0 44px; font-size: 13px; color: var(--muted);
                letter-spacing: .32em; padding-left: .32em; }
-.lrow { display: flex; gap: 8px; }
+/* 🔴 gap 与 max-width 逐值抄老项目 `#landing .input-row{display:flex;gap:10px;max-width:340px;width:100%}`。
+   实测（390×844 并排量化对比）：gap 8→10、max-width 补 340px，
+   输入框与「打开」按钮各宽 +2px，行总宽 342→340 —— 视觉上"输入框和按钮都大了一点/位置不同"。
+   🔴 max-width:340 不是装饰：老项目整行锁 340px，两侧留白相等；
+     不写的话 bj 行宽 342 且随视口拉伸，与老项目在**任何**非 342px 宽的屏上都不齐。 */
+.lrow { display: flex; gap: 10px; max-width: 340px; width: 100%; }
 .lrow input {
   flex: 1; min-width: 0;
   background: var(--box-bg);
@@ -699,6 +704,23 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .row-btn { flex: none; min-height: 32px; padding: 4px 12px; border-radius: 8px; font-size: 12.5px;
            border: 1px solid var(--line); background: var(--bg); }
 .row-btn:hover { background: var(--hover); }
+/* ---------- 历史版本「预览」内联展开（老项目 index.html:456 `.hist-preview` 逐字）----------
+ * 🔴 用户报障第 4 条「历史版本页面没有预览按钮」——功能缺失，这一块是它的容器。
+ *   逐值抄老项目：背景 --hover、左侧 2px 金色竖条（"这是内容不是按钮"的语义）、
+ *   max-height 120px + overflow-y:auto（长版本能滚，不把列表撑到爆）、
+ *   white-space:pre-wrap + word-break:break-all（预览的是**正文**，换行必须原样保留）。
+ *   ⚠️ 最后一对是功能性的，不是美化：去掉 pre-wrap 会让"空行"在预览里消失，
+ *   于是用户看到的预览与恢复后的正文长得不一样，误以为恢复会丢内容。
+ */
+.hist-preview { width: 100%; margin-top: 2px; padding: 9px 12px; background: var(--hover);
+                 border-radius: 10px; border-left: 2px solid var(--accent);
+                 font-size: 12.5px; line-height: 1.7; color: var(--muted);
+                 white-space: pre-wrap; word-break: break-all;
+                 max-height: 120px; overflow-y: auto; }
+/* 展开预览的那一行：描边转金，与收起态一眼可辨（老项目 .hist-item.hist-open） */
+.list-row.hist-open { border-color: var(--accent); }
+/* 预览/恢复两枚按钮的容器：gap 6px、整体不参与压缩（老项目 .hist-btns） */
+.list-row .hist-btns { display: flex; gap: 6px; flex-shrink: 0; }
 /* 预览/链接页的按钮行。导出全屏预览的「下载 / 完成」用它。 */
 .link-actions { display: flex; gap: 12px; justify-content: center; margin-top: 14px; }
 /* 预览里的图片：圆角 + 白底（导出图本身带白/暗底，白底保证夜间也不糊） */

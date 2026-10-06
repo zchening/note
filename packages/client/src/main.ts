@@ -64,7 +64,7 @@ import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/fa
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
-import { copyNoteToClipboard } from './export/copy.ts';
+import { copyNoteToClipboard, docToClipboardPayload } from './export/copy.ts';
 import { buildPairPanel, closePairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
 import { parsePairLink } from './scan/pair-link.ts';
@@ -630,6 +630,10 @@ const menuState: MenuState = {
   favList: [],
   histList: [],
   histFail: '',
+  // 🔴 历史预览三件（用户报障第 4 条「历史版本页面没有预览按钮」）
+  histPreviewTs: '',
+  histPreviewText: {},
+  histPreviewErr: {},
   conflicts: [],
 };
 
@@ -924,6 +928,45 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     onOpenHist: (at) => {
       // 🔴 点行/点「恢复」都走这里。老项目只有一个恢复入口，本项目两个入口同一条路。
       void restoreHistVersion(name, at);
+    },
+    onPreviewHist: async (at) => {
+      // 🔴 展开/收起是同一个按钮的两种结果，先认"当前开着的那一版"
+      if (menuState.histPreviewTs === at) {
+        menuState.histPreviewTs = '';
+        return;
+      }
+      menuState.histPreviewTs = at;
+      const dk = currentDk;
+      if (!dk) {
+        menuState.histPreviewErr[at] = COPY.histNeedUnlock;
+        return;
+      }
+      const ts = Number(at);
+      // 🔴🔴 网络失败与"这一版解不开"**必须分两句**（老项目 index.html:8485的注释同款）：
+      //   "预览失败：网络异常，请重试" ⇒ 用户重试一下就好；
+      //   "该版本不可用" ⇒ 再点一百次也是这个结果。
+      //   合成一句的话，用户会一直重试一件不可能成功的事。
+      //   🔴 且 fetchHistoryDoc 内部对"没有这一版"与"解不开"返回同一个 null
+      //   （安全不变量：不给暴力破解 oracle），所以网络与非网络只能靠
+      //   "拿之前先探过网络"来分—— 这里用 histNetFail 只在 fetch 抛错时给。
+      let doc: Doc | null;
+      try {
+        doc = await fetchHistoryDoc(name, ts, dk.key);
+      } catch (e) {
+        menuState.histPreviewErr[at] = COPY.histPreviewNetFail;
+        return;
+      }
+      if (doc === null) {
+        // 🔴 区分不了"没这一版/解不开"与"网络断"，措辞取保守的那句
+        menuState.histPreviewErr[at] = COPY.histBad;
+        return;
+      }
+      delete menuState.histPreviewErr[at];
+      // 🔴 复用生产代码那份plain 生成器（export/copy.ts 的 docToClipboardPayload），
+      //   **不另写一份** Doc→文本：另写一份必然与复制/导出口径漂移，
+      //   于是用户看到的预览与恢复后的正文长得不一样。
+      const text = docToClipboardPayload(doc).plain;
+      menuState.histPreviewText[at] = text === '' ? COPY.histPreviewEmpty : text;
     },
     onLinkMode: (inApp) => {
       menuState.linkInApp = inApp;
@@ -1258,12 +1301,12 @@ function footFor(s: SyncState): { s: 'connecting' | 'synced' | 'offline'; d?: st
     case 'idle':
       return { s: 'synced' };
     case 'offline':
-      return { s: 'offline', d: '离线中，改动会在恢复后自动同步' };
+      return { s: 'offline', d: COPY.footOffline };
     case 'conflict':
-      return { s: 'offline', d: '两台设备改了同一处，正在等你选保留哪一份' };
+      return { s: 'offline', d: COPY.footConflict };
     case 'dirty':
     case 'pushing':
-      return { s: 'connecting', d: '正在保存' };
+      return { s: 'connecting', d: COPY.footSaving };
     default:
       return { s: 'connecting' };
   }

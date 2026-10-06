@@ -1105,3 +1105,90 @@ test('VVW-12 🔴🔴 彩蛋徽章必须在顶栏品牌内联（不是 fixed 浮
     await page.close();
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 历史版本「预览」（用户报障第 4 条「历史版本页面没有预览按钮」）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴 为什么"每行有预览按钮"这件事本身就得钉：
+ *
+ *   此前每行只有 `[恢复]`。而**恢复是不可逆的**（老项目明确"历史不删，
+ *   恢复不动快照环"）—— 用户想确认"这一版到底写了什么"只能靠先看一眼。
+ *   缺预览不是少个按钮，是**逼用户盲操作一个不可逆动作**。
+ *
+ * 🔴 判据打**真实点击**并读回 DOM：
+ *   预览是"点开/收起"同一个按钮的两种结果（老项目同款），所以要连点两次验收起，
+ *   否则"只会开不会收"也是一种坏，而只点一次的断言看不见。
+ */
+test('VVW-06 🔴 历史每行 [预览][恢复] 两枚按钮，预览能内联展开也能收起', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw06', 'pw');
+  try {
+    await openMenu(page);
+    await page.click('#menuHistEntry');
+    await page.waitForSelector('#histSave', { timeout: 10_000 });
+    // 打一个快照，才有一行可预览
+    await page.click('#histSave');
+    await page.waitForSelector('.list-row[data-at]', { timeout: 10_000 });
+
+    // 1) 两枚按钮都在，且文案逐字对齐老项目
+    const btns = await page.evaluate(() => {
+      const row = document.querySelector('.list-row[data-at]');
+      return {
+        restore: row?.querySelector('[data-restore]')?.textContent?.trim() ?? null,
+        preview: row?.querySelector('[data-preview]')?.textContent?.trim() ?? null,
+        inBtns: !!row?.querySelector('.hist-btns'),
+      };
+    });
+    assert.equal(btns.restore, '恢复', '恢复按钮文案不对');
+    assert.equal(btns.preview, '预览', '缺「预览」按钮（用户报障第 4 条）');
+    assert.ok(btns.inBtns, '两枚按钮应包在 .hist-btns 里（gap 与不压缩靠它）');
+
+    // 2) 点预览 → 内联展开 .hist-preview，且菜单**不关**（老项目同款：预览是"看一眼"）
+    // 🔴🔴 必须先等元素**稳定**再点：每次 render() 都整块 innerHTML 换掉按钮，
+    //   Playwright 的 actionability 检查会看到节点在换而一直重试（实测报
+    //   'element is not stable'）。这不是产品的 bug，是断言与实现的时序没对齐。
+    await page.waitForSelector('.list-row[data-at] [data-preview]', { timeout: 10_000 });
+    await page.waitForTimeout(400);
+    await page.click('.list-row[data-at] [data-preview]');
+    await page.waitForSelector('.list-row[data-at] .hist-preview', { timeout: 10_000 });
+    const opened = await page.evaluate(() => {
+      const row = document.querySelector('.list-row[data-at]');
+      const pv = row?.querySelector('.hist-preview');
+      return {
+        menuStillOpen: !!document.querySelector('.menu-box'),
+        hasPreview: !!pv,
+        text: (pv?.textContent ?? '').trim().slice(0, 40),
+        rowOpen: row?.classList.contains('hist-open') ?? false,
+        // 🔴 几何闸：预览块必须真的占位（max-height 120px + 可滚）
+        h: pv ? Math.round(pv.getBoundingClientRect().height) : 0,
+        overflowY: pv ? getComputedStyle(pv).overflowY : '',
+        whiteSpace: pv ? getComputedStyle(pv).whiteSpace : '',
+      };
+    });
+    assert.ok(opened.menuStillOpen, '点预览不该关掉菜单（否则把要看的东西关在门后）');
+    assert.ok(opened.hasPreview, '预览块没渲染出来');
+    assert.ok(opened.rowOpen, '展开的行应有 hist-open 类（一眼可辨）');
+    assert.ok(opened.h > 0, '预览块高度为 0 —— 视觉上等于没出现');
+    assert.equal(opened.overflowY, 'auto', '长版本必须可滚（老项目 max-height:120px+overflow-y:auto）');
+    // 🔴 pre-wrap 是功能性的：去掉它预览里的空行会消失，用户会以为恢复后也丢内容
+    assert.equal(opened.whiteSpace, 'pre-wrap', '预览必须保留换行/空行（white-space:pre-wrap）');
+
+    // 3) 再点一次 → 收起（同一按钮的两种结果）
+    await page.waitForSelector('.list-row[data-at] [data-preview]', { timeout: 10_000 });
+    await page.waitForTimeout(400);
+    await page.click('.list-row[data-at] [data-preview]');
+    await page.waitForFunction(
+      () => !document.querySelector('.list-row[data-at] .hist-preview'),
+      { timeout: 10_000 },
+    );
+    const closed = await page.evaluate(() => ({
+      menuStillOpen: !!document.querySelector('.menu-box'),
+      rowOpen: document.querySelector('.list-row[data-at]')?.classList.contains('hist-open') ?? false,
+    }));
+    assert.ok(closed.menuStillOpen, '收起预览不该关菜单');
+    assert.equal(closed.rowOpen, false, '收起后 hist-open 类应去掉');
+  } finally {
+    await page.close();
+  }
+});

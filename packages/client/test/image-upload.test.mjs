@@ -149,12 +149,50 @@ test('UPLOAD-05 🔴 folder 为空时必须**省略该段**（不是拼空串）
   );
 });
 
-test('UPLOAD-06 🔴 服务端与客户端的签名串字段集合必须一致（不许单边加字段）', () => {
+test('UPLOAD-06 🔴 服务端签名串必须按 Cloudinary 字典序 folder<timestamp<upload_preset', () => {
   const srv = readFileSync(resolve(HERE, '..', '..', 'server', 'src', 'server.js'), 'utf8');
-  // 服务端签名串的三段
-  for (const frag of ['`timestamp=${timestamp}`', '`folder=${folder}`', '`upload_preset=${uploadPreset}`']) {
-    assert.ok(srv.includes(frag), `服务端签名串缺段${frag}`);
-  }
+
+  // 🔴🔴 这条原来断言的是三段**字面量模板串**（`timestamp=${timestamp}` 等），
+  //   只能证明"三段都在"，**证明不了顺序** —— 而顺序恰恰就是 401 的真因：
+  //   Cloudinary 固定按参数名字典序拼 "String to sign"（folder→timestamp→upload_preset），
+  //   原实现签的是 timestamp→folder→upload_preset，字段集合一模一样、顺序不同 ⇒ 必然 401。
+  //   （云端原文：Invalid Signature …. String to sign - 'folder=notesync&timestamp=…&upload_preset=…'）
+  //
+  //   判据改成**真的把服务端的拼串函数跑一遍**，而不是在源码里搜三段字符串。
+  //   服务端是 .js 且无 export，所以这里用正则抠出函数体、new Function 求值 ——
+  //   钉的是**运行结果**，源码怎么重构都有效。
+  const fnMatch = srv.match(/function upsignSignedString\(\{[^}]*\}\)[\s\S]*?\n}/);
+  assert.ok(fnMatch, '未找到服务端 upsignSignedString 函数（改名/重构了？）');
+
+  // eslint-disable-next-line no-new-func
+  const upsignSignedString = new Function(
+    `${fnMatch[0]}; return upsignSignedString;`,
+  )();
+
+  const got = upsignSignedString({
+    timestamp: 1700000000,
+    folder: 'notesync',
+    uploadPreset: 'notesync-signed',
+  });
+  // 🔴 逐字钉死 Cloudinary 期望的串（顺序即协议）
+  assert.equal(
+    got,
+    'folder=notesync&timestamp=1700000000&upload_preset=notesync-signed',
+    `签名串顺序错，Cloudinary 会判 Invalid Signature（401）。实得「${got}」`,
+  );
+
+  // 🔴 folder 缺省时不该留下悬空的 "folder="，也不该多出分隔符
+  const noFolder = upsignSignedString({
+    timestamp: 1700000000,
+    folder: '',
+    uploadPreset: 'notesync-signed',
+  });
+  assert.equal(
+    noFolder,
+    'timestamp=1700000000&upload_preset=notesync-signed',
+    `无 folder 时的串不对（应只剩两段且无悬空分隔符），实得「${noFolder}」`,
+  );
+
   // 客户端 FormData 必须带齐这三个参与签名的字段
   const cli = src;
   for (const f of ["'timestamp'", "'signature'", "'upload_preset'"]) {

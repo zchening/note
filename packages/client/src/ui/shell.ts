@@ -75,6 +75,32 @@ export interface Shell {
   setSkin: (skin: SkinName, night: boolean) => void;
 }
 
+export type FootState = 'connecting' | 'synced' | 'offline';
+
+/**
+ * 底栏状态文案 —— **导出来是为了让单测能直接钉它**。
+ *
+ * 🔴🔴 这段逻辑原先内嵌在 setStatus 里，用户报障「底部没有已同步三个字」时444 条单测全绿：
+ *   没有任何一条断言碰过 synced 分支的**渲染结果**。行内代码靠"读一遍觉得对"是不作数的，
+ *   抽成纯函数后测试才能真的验它（见 test/ui-contract.test.mjs 的 S4-D1）。
+ *
+ * 🔴 抄老项目时抄错过的语义，务必记住：
+ *   老项目 `setStatus(on, text)` = `statusText.textContent = text`（**无条件**赋值），
+ *   同步成功时 7 处调用都传 '已同步' ⇒ 底栏**有**这三个字。
+ *   它的"静默"来自**不调 setStatus**，不是靠空串表达。
+ *   照着写成 `detail ?? ''` 就等于把"静默"翻译成了"空"——
+ *   而 `footFor('idle')` 恰好返回 `{s:'synced'}` 不带 detail，两边一夹，底栏全空。
+ *
+ * @param detail 该状态下的补充说明（如「收藏最多 100 篇」「保存中…」）。
+ *   🔴 detail **优先于**默认文案：e2e 07-fav 断言的收藏封顶提示走的就是这条。
+ *   用 `||` 而非 `??`：空串也该回落到默认文案，否则又是一个"同步完底栏空掉"的入口。
+ */
+export function footText(state: FootState, detail?: string): string {
+  if (state === 'offline') return COPY.offlinePrefix + (detail ?? '');
+  if (state === 'connecting') return detail || COPY.statusConnecting;
+  return detail || COPY.statusSynced;
+}
+
 export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
   // 🔴 顶栏按钮的 HTML 一次性拼好；themeBtn / lock **必须画出来**（靠 CSS 隐藏）。
   const visible = TOPBAR_ITEMS.map(
@@ -180,16 +206,8 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
 
   const setStatus = (state: 'connecting' | 'synced' | 'offline', detail?: string): void => {
     dot.className = state === 'connecting' ? 'dot' : state === 'synced' ? 'dot on' : 'dot off';
-    if (state === 'connecting') {
-      syncText.textContent = COPY.statusConnecting;
-    } else if (state === 'offline') {
-      syncText.textContent = COPY.offlinePrefix + (detail ?? '');
-      syncText.className = 'offlinebar';
-    } else {
-      // 同步成功：老项目是"静默"，不额外加前缀，避免每次保存都跳字
-      syncText.textContent = detail ?? '';
-      syncText.className = '';
-    }
+    syncText.textContent = footText(state, detail);
+    syncText.className = state === 'offline' ? 'offlinebar' : '';
   };
 
   setStatus('connecting');

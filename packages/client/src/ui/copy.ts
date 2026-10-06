@@ -40,7 +40,25 @@ export const COPY = {
 
   /* 底栏 */
   statusConnecting: '连接中…',
+  /**
+   * 🔴 同步成功后的底栏文案 —— 老项目 `setStatus(true, '已同步')`（index.html:7 处调用）。
+   *🔴 此前**漏了这个键**：shell.ts 的 synced 分支写 `textContent = detail ?? ''`，
+   *   而 footFor('idle') 又不传 detail ⇒ 同步完成后底栏**一个字都不显示**（用户报障第 3 条
+   *   「底部没有已同步三个字」）。老项目的 setStatus 是`textContent = text` 无条件赋值，
+   *   "静默"只在**不调setStatus** 时成立，而不是靠空串实现 —— 抄错语义就会静默变空。
+   */
+  statusSynced: '已同步',
   offlinePrefix: '· 最后同步：',
+  /**
+   *🔴 以下三条是 footFor() 喂给 footText() 的 detail 文案。
+   *   此前它们以字面量硬编码在 main.ts 的 footFor 里，而 fsm.ts 又另有一份
+   *   从没被引用的 STATE_LABEL —— **同一个"状态→文案"映射散在两处、其中一处是死的**。
+   *   这正是"底部没有已同步三个字"能长期存活的原因：改了/没改都看不出。
+   *   可见文案一律归COPY（ui层），fsm 只管状态迁移，不碰文案。
+   */
+  footSaving: '保存中…',
+  footOffline: '离线中，改动会在恢复后自动同步',
+  footConflict: '两台设备改了同一处，正在等你选保留哪一份',
 
   /* 编辑器宿主（无障碍标签） */
   editorAria: '笔记正文',
@@ -145,6 +163,11 @@ export const COPY = {
   histSave: '新增历史版本',
   /** 每一行右端的「恢复」按钮（老项目 index.html:8492 `rs.textContent = '恢复'` 逐字） */
   histRestore: '恢复',
+  /**
+   * 每一行右端的「预览」按钮（老项目 index.html:8481 `pv.textContent = '预览'` 逐字）。
+   * 🔴 与「恢复」成对，缺一个这一行就只有一个不可逆的操作（用户报障第 4 条）。
+   */
+  histPreview: '预览',
   /** 历史列表上方的计数行：`{n}` 是版本数（老项目 index.html:8486「版本 · N 个」） */
   histKicker: (n: number): string => `版本 · ${n} 个`,
   /** 手动打的点（老项目 :8493 逐字：自动的不标注，只有手动带这个后缀） */
@@ -158,9 +181,22 @@ export const COPY = {
    * 🔴 不区分"没有这一版"与"解不开" —— 区分开等于给暴力破解一个 oracle
    *   （ARCH 安全不变量，与解锁失败同一句文案）。
    */
+  /** 某一版取不到/解不开（老项目 markHistBad :8455-8462） */
   histBad: '该版本不可用',
   /** 取某一版时网络异常（老项目 :8504/:8519 逐字） */
   histNetFail: '网络异常，请重试',
+  /**
+   * 🔴 预览的**网络**失败（老项目 index.html:8486逐字：「预览失败：网络异常，请重试」）。
+   * 🔴 必须与 `histNetFail` 分开两句：那是"恢复"的失败话术。
+   *   合成一句的话用户分不清是预览没成还是恢复没成，而这两个后果完全不同
+   *   （预览失败 = 只是看一眼没看成；恢复失败 = 内容可能没换成功）。
+   */
+  histPreviewNetFail: '预览失败：网络异常，请重试',
+  /**
+   * 预览展开后正文为空（老项目 `... || '（空）'` 同款，index.html:8489）。
+   * 🔴 不能让它显示成空白框：用户会以为"这一版没内容"，进而以为历史坏了。
+   */
+  histPreviewEmpty: '（空）',
   /** 列表都取不到（老项目 loadHistList 整段 catch） */
   histListFail: '历史版本读取失败，请检查网络后重试',
   /** 没解锁时点历史（老项目 :8548 逐字） */

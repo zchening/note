@@ -125,8 +125,39 @@ export function handleApi(req, res, store) {
         if (req.method === 'GET' && tail.startsWith('/')) {
           const ts = decodeURIComponent(tail.slice(1));
           const v = hist.get(ts);
-          // 200 + 空体 = 这一版不存在（与服务端一致，客户端据此判"该版本不可用"）
-          send(200, v ? JSON.stringify(v) : '');
+          // 🔴🔴🔴 响应必须是 **envelope 本体**（ct/iv/kdf/alg 各自成字段），
+          //   **不是** `{body: "<整段 JSON 字符串>"}`。
+          //   桩此前把 PUT 的原始 body 当字符串存下来，读的时候再 JSON.stringify 一次
+          //   ⇒ 客户端拿到 `{"body":"{\"v\":1,\"ct\":…}"}`，
+          //   而 fetchHistoryDoc 读的是 `env.ct`（sync/history.ts:107）⇒ undefined
+          //   ⇒ 解密抛错 ⇒ 返回 null ⇒ 界面显示「该版本不可用」。
+          //   症状极具欺骗性：**列表出得来、点恢复也"成功"了**（那是因为
+          //   restoreHistVersion 与预览走同一个 fetchHistoryDoc，都null，
+          //   而恢复的提示与"本来就没什么可恢复的"长得一样），
+          //   只有真去比对响应体才看得出多了一层壳。
+          //   服务端 server.js:412 那一段是**摊平**返回六个字段的，桩必须同款：
+          //   桩不是测试的附属品，它是**契约的第二份实现**。
+          if (!v) {
+            // 200 + 空体 = 这一版不存在（与服务端一致，客户端据此判"该版本不可用"）
+            send(200, '');
+            return;
+          }
+          let env = null;
+          try {
+            const parsed = JSON.parse(v.body);
+            //只要信封真正需要的字段齐了就算这一版可读
+            if (parsed && typeof parsed.ct === 'string' && typeof parsed.iv === 'string') {
+              env = { ts: Number(ts), v: parsed.v, alg: parsed.alg, kdf: parsed.kdf, iv: parsed.iv, ct: parsed.ct };
+            }
+          } catch {
+            env = null;
+          }
+          if (env === null) {
+            // 坏信封：这一版读不出来。同样回空体（与"解不开"同路，客户端都当不可用）
+            send(200, '');
+            return;
+          }
+          send(200, JSON.stringify(env));
           return;
         }
         // 🔴🔴 写入用 **PUT**（sync/history.ts pushHistory），不是 POST。

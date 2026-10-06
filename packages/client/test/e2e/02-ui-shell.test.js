@@ -64,8 +64,30 @@ test('E2E-UI2 底栏三件套就位：菜单键、状态点、刷新键', async 
   // 状态点：连接中→有 dot 类，无 dot.on/off
   const dot = await page.$eval('#syncDot', (e) => e.className);
   assert.equal(dot.trim(), 'dot', `状态点类名应为 dot，实际 "${dot}"`);
-  const txt = await page.textContent('#syncText');
-  assert.equal(txt, '连接中…', '底栏状态文案不对');
+  // 🔴🔴 这里曾断言 `txt === '连接中…'`，**那条断言锁住的是 bug**。
+  //
+  // 报障「底部没有已同步三个字」的真因：shell.ts 的 synced 分支渲染 `detail ?? ''`，
+  // 而 footFor('idle') 不传 detail ⇒ 同步完成后底栏一个字都没有。
+  // 修法是让三态都回落到有意义的默认文案（footText()，ui/copy.ts 为唯一文案源）。
+  //
+  // 修好之后这条老断言就红了 —— 因为打开笔记后**真实时间线**是：
+  //   dirty（正在往服务器推）→ 文本「保存中…」→ idle → 文本「已同步」
+  // 而"连接中…"只在真正尚未连上时出现（setStatus('connecting') 的初始那一次）。
+  // 老断言等于要求"永远停在连接中"，那正是用户看到的"没有已同步"的另一个说法。
+  //
+  // 🔴 判据改成**时间线**而不是某个瞬时快照：等它真的同步完，断言必须出现「已同步」。
+  //    这才对应用户报障的那句话；钉某个瞬时值只会下次改文案又红。
+  await withTimeout(
+    page.waitForFunction(
+      () => document.querySelector('#syncText')?.textContent?.trim() === '已同步',
+      { timeout: 20_000 },
+    ),
+    25_000,
+    '同步完成后底栏必须显示「已同步」（用户报障第 3 条）',
+  );
+  // 同步完成后状态点必须是"通"的那一档（老项目 `.dot.on` = 绿点）
+  const dot2 = await page.$eval('#syncDot', (e) => e.className);
+  assert.match(dot2.trim(), /^dot on$/, `同步完成后状态点应为 dot on，实际 "${dot2}"`);
   await page.close();
 });
 

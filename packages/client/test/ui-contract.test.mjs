@@ -32,6 +32,8 @@ import {
   SKIN_WORDS,
 } from '../src/ui/theme.ts';
 import { COPY, MENU_ITEM_IDS, TOPBAR_HIDDEN_IDS, TOPBAR_VISIBLE_IDS } from '../src/ui/copy.ts';
+// 🔴 import 生产代码里的 footText，不是把它的逻辑抄进测试 —— 抄一遍就恒真了（见 S4-D1 注释）
+import { footText } from '../src/ui/shell.ts';
 import { isEggRoute, sanitizeNoteName } from '../src/ui/landing-logic.ts';
 
 /* ---------------- 1. 可见文案逐条 ---------------- */
@@ -307,4 +309,50 @@ test('S4-K2 皮肤字标与提示文案逐字一致', () => {
   assert.equal(SKIN_WORDS.typewriter, 'N O T E S Y N C');
   assert.equal(SKIN_WORDS.typewriter.split(' ').length, 8, '打字机纸字标应是 8 个字母段');
   assert.equal(SKIN_WORDS.typewriter.replace(/ /g, ''), 'NOTESYNC', '字标去掉空格应还原成 NoteSync');
+});
+
+/* ---------------- 底栏状态文案（用户报障第 3 条）---------------- */
+
+/**
+ * 🔴🔴 这条断言的来历值得留着，别当"补个文案"删掉。
+ *
+ * 报障原话：「底部没有已同步三个字」。
+ * 真因不是漏抄一个字，而是**抄错了语义**：
+ *   - 老项目 `setStatus(on, text)` = `statusText.textContent = text`（**无条件**赋值），
+ *     同步成功时 7 处调用都传 '已同步'，所以底栏**有**这三个字；
+ *   - bj 抄成了 `textContent = detail ?? ''`，注释写"老项目是静默"——
+ *     但老项目的"静默"来自**不调 setStatus**，不是靠空串表达；
+ *   - 而 `footFor('idle')` 恰好返回 `{s:'synced'}` 不带 detail
+ *     ⇒ `'' ?? ''` ⇒ 同步完成后底栏**一个字都没有**。
+ *
+ * 为什么此前 444 条单测全绿：没有任何一条断言碰过 synced 分支的**渲染结果**，
+ * `COPY.statusSynced` 这个键**压根不存在**，自然也没人断言它。
+ *
+ * 🔴🔴 判据的关键教训（我第一版就踩了）：**别在测试里重抄一遍实现**。
+ *   第一版把三分支原样抄进测试，结果把 shell.ts 改回buggy 形式它**照样绿**——
+ *   恒真断言等于没有断言。所以下面直接 import 生产代码里的 `footText`，
+ *   它改了测试才红。同理，测试编号必须唯一：本文件已有一处 S4-C6（彩蛋门牌），
+ *   重复编号会让失败定位指向错的用例，这条用 S4-D1。
+ */
+test('S4-D1 底栏三态文案：synced 必须显示「已同步」，不得为空串', () => {
+  // 1) 字面量逐字（老项目 index.html 里 setStatus(true, '已同步') 的同一个串）
+  assert.equal(COPY.statusSynced, '已同步', '同步成功文案必须逐字等于老项目的「已同步」');
+
+  // 2) 🔴 真正的判据：跑**生产代码里那个函数**，不是测试里抄的副本
+  // footFor('idle') 不传 detail —— 这条正是本次实锤的触发路径
+  assert.equal(footText('synced', undefined), '已同步', 'idle 同步完成后底栏必须有文案');
+  assert.notEqual(footText('synced', undefined), '', '绝不允许退化成空串');
+
+  // detail 优先：e2e 07-fav 断言的「收藏最多 100 篇」走的就是这条
+  assert.equal(footText('synced', '收藏最多 100 篇'), '收藏最多 100 篇', 'detail 必须优先于默认文案');
+  assert.equal(footText('connecting', undefined), '连接中…', '无 detail 时回落连接中');
+  // 🔴 footFor 把 dirty/pushing 映到 connecting 并带 d='保存中…'，
+  //    此前该detail 被无条件写 statusConnecting吞掉，"保存中…"与"连接中…"完全同形。
+  assert.equal(footText('connecting', '保存中…'), '保存中…', 'connecting 态的 detail 不得被吞');
+  assert.equal(footText('offline', '离线中'), '· 最后同步：离线中', '离线态走 offlinePrefix 前缀');
+
+  // 3) 🔴 空串必须回落默认文案（`||` 而非 `??` 的理由）：
+  //    detail 传空串若被当成有效值，用户改一次密码就又看到"底栏空了"。
+  assert.equal(footText('synced', ''), '已同步', '空串 detail 应回落到默认文案，不得渲染成空');
+  assert.equal(footText('connecting', ''), '连接中…', '空串 detail 不应渲染成空');
 });

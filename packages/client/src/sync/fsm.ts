@@ -242,13 +242,15 @@ export function snapshotOf(state: SyncState): SyncSnapshot {
   };
 }
 
-/** 状态栏中文短标签。沿用老项目措辞，用户不重新学 */
-export const STATE_LABEL: Readonly<Record<SyncState, string>> = {
-  locked: '锁定',
-  syncing: '同步中',
-  dirty: '未同步',
-  pushing: '同步中',
-  offline: '离线',
-  conflict: '有冲突',
-  idle: '已同步',
-};
+
+/**
+ * 🔴🔴 这里曾有一个 `STATE_LABEL`（locked/syncing/dirty/... 的中文短标签表），
+ *   **全仓零引用**，是死代码 —— 而它里面恰好就写着 `idle: '已同步'`。
+ *   也就是说：底栏该显示什么，源码里明明有一份表，却没人读；
+ *   真正渲染底栏的 shell.ts 走的是另一条路，而那条路当时把 synced 渲染成了空串。
+ *   两份映射各说各话 ⇒ 用户报障「底部没有已同步三个字」，而 444 条单测全绿。
+ *
+ *   现已**删除**：可见文案统一归 `ui/copy.ts`（COPY.statusSynced / footSaving 等），
+ *   fsm 只负责状态迁移，不碰文案 —— 免得再多一份"看着权威其实没人用"的表。
+ *   要给状态加中文标签，改 copy.ts，不要在这里加。
+ */

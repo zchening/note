@@ -116,10 +116,22 @@ export const ICON_HOME = (): string =>
        '<path d="M5.6 9.1v9.4a2 2 0 0 0 2 2h8.8a2 2 0 0 0 2-2V9.1"/>' +
        '<path class="g" d="M10 20.5v-4.7a2 2 0 0 1 4 0v4.7"/>');
 
-/** 收藏笔记：五角星 */
+/**
+ * 收藏笔记：五角星。
+ *
+ * 🔴🔴 实心态必须用 `class="gf"`（走 CSS `svg .gf{fill:var(--accent);stroke:none}`），
+ *   **不能**写 `fill="currentColor"` —— 用户报障第 4 条「收藏笔记后五角星图标没变」。
+ *   病根是 SVG 的两段式表现属性优先级：
+ *     ① `svg()` 给每个图标在 <svg> 上写死了 `fill="none"`（表现属性，**可被 CSS 覆盖**）；
+ *     ② 但 path 上的 `fill="currentColor"` 在这一档里**解析成空**
+ *        （实测 Chromium：`getAttribute('fill')` 还留着 'currentColor'，
+ *          `getComputedStyle(path).fill` 却是 ''，于是既没描边变化也没填充 —— 视觉上"完全没变"）。
+ *   换句话说：老代码"看起来写了填充"但实际一像素都没生效，label 变而图标不变。
+ *   老项目的正解就是 `class="gf"`（STAR_IN_SVG），此处照抄。
+ */
 export const ICON_STAR = (filled: boolean): string =>
-  MENU('<path d="M12 3.8l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4-3.9-3.8 5.4-.8z"/>' +
-       (filled ? ' fill="currentColor"' : ''));
+  MENU((filled ? '<path class="gf" ' : '<path ') +
+       'd="M12 3.8l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4-3.9-3.8 5.4-.8z"/>');
 
 /** 收藏夹：文件夹 + 金色中划线 */
 export const ICON_FOLDER = (): string =>

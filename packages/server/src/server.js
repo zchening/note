@@ -263,14 +263,29 @@ const CLOUD_NAME = process.env.NS_BJ_CLOUD_NAME || '';
  * 老项目原注释：「签名只覆盖 folder+timestamp+upload_preset 三项，
  * public_id 交云端随机生成，前端无从控制」。
  *
- * 🔴 字段顺序即签名串顺序，**改这里必须同步改客户端 FormData**。
- * 约定：folder 在有值时参与（老项目行为），upload_preset 恒参与。
+ * 🔴🔴 字段顺序必须是**字典序**（folder → timestamp → upload_preset），不是随手写的顺序。
+ *   用户报障第 3 条「上传图片失败 401」的真因就在这。Cloudinary 实测返回：
+ *     {"error":{"message":"Invalid Signature <我们算的>。
+ *       String to sign - 'folder=notesync&timestamp=1791251662&upload_preset=notesync-signed'."}}
+ *   它把**它自己要验的串**原样报了出来 —— 我们签的是
+ *     timestamp=...&folder=...&upload_preset=...
+ *   参与签名的字段**集合一模一样**，只是**顺序不同** ⇒ HMAC 必然对不上。
+ *   Cloudinary 固定按参数名字典序拼 "String to sign"，所以顺序是**协议的一部分**，
+ *   不是风格问题。写死顺序比依赖调用方排序更不容易错（调用方漏排一个就静默失效）。
+ *
+ * 🔴 另一条纪律：改这里必须同步改客户端 FormData（image/upload.ts）——
+ *   多传/少传一个未签参数同样会被判不符。
  */
 function upsignSignedString({ timestamp, folder, uploadPreset }) {
-  const parts = [`timestamp=${timestamp}`];
-  if (folder) parts.push(`folder=${folder}`);
-  parts.push(`upload_preset=${uploadPreset}`);
-  return parts.join('&');
+  // 🔴 按 Cloudinary 的字典序拼（folder < timestamp < upload_preset）。
+  //   用对象 + 排序而不是手写数组下标：加参数时排序自动就位，
+  //   不会又出现"新加的那个忘了排到第几位"这类静默错误。
+  const params = { timestamp, upload_preset: uploadPreset };
+  if (folder) params.folder = folder;
+  return Object.keys(params)
+    .sort()
+    .map((k) => `${k}=${params[k]}`)
+    .join('&');
 }
 
 function upsignSign(timestamp) {

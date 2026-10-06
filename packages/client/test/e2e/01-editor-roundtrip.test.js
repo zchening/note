@@ -117,3 +117,46 @@ test('E2E-03 重载后编辑器仍在（本地持久化在 S5 接入后才有意
   assert.ok(text !== null, '重载后编辑器不存在');
   await page.close();
 });
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 撤销 / 重做（用户报障第 4 条「不支持 Ctrl+Z 撤回」）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴 这条盯的是一个**依赖缺失**型故障，判据必须打到真实键盘事件：
+ *
+ *   病根不是"没实现撤销"，是**`@lexical/history` 压根没装**。
+ *   `lexical` 主包只导出 `UNDO_COMMAND` / `REDO_COMMAND` / `CAN_UNDO_COMMAND`
+ *   这些**命令常量**，但**没有任何处理器监听它们** —— 键盘事件派发出去，
+ *   一路无人认领，静默消失。实测：输入 ABCDE 后按 Ctrl+Z，textContent 仍是 "ABCDE"。
+ *   而 444 条单测全绿：没人断言过"按 Ctrl+Z 之后正文会变短"。
+ *
+ * 判据打**真实按键**（page.keyboard.press）而不是派发命令常量：
+ *   派发常量只能证明"常量被谁认领"，而用户遇到的是按键没反应；
+ *   两者之间隔着浏览器的按键→命令映射，那一段也要验。
+ */
+test('E2E-UNDO1 Ctrl+Z 撤回 / Ctrl+Y 重做（撤销栈真的接上了）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'e2eUndo');
+  try {
+    await (await page.$('#editor-host[contenteditable="true"]')).click();
+    await page.keyboard.type('ABCDE');
+    // 🔴 必须等合并窗口（300ms）走完，否则这几个字还在合并中，
+    //   撤的是"半个单元"，断言会飘。
+    await new Promise((r) => setTimeout(r, 600));
+
+    const text = () => page.textContent('#editor-host');
+    assert.equal(await text(), 'ABCDE', '输入后正文不对');
+
+    await page.keyboard.press('Control+z');
+    await new Promise((r) => setTimeout(r, 600));
+    const afterUndo = await text();
+    assert.notEqual(afterUndo, 'ABCDE', 'Ctrl+Z 之后正文没变短 —— 撤销栈没接上');
+    assert.equal(afterUndo, '', `一次 Ctrl+Z 应撤掉整段合并单元，实际「${afterUndo}」`);
+
+    await page.keyboard.press('Control+y');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(await text(), 'ABCDE', 'Ctrl+Y 重做没把内容恢复回来');
+  } finally {
+    await page.close();
+  }
+});

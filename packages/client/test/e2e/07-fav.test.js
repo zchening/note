@@ -73,6 +73,49 @@ test('FAV-E 收藏夹全链路', async (t) => {
     }
   });
 
+  // 🔴🔴 FAV-E01 只断言了 **label**，所以「五角星图标没变」从它下面溜过去了。
+  //   真因：ICON_STAR(true) 当初写的是 path 上加 `fill="currentColor"`，
+  //   而图标 <svg> 自带 `fill="none"`，且 currentColor 在 SVG fill 档里解析成空
+  //   （实测 getAttribute 仍是 'currentColor'，getComputedStyle 却是 ''）——
+  //   **属性"写进去了"，一个像素没变**。label 变、图标不变，用户就报"图标没变"。
+  //   老项目正解是 STAR_IN_SVG 里的 class="gf"（走 CSS svg .gf{fill:var(--accent)}）。
+  //   判据钉**computed fill**（真正决定画不画出来的那个值），不看属性字符串。
+  await t.test('FAV-E01b 收藏后五角星必须真的被填充（computed fill 钉死）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'favE01b', PASS);
+    try {
+      await openMenu(page);
+      await withTimeout(page.waitForSelector('#menuMainView'), 5_000, '等菜单主视图');
+      const starFill = async () =>
+        page.$eval('#menuFav svg path', (p) => ({
+          cls: p.getAttribute('class') ?? '',
+          fill: getComputedStyle(p).fill,
+          stroke: getComputedStyle(p).stroke,
+        }));
+
+      const before = await starFill();
+      // 空态：描边星形 —— 无 gf 类、fill 解析为 none（这才是"没被填充"的正确形态）
+      assert.equal(before.cls.includes('gf'), false, '未收藏时不该有 gf 类');
+      assert.equal(before.fill, 'none', `未收藏时应无填充，实际 "${before.fill}"`);
+
+      await page.click('#menuFav');
+      await withTimeout(page.waitForSelector('#menuMainView'), 5_000, '收藏后等重画');
+      const after = await starFill();
+      // 🔴 核心判据：实心 = gf 类 + computed fill 真的解析出一个颜色
+      assert.ok(after.cls.includes('gf'), `收藏后五角星应带 gf 类（实心），实际 class="${after.cls}"`);
+      assert.ok(
+        after.fill && after.fill !== 'none',
+        `收藏后 computed fill 必须是真实颜色，实际 "${after.fill}" —— currentColor 在 SVG fill 档会解析成空`,
+      );
+
+      await page.click('#menuFav');
+      await withTimeout(page.waitForSelector('#menuMainView'), 5_000, '取消后等重画');
+      const back = await starFill();
+      assert.equal(back.cls.includes('gf'), false, '取消收藏后 gf 类应去掉');
+    } finally {
+      await page.close();
+    }
+  });
+
   await t.test('FAV-E02 收藏落本机键且键名与老项目隔离', async () => {
     const page = await openEditor(browser, h.baseUrl(), 'favE02', PASS);
     try {

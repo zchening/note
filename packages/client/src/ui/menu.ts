@@ -58,6 +58,29 @@ export interface MenuState {
    */
   histFail: string;
   /**
+   * 🔴 当前**正展开预览**的那一版时间戳（老项目 `histPreviewTs`，index.html 同名变量）。
+   * 空字符串 = 都没展开。
+   *
+   * 🔴🔴 为什么要状态而不是"点开就往 DOM 里塞"：展开/收起是**同一个按钮**的两种结果
+   *   （老项目：`const old = row.querySelector('.hist-preview'); if (old) {收起; return; }`）。
+   *   若不记住"当前开着哪一版"，用户连点两行就会同时展开两个预览，
+   *   而第二次点击本该把第一次收掉。`null` 与"这一版预览为空"要分得开，
+   *   所以用时间戳当键而不是布尔。
+   */
+  histPreviewTs: string;
+  /**
+   * 各行**预览出来的正文**（已转纯文本），键是时间戳。
+   * 空对象 = 都没预览。老项目把这段直接塞进 DOM，这里放状态是为了让
+   * `render()` 能整体重画（展开/收起是同一个按钮的两种结果）。
+   */
+  histPreviewText: Record<string, string>;
+  /**
+   * 预览失败/不可用时行内落的提示（老项目 `toast('该版本不可用')`）。
+   * 空 = 本行没失败。**按行存**而不是全局一条：老项目逐行标 bad，
+   * 否则一个失效版本会把整页都标成"不可用"。
+   */
+  histPreviewErr: Record<string, string>;
+  /**
    * 同步冲突条目。空数组 = 无冲突。
    * 🔴 状态里放的是**已经算好的文案**，不是原始 diff。菜单只负责显示，
    *   让它自己去理解 base/left/right 就会有两套"怎么算冲突"的理解。
@@ -81,6 +104,12 @@ export interface MenuCallbacks {
    */
   onLoadHist: () => Promise<void> | void;
   onOpenHist: (at: string) => void;
+  /**
+   * 🔴 取某一版**预览**（老项目 pv按钮，index.html:8481起）。
+   * 🔴 只在菜单**外面**做（解密、网络、失败话术都在 main.ts）——
+   *   菜单不认识网络也不持有密钥，这与 onLoadHist 的分工同款。
+   */
+  onPreviewHist: (at: string) => Promise<void> | void;
   onLinkMode: (inApp: boolean) => void;
   onBackup: () => void;
   onPet: () => void;
@@ -248,17 +277,46 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     //   `flex:1;min-width:0;white-space:nowrap`（styles.css:641），
     //   没有它的话 meta 会吃掉恢复按钮的宽度，把「恢复」两字挤成竖排 ——
     //   老项目那边的等价约束写在 `.hist-line{flex:1;min-width:0}`（index.html:466）。
+    //
+    // 🔴🔴 每行是 `[预览][恢复]` **两枚**按钮（老项目 index.html:8481-8482同款），
+    //   此前只有「恢复」—— 用户报障第 4 条「历史版本页面没有预览按钮」。
+    //   预览不是可有可无的附属品：**恢复是不可逆的**（老项目明确"历史不删"），
+    //   用户想确认"这一版到底写了什么"只能靠先看一眼。
+    //   容器 .hist-btns 承担 gap 与不压缩，meta 那个 .grow 仍必须在它之前。
     const rows = st.histList.length
       ? st.histList
-          .map(
-            (h) =>
-              `<div class="list-row" data-at="${escapeTrunc(h.at, 30)}" role="button" tabindex="0">` +
+          .map((h) => {
+            const at = escapeTrunc(h.at, 30);
+            const open = st.histPreviewTs === h.at;
+            const err = st.histPreviewErr[h.at] ?? '';
+            // 🔴 先收进局部变量再escapeTrunc：写在内联模板里的 `st.histPreviewText[h.at]`
+            //   类型是 `string | undefined`，而 escapeTrunc 只要 string（TS2345）。
+            //   顺带也让"这一版没有预览文本"与"预览文本是空串"分成两件事。
+            const previewText = st.histPreviewText[h.at] ?? '';
+            return (
+              `<div class="list-row${open ? ' hist-open' : ''}" data-at="${at}" role="button" tabindex="0">` +
               `<span class="hist-clock">${ICON_CLOCK()}</span>` +
               `<span class="hist-meta">${escapeTrunc(h.label)}</span>` +
               `<span class="grow"></span>` +
-              `<button type="button" class="row-btn" data-restore="${escapeTrunc(h.at, 30)}">${COPY.histRestore}</button>` +
-              `<span class="fav-go">${ICON_CHEVRON()}</span></div>`,
-          )
+              // 🔴 失效态：老项目 markHistBad 把这一行置灰并**禁用两枚按钮**
+              //   （index.html .hist-item.hist-bad{opacity:.5;border-style:dashed}）。
+              //   理由是"点了必然失败"，让按钮还能点就是骗用户白等一趟网络。
+              `<span class="hist-btns">` +
+              `<button type="button" class="row-btn" data-preview="${at}"${err ? ' disabled' : ''}>${COPY.histPreview}</button>` +
+              `<button type="button" class="row-btn" data-restore="${at}"${err ? ' disabled' : ''}>${COPY.histRestore}</button>` +
+              `</span>` +
+              `<span class="fav-go">${ICON_CHEVRON()}</span>` +
+              // 🔴 预览正文放在行**末尾**（老项目 `row.appendChild(box)` 同款）：
+              //   插在中间会把后面的行挤下去，且展开/收起时高度跳变。
+              //   ⚠️ 300 是老项目的截断上限（index.html:8489 `.slice(0, 300)`）：
+              //   预览是"看一眼"，不是把整篇读完；不截的话一个长版本会把列表撑到爆。
+              (open && previewText
+                ? `<div class="hist-preview">${escapeTrunc(previewText, 300)}</div>`
+                : '') +
+              (err ? `<div class="hist-preview">${escapeTrunc(err, 300)}</div>` : '') +
+              `</div>`
+            );
+          })
           .join('')
       : `<div class="empty">${escapeTrunc(st.histFail || COPY.histEmpty)}</div>`;
     return `${head(COPY.menuHistEntry)}${kick}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
@@ -356,6 +414,27 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
           e.stopPropagation();
           close();
           cb.onOpenHist(at);
+        });
+      }
+      // 🔴 预览按钮：**不关菜单**（老项目同款 —— 预览是"看一眼"，
+      //   关掉菜单等于把要看的东西关在门后），也不触发行的"进入这一版"。
+      const pv = row.querySelector<HTMLElement>('[data-preview]');
+      if (pv) {
+        pv.addEventListener('click', (e) => {
+          e.stopPropagation();
+          // 收起/展开是同一个按钮的两种结果：先问外面"这一版现在开着吗"
+          if (st.histPreviewTs === at) {
+            st.histPreviewTs = '';
+            render();
+            return;
+          }
+          void (async () => {
+            await cb.onPreviewHist(at);
+            // 🔴 外面可能已经把面板关掉了（切笔记/退出了）——
+            //   这时 render() 会把一个已关的面板重新 innerHTML 一遍（"关不掉菜单"）。
+            //   reloadHist() 里有同一道门，这里照抄。
+            if (open && view === 'hist') render();
+          })();
         });
       }
     }

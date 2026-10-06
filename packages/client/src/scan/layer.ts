@@ -402,6 +402,21 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
     }
     startLoop();
     deps.onDiag(newDiag());
+    // 🔴🔴 「识别中…」必须排在 aborted 检查**之后**（用户报障第 1 条
+    //   「取消扫码弹窗后出现不符合预期的『识别中…』」）。
+    //
+    //   病根：这一整段是**异步 IIFE**（getUserMedia → video.play() 都是 await），
+    //   用户在这段窗口里点了「取消」：
+    //     abortScan() → cleanup() → aborted=true → deps.onClosed()（面板已收）
+    //   但 IIFE 并不因此停下，它照样往下跑完 play()、跑过 aborted 检查，
+    //   然后**在这行把"识别中…"写到已经收掉的面板上**。
+    //   于是用户看到：弹窗关了，底下却留着一行"识别中…"——
+    //   症状是"关不掉/还在转"，但真因是**收尾之后又发了一次状态**。
+    //
+    //   🔴 这与"要不要再补一次 if (aborted)"无关：真正要守的是
+    //   **任何在 cleanup 之后才到达的异步 continuation 都不许再发 UI 状态**。
+    //   所以下面两行都包进同一个门闩，而不是只门住 onHint。
+    if (aborted) return;
     deps.onHint(COPY.scanIdentifying);
   })();
 
