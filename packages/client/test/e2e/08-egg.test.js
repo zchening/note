@@ -385,3 +385,72 @@ test('EGG-E12 🔴🔴 tank 玩法提示必须写出怎么开火（用户报障�
     await page.close();
   }
 });
+test('EGG-E13 🔴🔴 顶栏常驻螃蟹：领养后骑在 header 下沿且真的在爬（老项目 petMount）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggPet13', 'pw');
+  try {
+    // 🔴 反向前置：没访问过 /pet 就不许出现（老项目 `petBlank().adopted` 缺省 false，
+    //   「默认关」是用户拍板的）。少了这条，"顶栏有只螃蟹"反而会被判成通过。
+    const before = await page.evaluate(() => !!document.getElementById('nsPet'));
+    assert.equal(before, false, '未领养时顶栏不该有螃蟹（老项目：默认关）');
+
+    // 走真实路径访问门牌 ⇒ 触发领养（老项目 index.html:11348）
+    // 🔴🔴 领养后**不能立刻**断言顶栏有螃蟹：/pet 是满屏游戏层（`.ns-game`），
+    //   那一页**根本没有 header**（老项目的彩蛋是 mask 覆盖在编辑器上，header 一直在）。
+    //   螃蟹是"任何笔记页都常驻在顶栏下沿"的那只 ⇒ 必须先回笔记页。
+    //   判据写成"进门牌就有螃蟹"会把正确的实现判成错的。
+    await page.goto(page.url().replace('/eggPet13', '/pet'));
+    await page.waitForSelector('.ns-pet', { timeout: 15_000 });
+    assert.equal(
+      await page.evaluate(() => !!document.getElementById('nsPet')),
+      false,
+      '/pet 那一页没有 header，不该挂顶栏螃蟹（挂不上去才是对的）',
+    );
+    // 回笔记页 ⇒ mountEditor 建好 header ⇒ 螃蟹挂上
+    await page.goto(page.url().replace('/pet', '/eggPet13'));
+    await page.waitForSelector('#nsPet', { timeout: 15_000 });
+    await page.waitForTimeout(400);
+
+    const geo = await page.evaluate(() => {
+      const el = document.getElementById('nsPet');
+      const hdr = document.querySelector('header.ns-top');
+      const r = el.getBoundingClientRect();
+      const h = hdr.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return {
+        parentIsHeader: hdr.contains(el),
+        position: s.position,
+        bottom: s.bottom,
+        box: [Math.round(r.width), Math.round(r.height)],
+        svg: [Math.round(el.querySelector('svg').getBoundingClientRect().width)],
+        // 🔴 骑线：螃蟹底边落在 header 下沿附近（bottom:-11px ⇒ 露出约 11px）
+        dipsBelowHeader: Math.round(r.bottom - h.bottom),
+        text: el.textContent ?? '',
+        paths: el.querySelectorAll('path').length,
+        circles: el.querySelectorAll('circle').length,
+      };
+    });
+    assert.ok(geo.parentIsHeader, '螃蟹必须挂在 header 里（老项目 append 进 header）');
+    assert.equal(geo.position, 'absolute', '必须 absolute（老项目 :10422）');
+    assert.deepEqual(geo.box, [24, 24], `应为 24×24（老项目 :10422），实际 ${JSON.stringify(geo.box)}`);
+    assert.deepEqual(geo.svg, [22], '内部 svg 应为 22px（老项目 :10423）');
+    assert.ok(geo.dipsBelowHeader > 0, '螃蟹必须骑在 header 下沿（露出来一部分）');
+    assert.equal(geo.text.trim(), '', '不许是 emoji 字形（用户报障「一个大脚丫」）');
+    assert.equal(geo.paths, 3, '应 3 条 path（老项目 :11200）');
+    assert.equal(geo.circles, 2, '应 2 只金色眼睛（老项目 :11200）');
+
+    // 🔴🔴 "在爬行"这件事本身要判：连采两次 transform，必须真的在动
+    const readX = () =>
+      page.evaluate(() => {
+        const m = /translateX\(([-\d.]+)px\)/.exec(document.getElementById('nsPet').style.transform || '');
+        return m ? Number(m[1]) : null;
+      });
+    const x1 = await readX();
+    await page.waitForTimeout(900);
+    const x2 = await readX();
+    assert.ok(x1 !== null, `螃蟹没写 translateX（style=${JSON.stringify(x2)}）—— 老项目每 60ms 写一次走位`);
+    assert.ok(Math.abs(x2 - x1) > 1, `螃蟹 900ms 内没动（x1=${x1} x2=${x2}）—— "在顶栏爬行"未实现`);
+    assert.ok(x1 >= 9 && x1 <= 390, `走位应夹在顶栏宽度内，实际 ${x1}`);
+  } finally {
+    await page.close();
+  }
+});

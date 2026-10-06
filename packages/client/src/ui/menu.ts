@@ -250,6 +250,30 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     `<div class="menu-item" id="menuBack" role="button" tabindex="0">` +
     `<span class="ic">${ICON_BACK()}</span><span class="mi-l">${title}</span></div>`;
 
+  /**
+   * 三个二级视图（收藏夹 / 历史版本 / 打开链接）的返回行。
+   *
+   * 🔴🔴 文案是**「返回」两字**，不是该页的标题（用户报障「历史版本界面和老版本不一样」）：
+   *   老项目 index.html:701/706/712 三处返回行的 `<span class="mi-l">` 全是「返回」，
+   *   页名只体现在**从主菜单点进来的那一项**上（主菜单行写着「历史版本」）。
+   *   bj 此前把 `head()` 复用成"标题行"，于是历史页顶部写的是「历史版本」——
+   *   一眼看去像是"自己点进了自己"，且行宽比老项目多四个字。
+   */
+  const backRow = (): string => head(COPY.back);
+
+  /**
+   * 二级页空态 —— **图标 + 短句**的居中构图（老项目 index.html:494-497）。
+   *
+   * 🔴🔴 老项目 `#menuFavEmpty` / `#menuHistEmpty` 是
+   *   `display:flex;flex-direction:column;align-items:center;gap:8px;
+   *    text-align:center;color:var(--muted);font-size:12.5px;padding:22px 0 16px`
+   *   外加一枚 **22px / opacity .55** 的轮廓图标（收藏=空心星、历史=时钟）。
+   *   bj 此前是 `.empty{padding:26px 0;font-size:13px}` 的一句裸文本，
+   *   既没有图标、字号与留白也都不同 —— 空列表页看着像"报错"而不是"还没内容"。
+   */
+  const emptyState = (icon: string, text: string): string =>
+    `<div class="empty"><span class="empty-ic">${icon}</span><span>${text}</span></div>`;
+
   /** 历史页底部那枚「新增历史版本」——老项目 :709 也是一条独立菜单行，不塞进标题行。 */
   const histSaveRow = (): string =>
     `<div class="menu-item" id="histSave" role="button" tabindex="0">` +
@@ -285,8 +309,8 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
               `<span class="fav-go">${ICON_CHEVRON()}</span></div>`,
           )
           .join('')
-      : `<div class="empty">${COPY.favEmpty}</div>`;
-    return `${head(COPY.menuFavEntry)}${kick}<div class="list-scroll">${rows}</div>`;
+      : emptyState(ICON_STAR(false), COPY.favEmpty);
+    return `${backRow()}${kick}<div class="list-scroll">${rows}</div>`;
   };
 
   const renderHist = (): string => {
@@ -295,7 +319,14 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     const kick = st.histList.length
       ? `<div class="list-kicker">${COPY.histKicker(st.histList.length)}</div>`
       : '';
-    // 🔴 同fav：三列（时钟 16px + 等宽时间 + 右箭头）。老项目 :8490-8491 用 HIST_CLOCK_SVG。
+    // 🔴 三列（时钟 16px + 等宽时间 + [预览][恢复]）。老项目 :8490-8491 用 HIST_CLOCK_SVG。
+    //
+    // 🔴🔴 **历史行没有右箭头**（用户报障「历史版本界面和老版本不一样」）：
+    //   老项目 .fav-row 有 `.fav-go`（可进入的暗示：点行=打开那篇收藏），
+    //   而 .hist-item（:465）**只有时钟 + hist-line（时间 + 两枚按钮）**，
+    //   行本身不可进入（点行没有行为，行为全在两枚按钮上）。
+    //   bj 此前把 .fav-row 的箭头原样抄过来 ⇒ 历史页每一行末尾多一枚 14px 箭头，
+    //   且它暗示了一个**不存在**的"点整行"行为。
     //
     // 🔴🔴 中间那个 .grow 是**必要的第四列**，不是美化：.hist-meta 自身
     //   `flex:1;min-width:0;white-space:nowrap`（styles.css:641），
@@ -318,7 +349,10 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
             //   顺带也让"这一版没有预览文本"与"预览文本是空串"分成两件事。
             const previewText = st.histPreviewText[h.at] ?? '';
             return (
-              `<div class="list-row${open ? ' hist-open' : ''}" data-at="${at}" role="button" tabindex="0">` +
+              // 🔴 `hist-row` 不是装饰类名：老项目 `.hist-item` 与 `.fav-row` 的
+              //   内边距/字号**不同**（:456 vs :465 —— 9px/13px vs 10px/14px），
+              //   bj 用一个 .list-row 同时承担两族行，只能靠这一级把历史行拉回老值。
+              `<div class="list-row hist-row${open ? ' hist-open' : ''}" data-at="${at}" role="button" tabindex="0">` +
               `<span class="hist-clock">${ICON_CLOCK()}</span>` +
               `<span class="hist-meta">${escapeTrunc(h.label)}</span>` +
               `<span class="grow"></span>` +
@@ -329,7 +363,6 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
               `<button type="button" class="row-btn" data-preview="${at}"${err ? ' disabled' : ''}>${COPY.histPreview}</button>` +
               `<button type="button" class="row-btn" data-restore="${at}"${err ? ' disabled' : ''}>${COPY.histRestore}</button>` +
               `</span>` +
-              `<span class="fav-go">${ICON_CHEVRON()}</span>` +
               // 🔴 预览正文放在行**末尾**（老项目 `row.appendChild(box)` 同款）：
               //   插在中间会把后面的行挤下去，且展开/收起时高度跳变。
               //   ⚠️ 300 是老项目的截断上限（index.html:8489 `.slice(0, 300)`）：
@@ -342,8 +375,8 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
             );
           })
           .join('')
-      : `<div class="empty">${escapeTrunc(st.histFail || COPY.histEmpty)}</div>`;
-    return `${head(COPY.menuHistEntry)}${kick}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
+      : emptyState(ICON_CLOCK(), escapeTrunc(st.histFail || COPY.histEmpty));
+    return `${backRow()}${kick}<div class="list-scroll">${rows}</div>${histSaveRow()}`;
   };
 
   const renderConflict = (): string => {
@@ -384,7 +417,7 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
       `<span class="tick">${ICON_CHECK()}</span>` +
       `</div>`;
     return (
-      `${head(COPY.menuLink)}` +
+      `${backRow()}` +
       `<div class="list-kicker">${COPY.linkKicker}</div>` +
       `<div class="menu-view">` +
       row('linkInApp', COPY.linkInApp, st.linkInApp, ICON_LINK_APP()) +

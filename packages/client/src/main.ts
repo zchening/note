@@ -57,7 +57,7 @@ import {
 import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { writeCache } from './sync/local-cache.ts';
-import { buildHome, buildLanding, buildPass } from './ui/pages.ts';
+import { buildChangePass, buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { COPY } from './ui/copy.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
@@ -68,6 +68,7 @@ import { ReminderUI } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
 import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
+import { mountPet, unmountPet } from './egg/pet.ts';
 import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
 import { exportNotePng } from './export/index.ts';
 import { copyNoteToClipboard, docToClipboardPayload } from './export/copy.ts';
@@ -958,6 +959,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   });
   shellRef = shell;
   setFootStatus = shell.setStatus;
+  // 🔴 桌宠挂顶栏下沿（老项目 petMount，index.html:11198）。
+  //   必须在这里（而不是 boot）调：header 是 buildShell 刚建出来的，
+  //   早一步 `document.querySelector('header.ns-top')` 恒为 null ⇒ 永不挂载，
+  //   而症状是"访问过 /pet 也看不到螃蟹"，零报错。
+  //   未领养时 mountPet 自己就返回 false（老项目 `adopted` 缺省 false = 默认关）。
+  mountPet();
   // 首屏就把皮肤摆对（default 档也要调一次：清空残留纹路）
   shell.setSkin(currentSkin, currentTheme === 'dark');
 
@@ -1108,6 +1115,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //   而口令留在内存里的话，配对码还能照出 —— 用户以为锁了，
       //   实际上任何能操作这台机器的人扫一下屏幕就能拿走口令。
       sessionPass = '';
+      // 🔴 桌宠也要拆：它是 60ms 一跳的定时器，不拆就在锁定的页面上继续爬。
+      unmountPet();
       void lockNote(name).then(() => location.reload());
     },
     onAbout: () => {
@@ -2171,30 +2180,54 @@ function showPass(name: string): void {
   goto('pass');
 }
 
-/** 改口令的完整流程：从提示页拿新口令 → 换密钥 → 落盘。 */
+/**
+ * 改口令的完整流程：**弹窗两阶段**（验旧口令 → 设新口令）→ 换密钥 → 落盘。
+ *
+ * 🔴🔴 此前这里是 `window.prompt()` 连弹两次（用户报障第 12 条
+ *   「修改口令弹窗和老版本不一样」）：
+ *     · 没有弹窗 —— 老项目是 `#cpMask` 一张真正的浮层（index.html:780-793）；
+ *     · 顺序颠倒 —— 老项目先问「当前口令」（`下一步`）验证通过后才展开新口令两框；
+ *     · 文案全无 —— 老项目有「修改后本机立即用新口令重新加密…」这句说明，
+ *       它讲清了"其他设备要用新口令重开"这一后果，不是装饰。
+ *   window.prompt 还有个硬伤：它是**阻塞的原生框**，样式完全由系统决定，
+ *   夜间模式下是一片白，与本项目整套主题毫无关系。
+ */
 async function doChangePassphrase(): Promise<void> {
-  const next = window.prompt('输入新的口令');
-  if (next === null) return;
-  if (next.length === 0) {
-    setFootStatus?.('offline', '新口令不能为空');
-    return;
-  }
-  // 🔴 必须先验老口令。changePassphrase 内部会解老密文来确认，
-  //   这里不需要重复问一次 —— 用户输错老口令时它会返回同一句文案。
   const doc = window.__NOTESYNC_DOC__?.() ?? emptyDoc();
-  const old = window.prompt('再输入一次当前口令以确认');
-  if (old === null) return;
-  const r = await changePassphrase(currentNote, old, next, doc);
-  if (!r.ok) {
-    setFootStatus?.('offline', r.message);
-    return;
-  }
-  // 🔴 会话口令必须同步换成新的。忘了这一步的话，配对码里还是**旧口令**，
-  //   另一台设备扫了必然解不开 —— 而本机一切正常，症状是"配对功能坏了"。
-  sessionPass = next;
-  setFootStatus?.('synced', '口令已改，下次用新口令');
-  // 换完密钥必须重建同步实例：它持有的是旧密钥
-  await startSyncFor(currentNote);
+  // 🔴 阶段一验证通过的口令要**留在闭包里**给阶段二用。
+  //   弹窗是分两步问的（先旧、后新），中间没有第二个输入框可以回填 ——
+  //   少存这一份，第二步就拿不到"用来证明身份"的那句口令。
+  let verifiedOld = '';
+  buildChangePass(app, {
+    onVerifyOld: async (oldPass) => {
+      // 🔴 阶段一**只验证，不换密钥**：解开旧密文 = 身份证明。
+      //   验不过就停在阶段一，让用户重输，绝不��到设置新口令那一步。
+      const r = await unlock({ noteId: currentNote, passphrase: oldPass });
+      if (!r.ok) return r.message;
+      verifiedOld = oldPass;
+      return null;
+    },
+    onSubmitNew: async (next) => {
+      const r = await changePassphrase(currentNote, verifiedOld, next, doc);
+      if (!r.ok) return r.message;
+      // 🔴 会话口令必须同步换成新的。忘了这一步的话，配对码里还是**旧口令**，
+      //   另一台设备扫了必然解不开 —— 而本机一切正常，症状是"配对功能坏了"。
+      sessionPass = next;
+      setFootStatus?.('synced', COPY.cpDoneMsg);
+      // 换完密钥必须重建同步实例：它持有的是旧密钥
+      await startSyncFor(currentNote);
+      return null;
+    },
+    onClose: () => {
+      // 弹窗关掉就把焦点还给编辑器（老项目 :8287 `cpCancel` 里 `editor.focus()` 同款动作）。
+      // 🔴 桌面端失焦时光标不绘制（老项目红线10），不还焦点会看到"框还在但不能直接打字"。
+      try {
+        editor?.focus();
+      } catch {
+        /* 归还焦点失败不影响使用 */
+      }
+    },
+  });
 }
 
 function route(): void {

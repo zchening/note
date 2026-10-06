@@ -103,11 +103,28 @@ export const EXPORT_MAX_WIDTH = 640;
  *   （老项目用 `.ns-export` class，那会与用户正文里恰好出现的 class 名撞车。）
  *
  * 🔴 间隙必须用 px：三角挂在 font-size:0 的标记上，em 在那里归零（老项目 mockup 实锤）。
+ *
+ * 🔴🔴 属性只准打在**折叠把手**上，绝不能打在离屏卡 wrap 上
+ *   （用户报障「导出图本体…相比老版本左上角多了个箭头」，本批量化实锤）：
+ *     老项目只在 `tmp.querySelectorAll('.ns-fold-mark')` 那一枚**行内小 span** 上
+ *     打 `data-ns-export`（index.html:3099），所以 ▼ 只出现在折叠标题行首。
+ *     bj 此前在 buildCard 里写了 `wrap.dataset.nsExport = '1'`
+ *     —— 属性落在**整张离屏卡**上，于是 `::before` 那枚 ▼ 被画在卡片正文流最前面
+ *     ＝导出图左上角凭空多一个箭头；同时 `font-size:0` 还会一并作用到整张卡
+ *     （那两条是给"只有 [折叠] 文本、不留字"的小 span 用的，套到卡上就是错作用域）。
+ *   修法：属性下沉到折叠把手（见 buildCard），基规则改成
+ *   `[data-ns-export-fold] > :first-child::before` 一条梭。
  */
 export const EXPORT_FOLD_CSS = [
-  // 三角：字形 ▼（编辑器那枚是边框画的几何三角，两套独立画法，观感同为下指小三角）
-  '[data-ns-export]{font-size:0;margin-right:7px;color:var(--muted)}',
-  '[data-ns-export]::before{content:"\\25BC";font-size:12px;line-height:1.9;vertical-align:baseline}',
+  // 🔴 三角：老项目出图那枚是 ▼ 字形（index.html:3104），编辑器那枚是边框画的几何
+  //   三角——**两套独立画法**（老项目 v10.0.4 拍板）。
+  //   🔴🔴 bj 的折叠规则**没有锁 `#editor` 作用域**（`.ns-fold > :first-child::before`），
+  //   离屏副本会照画边框三角 ⇒ 这里不是"补一个 ▼"，而是**把边框三角换成 ▼**
+  //   （border:0 撤掉边框 + 给 content/尺寸），否则出图里会出现
+  //   "边框三角后面再跟一个 ▼"——用户看到的"多了个箭头"就是这么来的。
+  '[data-ns-export-fold] > :first-child::before{content:"\\25BC";border:0;' +
+  'width:auto;height:auto;font-size:12px;line-height:1.9;color:var(--muted);' +
+  'vertical-align:baseline;position:static;top:auto;margin:0 7px 0 0}',
   // 恒定展开：折叠正文在导出图里全部可见
   '[data-ns-export-fold] > :not(:first-child){display:block}',
   // 缩进 + 左引导线：逐字复刻基规则的 margin/padding/border-left
@@ -169,7 +186,9 @@ export function buildCard(deps: BuildCardDeps): ExportCard {
 
   const wrap = document.createElement('div');
   wrap.className = 'ns-export';
-  wrap.dataset.nsExport = '1';
+  // 🔴🔴 绝不在这里写 `wrap.dataset.nsExport = '1'`：那会把 EXPORT_FOLD_CSS 的
+  //   `::before ▼` 挂到**整张卡**上，导出图左上角凭空多一个箭头（用户报障第 3 条）。
+  //   老项目这里只加 `.ns-export` class（index.html:3098），属性是打在折叠把手上的。
   wrap.setAttribute(
     'style',
     'position:absolute;left:-9999px;top:0;width:' +

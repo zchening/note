@@ -100,6 +100,26 @@ svg .gf { fill: var(--accent); stroke: none; }
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: none; }
 }
+/* 🔴🔴🔴 `.box` **不许带 max-height / overflow**（用户报障第 7 条
+ *   「日间模式扫一扫、号码配对、菜单栏、历史版本等的滚动条和老版本不一样，
+ *     有些地方不应该出现滚动条」——本批量化实锤）：
+ *
+ *   老项目 `.box`（index.html:509）原文只有
+ *     `background/border/border-radius/padding/width/box-shadow/transition/animation`
+ *   —— **没有 max-height、没有 overflow**。所以老项目里除了扫一扫那一张
+ *   （:8599 用行内 `max-height:calc(100vh - 48px);overflow:auto` 单独开），
+ *   其它任何弹窗、菜单盒都不可能长出滚动条。
+ *
+ *   bj 此前在 `.box` 上写了 `max-height:86vh; overflow-y:auto`，
+ *   于是**每一个** `.box` 都成了潜在滚动容器：
+ *     · 菜单盒 `#menuBox` → 菜单行多时盒自己再滚一条，与行内滚动**重复**；
+ *     · 号码配对 / 修改口令 / 关于… → 内容没到 86vh 也留着一条永远不用的滚动条轨道；
+ *     · 历史版本页 → 同上，且与 `.list-scroll` 的滚动叠成两条。
+ *   "有些地方出现了不该有的滚动条"就是这一句的副作用，不是别处漏了什么。
+ *
+ *   需要限高滚动的地方**各自单独开**：扫一扫层已在 scan/layer.ts:88 用行内样式开好
+ *   （与老项目 :8599 同款），历史/收藏列表走 `.list-scroll{max-height:min(50vh,400px)}`。
+ */
 .box {
   width: 100%; max-width: min(90vw, 380px);
   background: var(--box-bg);
@@ -112,7 +132,6 @@ svg .gf { fill: var(--accent); stroke: none; }
   box-shadow: var(--shadow-box);
   transition: background-color .3s ease;
   animation: nsRise .5s cubic-bezier(.2,.7,.3,1) both;
-  max-height: 86vh; overflow-y: auto;
 }
 /* 🔴🔴 逐值抄老项目 `.modal-head{...;gap:12px;margin:0 0 8px}`。
    缺 `margin:0 0 8px` 时标题行与下方内容贴在一起，整盒高度少 8px
@@ -273,12 +292,18 @@ svg .gf { fill: var(--accent); stroke: none; }
 .box .hint { font-size: 13px; line-height: 1.7; color: var(--muted); margin: 0 0 20px; }
 /* 🔴 口令框：老项目 index.html:513 `.box input{width:100%;padding:0 14px;height:46px;...}`。
    原先 padding:11px 12px（高约 41px），比老项目矮 5px、左右内边距也差 2px。 */
-.box input[type="password"] {
+/* 🔴 选择器必须是 `.box input`（老项目 index.html:513 同款），不是 `.box input[type=password]`：
+     老项目那条不带属性选择器，弹层里**任何** input 都吃它。
+     限定属性会让将来新增的非密码输入框（换机码粘贴框等）静默退回浏览器默认样式 ——
+     症状是"某个框圆角/高度和别的框不一样"，属同一类"漏枚举"故障。
+     老项目还有 `color:var(--fg)`，缺了它输入的字符取 UA 默认黑，夜间模式下看不见。 */
+.box input {
   width: 100%; background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px;
   height: 46px; padding: 0 14px; font-size: 15px; outline: none;
+  color: var(--fg);
 }
-.box input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.box input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 /* 🔴🔴 逐值抄老项目 `.err{color:#C0453E;font-size:13px;min-height:20px;margin:10px 0 6px}`。
    差异同样体现在整盒高度上：bj 此前 min-height:1.2em / margin-top:8px / 12.5px，
    与老项目的 20px / 10px+6px / 13px 都不一致 ⇒ 弹窗整体比老项目矮一截。 */
@@ -301,7 +326,62 @@ svg .gf { fill: var(--accent); stroke: none; }
 }
 .box button:not(.box-x):hover { opacity: .85; }
 .box button:not(.box-x):active { opacity: .75; }
-.box button:not(.box-x):disabled { opacity: .35; cursor: not-allowed; }
+/* 🔴🔴🔴 「取消」这类**次要按钮**在老项目里**不是描边幽灵钮**，尽管源码 :518 写了
+ *   `.box button.ghost-btn{margin-top:10px;background:none;color:var(--muted);
+ *     border:1px solid var(--line);font-weight:400}`。
+ *
+ *   真浏览器量老项目自己的五个 `.ghost-btn`（#cpCancel / #bakCancel / #bakClose2 /
+ *   #bakRestCancel / #updNo），五个**全部**命中四条规则：
+ *     `.box button:not(.box-x)` → `.box button.ghost-btn`
+ *     → **`.box button:not(:disabled):not(.box-x)`**（样式区更后面，:0 附近）
+ *   最后那条 specificity (0,3,1) 压过 ghost-btn 的 (0,2,1)，
+ *   于是 background / color / font-weight 全被吃回主按钮那套，
+ *   只有 ghost-btn 独占的 margin-top 与 border 留了下来。
+ *
+ *   量化对照（**相对关系**才是判据，绝对 rgb 随主题走）：
+ *     老项目 #cpCancel : bg=--hover   color=--fg     fw=400  border=1px --line  margin-top:10px
+ *     老项目 #cpOk    : bg=--line    color=--muted           （disabled 态）
+ *   两枚都是浅底 + 深/灰字 + 细描边，**不靠"实底 vs 幽灵"区分主次**。
+ *
+ *   本次一度照字面补了 `.box button.ghost-btn`（描边透明底）—— 那会让改口令弹窗
+ *   多出一枚老项目根本没有的描边按钮。
+ *   ⇒ 纪律：老项目源码里"写了但被更具体规则吃掉的声明"必须**照实测抄**。
+ *     照抄声明等于把 bug 一起抄进来，还会被当成"对齐完成"。
+ *
+ *   禁用态同理照抄老项目 :522（不是"整枚变淡"）：
+ *     background:var(--line); color:var(--muted); opacity:1（明确写 1）
+ */
+.box button:not(.box-x):not(:disabled) {
+  background: var(--hover); color: var(--fg); font-weight: 400;
+  border: 1px solid var(--line);
+}
+.box button:not(.box-x):disabled {
+  background: var(--line); color: var(--muted);
+  cursor: not-allowed; box-shadow: none; opacity: 1;
+}
+/* 🔴🔴🔴 `.box h1` / `.box p` 必须是**元素选择器**，与老项目 index.html:511-512 同选择器：
+ *
+ *   老项目原文：
+ *     .box h1{font-size:18px;font-weight:600;margin:0 0 8px;letter-spacing:.02em}
+ *     .box p {font-size:13px;color:var(--muted);margin:0 0 20px;line-height:1.7}
+ *
+ *   bj 此前**只有** `.modal-head h1` 与 `.box .hint` 两条**类名**规则，
+ *   于是任何没挂这两个类名的 h1/p 都退回浏览器默认 —— 量化实测（改口令弹窗）：
+ *     bj  h1: 32px / 700 / margin 21.44px   （老项目 18px / 600 / 0 0 8px）
+ *     bj  p : 16px / fg / margin 16px       （老项目 13px / muted / 0 0 20px）
+ *   症状就是用户报障第 12 条「修改口令弹窗和老版本不一样」与第 4 条
+ *   「配对弹窗文案字体大小、颜色…和老版本不同」—— 同一个根因。
+ *
+ *   🔴 优先级核对（两条都必须成立，否则会连带改坏别处）：
+ *     · `.box .hint`（0,2,0）> `.box p`（0,1,1）⇒ 口令页那段说明仍走自己的规则；
+ *     · `.qr-box p`（0,1,1）与本条同优先级但**写在后面** ⇒ 配对弹窗的段间距
+ *       仍是老项目的 14px，不是 20px（老项目也是这个顺序、同一结果）。
+ */
+.box h1 { font-size: 18px; font-weight: 600; margin: 0 0 8px; letter-spacing: .02em; }
+.box p { font-size: 13px; color: var(--muted); margin: 0 0 20px; line-height: 1.7; }
+/* 🔴 修改口令弹窗里两个新口令框之间的间距（老项目 index.html:491
+   `#cpNew,#cpNew2{margin-top:12px}`；v6.1 之前这两框是与旧口令框贴死的）。 */
+#cpNew, #cpNew2 { margin-top: 12px; }
 /* 老项目 .box button 的 margin-top 是 0；#ok 在老项目里也没有额外上边距，
    bj 此前给 #ok 单加了 margin-top:6px —— 那会让弹窗第一个按钮与上方内容脱开一截。
    🔴 保持与老项目一致：不加。若将来要加，必须同步量老项目。 */
@@ -682,7 +762,28 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .offlinebar { color: var(--muted); }
 
 /* ---------- 菜单面板 ---------- */
-#menuMainView, .menu-view { display: flex; flex-direction: column; gap: 8px; }
+/**
+ * 🔴🔴 菜单视图容器**必须是普通块级，不能是 flex 列**（用户报障「菜单栏间距比老版本大」）。
+ *
+ *   量化实测（同 Playwright、同 390x844 视口、同 11 行）：
+ *     老项目：行高 46、行顶间隔 51（= 46 + margin-bottom 5）
+ *     bj 改前：行高 42、行顶间隔 55
+ *
+ *   差在两处，都是 `display:flex; flex-direction:column; gap:8px` 这一句带来的：
+ *     ① **gap 8px 是凭空多出来的间距** —— 老项目 `#menuMainView`（index.html:480）
+ *        只有 `max-height` + `overflow-y`，**没有任何 gap**；行与行的间距全部来自
+ *        行自身的 `margin-bottom:5px`（:437）。8+5=13 ⇒ 一眼就"松"。
+ *     ② **flex 列容器里的行会被压扁**：容器有 `max-height:min(72vh,560px)`，
+ *        11 行 × 46 + gap 撑破上限 ⇒ flex 项按 `flex-shrink:1` **收缩**，
+ *        于是行高从 46 掉到 42（内容被压，不是 min-height 生效）。
+ *        这解释了"明明 min-height 写的是 42、老项目却是 46"：
+ *        老项目的 46 = 26(图标) + 9+9(padding) + 1+1(border)，是**内容撑出来的**，
+ *        压根没用到 min-height。
+ *        ⇒ 别去改 min-height，那是拿错误的东西凑数字。
+ *
+ *   修法：退回块级（块级下 margin-bottom 不合并、不被压扁），gap 去掉。
+ */
+#menuMainView, .menu-view { display: block; }
 #menuMainView { max-height: min(72vh, 560px); overflow-y: auto; }
 /* 菜单盒比普通弹层宽一点：菜单项有一列 112px 标签 + 26px 图标，420px 会挤 */
 .menu-box {
@@ -739,7 +840,7 @@ footer.ns-foot .dot.off { background: var(--danger); }
 /* 历史列表容器：独立滚动限高。老项目 index.html:478
    `#menuHistList,#menuFavList{max-height:min(50vh,400px);overflow-y:auto}`。
    🔴 没有限高时条目一多就把菜单盒撑出屏幕，"关掉菜单"这件事本身变成不可能。 */
-.list-scroll { max-height: min(50vh, 400px); overflow-y: auto; }
+.list-scroll { max-height: min(50vh, 400px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
 /* 🔴🔴 计数行：等宽体 + uppercase + 字距 .14em + **金色引导圆点**
    （老项目 index.html:462-463 逐字）：
      .list-kicker{display:flex;align-items:center;font:400 10.5px/1 <mono>;letter-spacing:.14em;
@@ -769,7 +870,18 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .tick svg { width: 16px; height: 16px; display: block; }
 /* 🔴 两行各自的专属图标：尺寸与菜单项其它图标一致（老项目 .menu-item svg 同款） */
 .menu-item.link-opt > svg { width: 26px; height: 26px; flex: none; }
-.empty { padding: 26px 0; text-align: center; font-size: 13px; color: var(--muted); }
+/* 🔴🔴 二级页空态**逐值抄老项目** `#menuFavEmpty/#menuHistEmpty`（index.html:494-497）：
+   flex 列 + 居中 + gap 8px + 12.5px muted + padding 22px 0 16px，
+   **外加一枚 22px / opacity .55 的轮廓图标**（收藏=空心星、历史=时钟）。
+   此前是 `padding:26px 0;font-size:13px` 的一句裸文本：
+   没有图标、字号与留白都与老项目不同 —— 空列表看着像"报错"而非"还没有内容"。 */
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-align: center; color: var(--muted); font-size: 12.5px;
+  padding: 22px 0 16px;
+}
+.empty-ic, .empty-ic > svg { width: 22px; height: 22px; flex: none; }
+.empty-ic { opacity: .55; }
 /* 列表行：与主菜单同族的胶囊行（老项目 .fav-row index.html:456）。
    🔴 三列各自定宽：图标列 / 名字列 / 右箭头列 —— 与主菜单的"112px 标签列"是同一种
    「定宽起线齐」的排版纪律；改成自适应的话长短名会让右箭头列参差不齐。 */
@@ -782,6 +894,12 @@ footer.ns-foot .dot.off { background: var(--danger); }
             transition: border-color .2s ease; }
 .list-row:active { background: var(--hover); }
 .list-row:hover { border-color: var(--accent); }
+/* 🔴🔴 历史行与收藏行**不是同一族**（老项目 .hist-item index.html:465 vs .fav-row :456）：
+     .hist-item{padding:9px 12px;font-size:13px}  ← 比收藏行紧一号、字号小一号
+     .fav-row {padding:10px 12px;font-size:14px}
+   两者同用一个 .list-row 骨架，历史行靠这一级拉回老项目的两个值。
+   （差异来自"行内有什么"：历史行装的是等宽时间戳+两枚按钮，收藏行只装一个笔记名。） */
+.list-row.hist-row { padding: 9px 12px; font-size: 13px; }
 /* 收藏金星 18px（老项目 .fav-star index.html:459）/ 历史时钟 16px（:467 .hist-clock）
    🔴🔴 选择器必须**同时命中包裹 span 与内部 svg**：SVG 没有 width/height 属性时
    默认占 300×150，只给 span 定尺寸的话里面会撑出一个巨大空框（行高整个炸开）。
@@ -1173,6 +1291,33 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   color: var(--fg); transition: transform .2s; }
 .ns-pet svg { width: 100%; height: 100%; display: block; }
 .ns-pet.jump { transform: translateY(-22px); }
+/* ---------- 桌宠：常驻顶栏下沿那只螃蟹（老项目 index.html:10422-10434 逐字）----------
+ * 🔴🔴 与上面 .ns-pet（彩蛋页舞台里 96px 的那只是**另一只形态**）不是同一个东西：
+ *   这里管的是"任何笔记页都骑在 header 下沿、每 60ms 横向走 0.35px"的那只。
+ *   用户报障「包括螃蟹在顶栏爬行」—— 这条以前**完全没实现**，
+ *   桌宠只做成了 /pet 彩蛋页里的一只大号静态螃蟹。
+ *
+ *   bottom:-11px 让它骑在 header 的下边框线上（半骑线），0 占宽；
+ *   background:var(--bg) 补一块底色，避免正文/滚动内容从螃蟹背后透出来。
+ *   🔴 动画挂在**外层**、左右走位写在 inline transform 上，两者不冲突：
+ *   bob 动的是 margin-bottom，点头动的是 transform —— 但点头会**短暂覆盖**
+ *   爬行的 translateX（老项目就是这个写法，点头 0.5s 结束即恢复）。
+ */
+#nsPet {
+  position: absolute; left: 0; bottom: -11px;
+  width: 24px; height: 24px;
+  color: var(--fg); background: var(--bg);
+  border-radius: 7px; padding: 1px; z-index: 5;
+  cursor: pointer; transition: opacity .3s;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+#nsPet svg { width: 22px; height: 22px; display: block; }
+#nsPet { animation: nsPetBob 2.6s ease-in-out infinite; }
+@keyframes nsPetBob { 0%, 100% { margin-bottom: 0; } 50% { margin-bottom: 2px; } }
+#nsPet.talk { animation: nsPetNod .5s ease-in-out; }
+@keyframes nsPetNod { 0%, 100% { transform: rotate(0); } 40% { transform: rotate(-8deg) translateY(-2px); } }
+#nsPet.asleep { opacity: .42; animation: none; }
+@media (max-width: 560px) { #nsPet { width: 22px; height: 22px; } }
 .ns-mirror-box { max-width: min(90vw, 560px); max-height: 70vh; overflow: auto;
   padding: 18px; background: var(--box-bg); border: 1px solid var(--line);
   border-radius: 14px; box-shadow: var(--shadow-card); }
@@ -1387,11 +1532,18 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
    原先是 grid 72px+1fr 左对齐、标题无衬线无金线 —— 「小号衬线标题 + 细长金线 +
    两行信息整体居中」是用户五轮反馈收敛出来的版式（老项目 v7.0），丢了就不是那个关于页。
    gap:0 也是抄的：老项目各行靠 line-height:2 自己撑开，只有作者行有 6px 外边距。 */
-.about-title {
+/* 🔴🔴🔴 选择器必须是 `#aboutTitle`（**ID 特异性**），不能只靠 `.about-title` 类：
+ *   老项目 index.html:829 的标题是 `<h1 class="qr-title" id="aboutTitle">`，
+ *   它靠 `#aboutTitle`（1,0,0）压过 `.qr-box .qr-title`（0,2,0）的 letter-spacing:.02em，
+ *   才保住「字距 1px」；本项目新增的 `.box h1` 同样是 (0,1,1)，
+ *   类名写法（0,1,0）会被它吃掉 —— 实测标题字距从 1px 掉到 0.36px，
+ *   而「扉页式小号衬线标题 + 细长金线」是用户五轮反馈收敛出来的版式。
+ *   类名 `.about-title` 保留（e2e 按它选），承重的那份 specificity 交给 id。 */
+#aboutTitle {
   font-family: var(--serif); font-size: 18px; font-weight: 600;
   letter-spacing: 1px; margin: 0; text-align: center;
 }
-.about-title::after {
+#aboutTitle::after {
   content: ''; display: block; width: 52px; height: 1px;
   background: var(--accent); margin: 11px auto 0; opacity: .8;
 }

@@ -70,7 +70,15 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   //   「扉页式小号衬线标题 + 细长金线」是用户五轮反馈收敛出来的版式，丢了就不是那个关于页。
   //   金线走 ::after（纯 CSS），这里只需给它一个能居中的块级容器；
   //   关闭 × 改为 .box-x 绝对定位浮在盒内右上（老项目 .box-x 同款），不参与标题行的排版。
+  // 🔴🔴 id 必须叫 `aboutTitle`（老项目 index.html:829 就是
+  //   `<h1 class="qr-title" id="aboutTitle">`），**不能只用 .about-title 类**：
+  //   老项目靠 **ID 特异性**（1,0,0）压过 `.qr-box .qr-title`（0,2,0）的 letter-spacing:.02em，
+  //   才保住「字距 1px」；bj 若只用类名（本项目此前就是这样），新加的 `.box h1`（0,1,1）
+  //   会把 letter-spacing 吃掉改成 .02em、还多塞一个 margin-bottom:8px ——
+  //   而那正是用户五轮反馈收敛出来的「扉页式小号衬线标题 + 细长金线」版式。
+  //   类名保留（e2e 与样式都按它选），但承重的那份 specificity 交给 id。
   h1.className = 'about-title';
+  h1.id = 'aboutTitle';
   const x = document.createElement('button');
   x.className = 'box-x';
   x.type = 'button';

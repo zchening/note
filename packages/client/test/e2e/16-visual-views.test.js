@@ -425,7 +425,20 @@ test('VVW-05 🔴🔴 历史行要有时钟列 + 等宽 meta，且「新增历�
     assert.ok(m, '历史页应有一行 .list-row[data-at]');
     assert.equal(m.hasClock, true, '历史行应有图标列 .hist-clock（老项目 16px 时钟）');
     assert.equal(m.hasMeta, true, '历史行应有等宽 meta 列');
-    assert.equal(m.hasGo, true, '历史行也应有右箭头列（老项目 .fav-go 同款）');
+    // 🔴🔴🔴 2026-10-07 判据纠错：这条原先写的是 `hasGo === true`（"历史行也应有右箭头，
+    //   老项目 .fav-go 同款"）—— **它钉的正是用户报障第 8 条的那个 bug**。
+    //   老项目 index.html:8490-8536 逐行读下来：`.hist-item` 里只有
+    //   HIST_CLOCK_SVG + `.hist-line`（内含 `.hist-meta` 与 `.hist-btns`）+ 可选 `.hist-preview`，
+    //   **从头到尾没有 fav-go**；`.fav-go`（index.html:461）只属 `.fav-row`（收藏行）。
+    //   而且老项目的历史行**整行不可点**（行为全在 [预览]/[恢复] 两枚按钮上），
+    //   那枚箭头等于在暗示一个不存在的交互。
+    //   ⇒ 正确的判据是反向的：历史行**不该有**右箭头。
+    assert.equal(
+      m.hasGo,
+      false,
+      '历史行不该有右箭头 .fav-go（老项目 .hist-item 只有 时钟 + 时间 + 两枚按钮；' +
+        '行本身不可点，箭头会暗示一个不存在的交互）',
+    );
     assert.equal(m.clockW, 16, `时钟列应 16px，实际 ${m.clockW}px`);
     assert.equal(m.clockSvgW, 16, `时钟图标本体应 16px，实际 ${m.clockSvgW}px`);
     assert.ok(
@@ -1361,7 +1374,17 @@ test('VVW-16 🔴🔴 菜单项几何必须与老项目逐字同值（间距类�
     assert.equal(items.mb, '5px', `项间距（margin-bottom）应 5px，实际 ${items.mb}`);
     assert.equal(items.gap, '12px', `图标与文字间距应 12px，实际 ${items.gap}`);
     assert.equal(items.fs, '15px', `字号应 15px，实际 ${items.fs}`);
-    assert.equal(items.h, 42, `行高应 42px（老项目 v7.0.1 从 48 瘦身），实际 ${items.h}`);
+    assert.equal(items.h, 46, `行高应 46px，实际 ${items.h}`);
+    // 🔴🔴 2026-10-07 判据纠错：这条原先断言 42px，注释还写"老项目 v7.0.1 从 48 瘦身" ——
+    //   **42 是 bj 自己的 bug 值，不是老项目的值**。本轮同视口并排量化实测（同 Playwright、
+    //   同 390×844、同日间模式、逐项读 getBoundingClientRect）：
+    //     老项目 .menu-item 行高 46、行顶间隔 51（= 46 + margin-bottom 5）
+    //     bj 修复前          行高 42、行顶间隔 55
+    //   42 的真因：bj 的菜单视图容器是 `display:flex;flex-direction:column;gap:8px`，
+    //   flex 项在 `max-height:min(72vh,560px)` 下被 `flex-shrink:1` **压扁**，
+    //   min-height:42px 恰好成了压扁后的下限。老项目是块级容器，行不会被压。
+    //   既然用户报的是"间距比老版本大"，判据就该钉老项目的 46 而不是 bj 的 42。
+    //   行高是"内容撑出来的"（26 图标 + 9+9 padding + 1+1 border），别去改 min-height。
     assert.equal(items.align, 'center', '图标与文字应纵向居中');
     assert.equal(items.justify, 'center', '主菜单整组应居中（老项目 v8.0.1）');
     // 反向：菜单盒内不许再有 box-x（老项目菜单里从来没有关闭 X）
@@ -1506,6 +1529,7 @@ test('VVW-18 🔴 二维码配对弹窗的警示与画布几何（弹窗按钮/�
         warnFont: warnCs ? warnCs.fontSize : null,
         warnColor: warnCs ? warnCs.color : null,
         dangerToken: toRgb(root.getPropertyValue('--danger')),
+        mutedToken: toRgb(root.getPropertyValue('--muted')),
         warnLines: warn ? Math.round(warn.getBoundingClientRect().height / parseFloat(getComputedStyle(warn).lineHeight)) : null,
         hasCloseBtn: !!closeBtn,
         closeSize: closeBtn ? [Math.round(closeBtn.getBoundingClientRect().width), Math.round(closeBtn.getBoundingClientRect().height)] : null,
@@ -1535,8 +1559,23 @@ test('VVW-18 🔴 二维码配对弹窗的警示与画布几何（弹窗按钮/�
     assert.equal(q.holderMb, '12px', `码区下边距应 12px，实际 ${q.holderMb}`);
     assert.equal(q.canvasRadius, '12px', `码圆角应 12px，实际 ${q.canvasRadius}`);
     assert.equal(q.canvasBg, q.paperToken, `码底色应吃 --qr-paper 令牌（实测 ${q.canvasBg}）`);
-    assert.equal(q.warnFont, '12px', `警示字号应 12px，实际 ${q.warnFont}`);
-    assert.equal(q.warnColor, q.dangerToken, `警示颜色应吃 --danger 令牌（实测 ${q.warnColor}）`);
+    // 🔴🔴 2026-10-07 判据纠错：这两条原先断言「警示 12px / 颜色 = --danger」，
+    //   抄的是老项目 index.html:537 `.qr-warn{font-size:12px;color:#C0453E}`
+    //   **的字面**。同视口并排量化实测**老项目自己的** `#qrMask .qr-warn`：
+    //     font-size 13px / color rgb(152,149,138)=--muted / line-height 22.1px(=1.7) / margin 0 0 14px
+    //   —— `.qr-warn`(0,1,0) 被 `.box p`(0,1,1) 压掉了：`.box p{font-size:13px;
+    //     color:var(--muted);margin:0 0 20px;line-height:1.7}` 在 :512、`.qr-box p`
+    //     在 :528 又把 margin 改回 14px。也就是说 **`.qr-warn` 的字号与颜色在老项目里是死规则**。
+    //   （同款死规则还有 `.box button.ghost-btn`，见 visual-parity 的 VP-06。）
+    //   ⇒ 判据必须钉实测值。用户报障第 4 条「配对弹窗文案字体大小、颜色和老版本不同」
+    //   的正解就是回到这个实测值，而不是回到那条死规则。
+    assert.equal(q.warnFont, '13px', `警示字号应 13px（老项目实测；其 .qr-warn 的 12px 是死规则），实际 ${q.warnFont}`);
+    assert.equal(q.warnColor, q.mutedToken, `警示颜色应吃 --muted（老项目实测 ${q.warnColor}）`);
+    assert.notEqual(
+      q.warnColor,
+      q.dangerToken,
+      '警示**不是** --danger：老项目的 .qr-warn 颜色被 .box p 压掉，实际渲染为 muted',
+    );
     // 🔴🔴 反向钉死（我第一版把方向写反了，被判据自己抓出来）：
     //   老项目 `index.html:771-780` 的**扫码配对面板没有右上角 X** ——
     //   结构是 `.box.qr-box > h1.qr-title + p + #qrHolder + p.qr-warn + button#qrClose`，

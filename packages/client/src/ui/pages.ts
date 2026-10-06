@@ -184,6 +184,145 @@ export function buildPass(host: HTMLElement, cb: PassCallbacks): void {
   pw.focus();
 }
 
+/**
+ * 修改口令弹窗（老项目 index.html:780-793 `#cpMask`）
+ *
+ * 🔴🔴 两阶段是**老项目的形态**，不是我们加的流程：
+ *   阶段 0 只问「当前口令」（`下一步`）——先用旧口令解开密文自证身份；
+ *   阶段 1 才展开「新口令 / 再次输入」（`确 定`）。
+ *   一次弹窗里同时摆三个框，用户分不清先后，而"先用旧口令自证"这条
+ *   恰恰是改口令唯一的安全前提（否则任何人点一下菜单就能把别人的笔记改了口令）。
+ *
+ * 🔴 结构上刻意**不带右上角 ×**：老项目 `#cpMask` 只有「下一步 / 确定」+「取消」，
+ *   没有关闭钮（改口令是破坏性操作，退出路径只有明确的「取消」）。
+ */
+export interface ChangePassCallbacks {
+  /** 验证旧口令：返回 null 通过，返回文案即错误（显示在 .err 里）。 */
+  onVerifyOld: (oldPass: string) => Promise<string | null>;
+  /** 提交新口令（已保证非空且两次一致）：返回 null 成功。 */
+  onSubmitNew: (newPass: string) => Promise<string | null>;
+  /** 取消 / 成功之后的收场。 */
+  onClose: () => void;
+}
+
+export function buildChangePass(host: HTMLElement, cb: ChangePassCallbacks): void {
+  host.insertAdjacentHTML(
+    'beforeend',
+    `<div class="mask" id="cpMask">
+  <div class="box" id="cpBox">
+    <h1>${COPY.cpTitle}</h1>
+    <p>${COPY.cpHintHtml}</p>
+    <input id="cpOld" type="password" placeholder="${COPY.cpOldPh}" autocomplete="off">
+    <input id="cpNew" type="password" placeholder="${COPY.cpNewPh}" autocomplete="off" class="hidden">
+    <input id="cpNew2" type="password" placeholder="${COPY.cpNew2Ph}" autocomplete="off" class="hidden">
+    <div class="err" id="cpErr" role="alert" aria-live="polite"></div>
+    <button type="button" id="cpOk" disabled>${COPY.cpNext}</button>
+    <button type="button" id="cpCancel" class="ghost-btn">${COPY.cpCancel}</button>
+  </div>
+</div>`,
+  );
+
+  const mask = host.querySelector<HTMLElement>('#cpMask');
+  const oldIn = host.querySelector<HTMLInputElement>('#cpOld');
+  const newIn = host.querySelector<HTMLInputElement>('#cpNew');
+  const new2In = host.querySelector<HTMLInputElement>('#cpNew2');
+  const err = host.querySelector<HTMLElement>('#cpErr');
+  const ok = host.querySelector<HTMLButtonElement>('#cpOk');
+  const cancel = host.querySelector<HTMLButtonElement>('#cpCancel');
+  if (!mask || !oldIn || !newIn || !new2In || !err || !ok || !cancel) {
+    throw new Error('修改口令弹窗结构不完整');
+  }
+
+  /** 0 = 验证旧口令；1 = 设置新口令（老项目 `cpStage`）。 */
+  let stage: 0 | 1 = 0;
+  let busy = false;
+
+  const close = (): void => {
+    mask.remove();
+    cb.onClose();
+  };
+
+  const refresh = (): void => {
+    // 🔴 禁用判据逐字抄老项目 `cpOk.disabled = !cpOld.value` / `cpNewGuard()`
+    //   （:8288-8291）：**只看非空**，不设最短长度（老项目 v6.1 取消位数要求）。
+    ok.disabled = busy || (stage === 0 ? oldIn.value.length === 0 : !(newIn.value && new2In.value));
+  };
+
+  const toStage1 = (): void => {
+    stage = 1;
+    oldIn.classList.add('hidden');
+    newIn.classList.remove('hidden');
+    new2In.classList.remove('hidden');
+    err.textContent = '';
+    ok.textContent = COPY.cpDone;
+    refresh();
+    newIn.focus();
+  };
+
+  const submit = async (): Promise<void> => {
+    if (ok.disabled || busy) return;
+    err.textContent = '';
+    if (stage === 0) {
+      busy = true;
+      ok.disabled = true;
+      err.textContent = COPY.cpVerifying;
+      try {
+        const message = await cb.onVerifyOld(oldIn.value);
+        if (message) {
+          err.textContent = message;
+          oldIn.select();
+          return;
+        }
+        toStage1();
+      } finally {
+        busy = false;
+        refresh();
+      }
+      return;
+    }
+    // 🔴 两条本地校验在**弹窗内**做（老项目 cpRotate 开头同款 :8311-8312），
+    //   不进 onSubmitNew：它们是输入错误，不是网络/密钥错误，
+    //   交给调用方会让"网络失败"与"两次不一致"混成一句。
+    if (newIn.value.length === 0) {
+      err.textContent = COPY.cpEmpty;
+      return;
+    }
+    if (newIn.value !== new2In.value) {
+      err.textContent = COPY.cpMismatch;
+      new2In.select();
+      return;
+    }
+    busy = true;
+    ok.disabled = true;
+    err.textContent = COPY.cpRotating;
+    const message = await cb.onSubmitNew(newIn.value);
+    busy = false;
+    refresh();
+    if (message) {
+      err.textContent = message;
+      return;
+    }
+    close();
+  };
+
+  oldIn.addEventListener('input', () => {
+    if (stage === 0 && err.textContent === COPY.cpVerifying) err.textContent = '';
+    refresh();
+  });
+  newIn.addEventListener('input', refresh);
+  new2In.addEventListener('input', refresh);
+  ok.addEventListener('click', () => void submit());
+  cancel.addEventListener('click', close);
+  for (const el of [oldIn, newIn, new2In]) {
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') void submit();
+    });
+  }
+
+  refresh();
+  oldIn.focus();
+}
+
 export function buildHome(host: HTMLElement): void {
   const domain = location.host;
   host.innerHTML = `

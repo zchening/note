@@ -19,6 +19,7 @@ import { buildCodex, type Codex } from './codex.ts';
 import { buildShell, type AnyGame, type Shell } from './shell.ts';
 import { bindEggWordTrigger, type EggWordBinding } from './word-trigger.ts';
 import { buildSound, type Sound } from './sound.ts';
+import { adoptPet, mountPet } from './pet.ts';
 import { burst, clearFx, firework, isFestival, rain, showBadge } from './fx.ts';
 import {
   bitcoinGame,
@@ -135,6 +136,15 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
       return false;
     }
     if (defs[key]) markDiscovered(store, key, true);
+    // 🔴🔴 访问 /pet 即**领养**（老项目 index.html:11348
+    //   `PET.adopted = true; … setTimeout(petMount, 60)`）。
+    //   老项目的桌宠是「默认关、不领养就永远不出现」—— 少了这一句，
+    //   顶栏那只常驻螃蟹就永远挂不上（用户报障「螃蟹在顶栏爬行」的一半根因）。
+    //   挂载放在 openByRoute 之后：此刻 header 已在 DOM 里，且用户已经离开菜单。
+    if (key === 'pet') {
+      adoptPet();
+      mountPet(() => sound.voice('pet'));
+    }
     sound.voice(key);
     shell.launch(make());
     return true;

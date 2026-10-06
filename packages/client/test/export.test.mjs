@@ -74,16 +74,26 @@ test('EXPORT-04 🔴 长词断行：15 字以上才断，断点插在标点后',
 });
 
 test('EXPORT-05 🔴 折叠补丁必须覆盖三角 + 恒定展开 + 缩进引导线', () => {
-  // 老项目 v10.0.2 用户实拍「[折叠] 显成字」⇒ 必须补 ::before 的 ▼
-  assert.match(EXPORT_FOLD_CSS, /\[data-ns-export\]::before/, '缺三角补丁');
+  // 🔴🔴 老项目出图那枚折叠三角是 ▼ 字形（index.html:3104），且属性**只打在折叠把手上**。
+  //   选择器因此收窄到 `[data-ns-export-fold] > :first-child::before`：
+  //   早先写的是 `[data-ns-export]::before`，而 buildCard 把该属性打在了**整张离屏卡**上
+  //   ⇒ ▼ 被画在卡片正文流最前面 ＝ 用户报障「导出图左上角多了个箭头」。
+  //   （那条整卡规则的正向判据已移到 visual-parity 的 VP-10，与反向断言同处一处。）
+  assert.match(
+    EXPORT_FOLD_CSS,
+    /\[data-ns-export-fold\] > :first-child::before/,
+    '三角补丁必须挂在折叠把手上，不许打在整张卡上',
+  );
   assert.match(EXPORT_FOLD_CSS, /25BC/, '缺 ▼ 字形');
+  // 🔴 bj 的折叠规则没锁 #editor 作用域 ⇒ 副本里边框三角会照画，必须 border:0 撤掉
+  assert.match(EXPORT_FOLD_CSS, /border:0/, '必须撤掉编辑器那枚边框三角，否则出图出现两个三角');
   // 老项目 v10.0.3 用户实拍「正文没缩进没引导线」⇒ 必须补 margin/padding/border-left
   assert.match(EXPORT_FOLD_CSS, /padding-left/, '缺缩进');
   assert.match(EXPORT_FOLD_CSS, /border-left/, '缺左引导线');
   // 收起态必须被覆盖成展开
   assert.match(EXPORT_FOLD_CSS, /display:block/, '缺恒定展开');
-  // 🔴 间隙必须 px：三角挂在 font-size:0 的标记上，em 在那里归零（老项目 mockup 实锤）
-  assert.match(EXPORT_FOLD_CSS, /margin-right:7px/, '间隙必须是 px，em 会归零');
+  // 🔴 间隙必须 px：三角挂在行内，em 在那里会随字号缩放（老项目 mockup 实锤）
+  assert.match(EXPORT_FOLD_CSS, /margin:0 7px 0 0/, '间隙必须是 px，em 会随字号缩放');
   // 🔴 选择器必须走属性不走 class（class 会与用户正文里恰好出现的名字撞车）
   assert.ok(!EXPORT_FOLD_CSS.includes('.ns-export'), '补丁不许用 class 选择器');
 });

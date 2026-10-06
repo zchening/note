@@ -34,6 +34,35 @@ export const COPY = {
   /** 口令页右上角 × 的 title */
   passCloseTitle: '返回首页',
 
+  /* ── 修改口令弹窗（老项目 index.html:780-793 `#cpMask` 逐字）─────────────
+     🔴🔴 用户报障第 12 条「修改口令弹窗和老版本不一样」：
+       本项目的第一版实现是 `window.prompt()` 两次——连弹窗都没有，
+       更不用说老项目那个「先验证旧口令 → 再设新口令」的**两阶段**形态。
+       两阶段不是形式主义：`changePassphrase` 要先用旧口令解开密文自证身份，
+       一次弹窗里同时要"旧/新/确认"三个框会让用户不知道先后。 */
+  cpTitle: '修改口令',
+  /** 老项目 :783 原文（含 <br> 与 <b> 新口令 </b>） */
+  cpHintHtml:
+    '修改后本机立即用新口令重新加密；<br>其他设备需用<b>新口令</b>重新打开此笔记。',
+  cpOldPh: '当前口令',
+  cpNewPh: '新口令',
+  cpNew2Ph: '再次输入',
+  /** 第一阶段按钮（老项目 :789 `#cpOk` 初始文案） */
+  cpNext: '下一步',
+  /** 第二阶段按钮（老项目 cpVerify 成功后 `cpOk.textContent = '确 定'`） */
+  cpDone: '确 定',
+  cpCancel: '取消',
+  /** 校验旧口令中（老项目 :8296 `cpErr.textContent = '验证中…'`） */
+  cpVerifying: '验证中…',
+  /** 换密钥中（老项目 :8313 `cpErr.textContent = '重新加密中…'`） */
+  cpRotating: '重新加密中…',
+  /** 新口令为空（老项目 :8311） */
+  cpEmpty: '新口令不能为空',
+  /** 两次不一致（老项目 :8312） */
+  cpMismatch: '两次输入的新口令不一致',
+  /** 换完了（老项目 :8338 `showUploadStatus('口令已修改'…)`；本项目无备份笔记，不带后半句） */
+  cpDoneMsg: '口令已修改',
+
   /* 首页提示页 */
   homeTitle: 'NoteSync',
   homeHintLead: '请在 URL 后加笔记名访问，例如：',
