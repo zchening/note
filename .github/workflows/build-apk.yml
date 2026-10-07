@@ -70,9 +70,29 @@ jobs:
     name: 构建并签名 APK
     needs: test
     runs-on: ubuntu-latest
+    # 🔴 ver 供下游 deploy 作业取用（artifact 名、APK 版本号、OTA tag 三处同一值）。
+    #   三处若取到不同的值，就会出现"APK 自报 1.13.1、OTA 却指向 1.13.2 的包"。
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        # 🔴 tag 推送用 tag 名；手动触发（workflow_dispatch）没有 tag，
+        #   退回到 package.json —— 版本号唯一真源，与 E2E-01 那条判据同源。
+        #   🔴 不加这个 fallback 的话，手动触发时 GITHUB_REF_NAME 是分支名
+        #   （"main"），APK 会自报 versionName "main"，OTA 也会把 json 写成
+        #   tag_name "vmain" —— 版本号是单调的，一旦污染就得再发一版才盖得掉。
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VER="$GITHUB_REF_NAME"
+          else
+            VER="v$(node -p "require('./package.json').version")"
+          fi
+          echo "版本 = $VER"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
 
       - name: Setup JDK 21
         # Capacitor 7 硬要求：capacitor-android 源级别 21
@@ -108,9 +128,9 @@ jobs:
           done
 
       - name: 从 tag 注入安卓版本号
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${{ steps.ver.outputs.ver }}"
+          VER="${VER#v}"
           # 🔴 versionName 必须等于 tag 去掉 v —— 老项目 v5.55 出的 APK 自报 5.54，
           #   用户看到"已经是最新版"却拿到旧版逻辑，是这一条漏改造成的。
           #   versionCode 用去点拼接（v1.0.0 → 100），Android 要求它单调递增，
@@ -140,7 +160,7 @@ jobs:
       - name: 上传 APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NoteSyncBJ-${{ github.ref_name }}.apk
+          name: NoteSyncBJ-${{ steps.ver.outputs.ver }}.apk
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
@@ -152,3 +172,58 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: android/app/build/outputs/apk/release/app-release.apk
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 云构建出包之后**自动**同步到腾讯云服务器，闭环 OTA。
+  #
+  # 🔴 为什么必须自动：出包与上传分两步人肉做时，"APK 已传但 latest_app.json 没落"
+  #   或反过来，都会在窗口期里让全网手机点更新失败（404 或拿到旧包）。
+  #   而这两步的失败在本地都看不出来 —— 只有真去点一次"检查更新"才知道。
+  #
+  # 🔴 上传顺序的硬纪律在 tools/push_bj_apk.py 里（倒装：两个 APK 先就位，
+  #   latest_app.json 最后落），这里**不重写那段逻辑** —— 直接调那个脚本，
+  #   让它做唯一权威。重复实现一份 = 两份都会漂移。
+  # ─────────────────────────────────────────────────────────────────────
+  deploy:
+    name: 同步 APK 到腾讯云（闭环 OTA）
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 落地 SSH 私钥
+        # 🔴 路径被 push_bj_apk.py 写死为 ~/.ssh/notesync_deploy，不能另选。
+        #   chmod 600 是硬要求：OpenSSH 见权限太开直接拒绝用这把钥匙，
+        #   报的错是 "UNPROTECTED PRIVATE KEY FILE" 而不是"连不上"，容易误判。
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s' "${{ secrets.BJ_SSH_KEY }}" > ~/.ssh/notesync_deploy
+          chmod 600 ~/.ssh/notesync_deploy
+          # 私钥末尾换行：secret 若被存成不带尾换行，OpenSSH 仍能读，
+          # 但多一行空行会导致 "invalid format" —— 统一去掉尾部空白再补一个换行。
+          printf '\n' >> ~/.ssh/notesync_deploy
+          ssh-keygen -y -f ~/.ssh/notesync_deploy > /dev/null \
+            && echo "私钥可解析" || { echo "❌ 私钥不可用（secret BJ_SSH_KEY 内容不对？）"; exit 1; }
+
+      - name: 取回上一作业出好的 APK
+        uses: actions/download-artifact@v4
+        with:
+          name: NoteSyncBJ-${{ needs.build.outputs.ver }}.apk
+          path: _apk
+
+      - name: 放到 push 脚本期望的路径
+        run: |
+          mkdir -p android/app/build/outputs/apk/release
+          cp _apk/app-release.apk android/app/build/outputs/apk/release/app-release.apk
+          ls -l android/app/build/outputs/apk/release/app-release.apk
+          # 🔴 空包必须在这里拦掉：push_bj_apk.py 只比大小，0 字节会一路"上传成功"
+          #   然后把一个坏包推给全网。
+          test -s android/app/build/outputs/apk/release/app-release.apk \
+            || { echo "❌ 取回的 APK 是空的"; exit 1; }
+
+      - name: 上传 APK + 落 OTA 元数据 + 线上校验
+        # 脚本内部会断言：远端两处大小一致、/api/latest 的 URL 指向本版、
+        # assets[0].name 以 .apk 结尾（客户端 pickApk 只认这个）、
+        # /dl/vX.Y.Z.apk 与 /dl/latest.apk 都 HEAD 200。任一不满足即非零退出。
+        run: python3 tools/push_bj_apk.py "${{ needs.build.outputs.ver }}"
