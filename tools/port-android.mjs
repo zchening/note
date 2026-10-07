@@ -78,8 +78,9 @@ function substitute(text) {
  *
  * 本脚本只做两件事：搬文件 + 替换包名/域名。而下列改动是**移植之后手工加的**，
  * 脚本无论重跑多少次都产不出来：
- *   · strings.xml 的 app_name改成 "NoteSync BJ"（不替换包名/域名就改不到）
- *   · RemPlugin 的 NOTIF_CHANNEL_NAME 改 "NoteSync BJ 提醒"
+ *   · strings.xml 的 app_name 改成 "NoteSyncX"（v1.12.0 用户拍板，原为 "NoteSync BJ"；
+ *     不替换包名/域名就改不到）
+ *   · RemPlugin 的 NOTIF_CHANNEL_NAME 改 "NoteSyncX 提醒"
  *   · MainActivity 的单域条件（老项目是双域，替换后会变成重复条件）
  *   · 各文件顶部的"为什么这么写"注释
  * 而这三个文件都在 **force 覆盖清单**里（不force 就撞上 Capacitor 骨架同名文件）。
@@ -97,9 +98,9 @@ const HAND_EDITED = [
 ];
 /** 这些标记代表"这个文件已经被手工改过"，由脚本自己写下的印章。 */
 const HAND_EDIT_STAMPS = {
-  'app/src/main/res/values/strings.xml': '<string name="app_name">NoteSync BJ</string>',
+  'app/src/main/res/values/strings.xml': '<string name="app_name">NoteSyncX</string>',
   'app/src/main/java/cn/xuyinji/bj/MainActivity.java': '// \u{1F534} 溯源：本文件与其余',
-  'app/src/main/java/cn/xuyinji/bj/rem/RemPlugin.kt': 'NOTIF_CHANNEL_NAME = "NoteSync BJ 提醒"',
+  'app/src/main/java/cn/xuyinji/bj/rem/RemPlugin.kt': 'NOTIF_CHANNEL_NAME = "NoteSyncX 提醒"',
 };
 
 function checkHandEdited() {

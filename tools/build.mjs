@@ -81,7 +81,13 @@ const STATIC_REQUIRED = [
   // PWA 图标两枚。缺 ⇒ 装完是浏览器默认图标 + 离线时 SW 预缓存拿不到。
   'icons/icon-192.png',
   'icons/icon-512.png',
-  'icons/icon-512-maskable.png',
+  // 🔴 v1.12.0：manifest 的 maskable 改由 favicon.svg 承载（老项目口径，
+  //   它只有一份 favicon.svg 同时声明 any+maskable）。所以
+  //   icon-512-maskable.png 已从 static 删除 —— 清单里也必须同步删掉，
+  //   否则 build 直接 exitCode=1（这份清单是"缺即失败"，多一项就误报）。
+  'favicon.svg',
+  // iOS 加到主屏图标。缺 ⇒ iOS 上"添加到主屏幕"是网页截图，很丑。
+  'apple-touch-icon.png',
 ];
 
 /**
@@ -140,10 +146,6 @@ async function materializeStatic() {
  * 🔴 CSS **inline 进 HTML 而不是引app.css** —— 单文件原子性是 OTA 的根基（文件头），
  *   多一个外链就多一个"发了一半"的中间态。
  *
- * 🔴 `<meta name="color-scheme" content="light dark">` 而不是写死 light：
- *   夜间模式下浏览器 UI（滚动条、表单控件）不配套会很难看。
- *   注意这**不等于**"跟随系统" —— 那是 CSS 变量层面的事，见 ui/theme.ts 的 resolveTheme。
- *
  * 🔴 主题色取浅色底`#FBFBF8`（老项目色板的值，不是随手写的 #FAFAF8），
  *   它决定移动端地址栏/启动屏的颜色，是"用户一眼看到的第一个颜色"。
  */
@@ -153,7 +155,22 @@ function indexHtml(version, date, sha, css) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
+<!-- 🔴🔴🔴 这行必须是**单值** light，逐字对齐老项目 index.html:14。
+     写成 "light dark" 是**主动告诉 UA「本页支持深色」**，UA 随即把默认滚动条
+     **轨道（track）** 换成深色档 —— 而本项目对轨道没有任何自定义声明
+     （styles.css 只有 width + thumb，老项目同样只有 426-427 两条）
+     ⇒ 轨道颜色完全由 UA 默认值决定，meta 就是唯一的输入。
+     症状：夜间模式滚动条后面那条背景条颜色与老项目不一样（用户报障第 5 条）。
+     判据：test/e2e/16-visual-views.test.js 的 VVW-29（真浏览器读 computedStyle）。
+
+     ⚠️ 有人会问"那夜间浏览器 UI 怎么办"—— 那正是 CSS 的活儿，见 styles.css 里
+     ':root{color-scheme:light}' / 'body.dark{color-scheme:dark}' 两条（类名驱动，
+     与老项目 :80/:92 同构）。**本条曾经想用 meta 的双值来解决那个诉求，是错的**：
+     实测证明双值 meta 会把 track 推向深色档，而类名驱动的那两条才与老项目一致。
+     别再为了"配夜间"把 meta 改回双值。
+     另注：meta 写双值也不等于"跟随系统" —— 跟随系统是 CSS 变量层面的事，
+     见 ui/theme.ts 的 resolveTheme。 -->
 <meta name="theme-color" content="#FBFBF8">
 <meta name="referrer" content="no-referrer">
 <meta name="description" content="NoteSync · 端到端加密的多设备同步笔记">
@@ -161,10 +178,17 @@ function indexHtml(version, date, sha, css) {
      "网页端不支持生成 PWA"（用户报障）就是缺这一行。
      值逐字抄老项目 index.html:16-20。 -->
 <link rel="manifest" href="/manifest.json">
+<!-- 🔴 v1.12.0：品牌三件套全部改用老版本素材（金色双弧同步环 + 衬线 N）。
+     favicon.svg?v=7.9.0 的查询串逐字抄老项目 index.html:21 ——
+     同一个品牌图在网页与 SW 预缓存里必须是同一串，否则会各存一份。
+     apple-touch-icon 换回根目录的老项目文件（原值 /icons/icon-192.png 是 bj 自造的，
+     老项目用的是根目录那份带金框的 apple-touch-icon.png，见 index.html:22）。
+     🔴 本文件是 index.html 的**真源**：改 index.html 会被下次 build 覆盖。 -->
+<link rel="icon" href="/favicon.svg?v=7.9.0" type="image/svg+xml">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="NoteSync">
-<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<meta name="apple-mobile-web-app-title" content="NoteSyncX">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>NoteSync</title>
 <style>
 ${css}

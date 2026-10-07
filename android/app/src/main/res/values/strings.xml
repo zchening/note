@@ -1,15 +1,24 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
     <!--
-      🔴 app_name 故意与老项目的 "NoteSync" 不同（"NoteSync BJ"）：
-         两个 App 会同时装在用户手机上（老的不动，新的是新架构），
-         桌面、任务切换器、通知渠道名三处都用这个名字。
-         写成同名的话用户点错哪一个都说不清，通知栏里两条 "NoteSync 提醒"
-         更是完全分不出哪条属于哪篇笔记。改词时连带 RemPlugin 的
-         NOTIF_CHANNEL_NAME 一起改。
+      🔴 v1.12.0（用户拍板）：app_name 从 "NoteSync BJ" 改为 "NoteSyncX"。
+         原意是让两个 App 同机共存时能分辨，X 后缀同样做到了这一点
+         （桌面、任务切换器、通知渠道名三处都用这个名字）。
+
+         为什么不用回老项目的 "NoteSync"：两个 App 会同时装在用户手机上
+         （老的不动，新的是新架构），同名的话用户点错哪一个都说不清，
+         通知栏里两条 "NoteSync 提醒"更是完全分不出哪条属于哪篇笔记。
+         用户明确选了带后缀的写法 —— 既要品牌一致（都叫 NoteSync），
+         又要两版可分辨。
+
+         🔴 改词时**四处必须同改**，漏一处就会不一致：
+           ① 本文件 app_name + title_activity_main
+           ② capacitor.config.json 的 appName
+           ③ rem/RemPlugin.kt 的 NOTIF_CHANNEL_NAME（通知渠道名）
+           ④ www/manifest.json 的 name + short_name（加桌面后的名字）
     -->
-    <string name="app_name">NoteSync BJ</string>
-    <string name="title_activity_main">NoteSync BJ</string>
+    <string name="app_name">NoteSyncX</string>
+    <string name="title_activity_main">NoteSyncX</string>
     <string name="package_name">cn.xuyinji.bj</string>
     <string name="custom_url_scheme">cn.xuyinji.bj</string>
     <string name="offline_message">网络连接失败，无法加载笔记</string>
