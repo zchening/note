@@ -72,6 +72,16 @@ export interface ThemeTokens {
    */
   dotOn: string;
   dotIdle: string;
+  /**
+   * 🔴🔴 开奖卡金属分档四色（老项目 index.html:66，v9.2.0 用户拍板放行）。
+   *   只被 #eggDraw 卡面消费，不渗到别处；日间压暗、夜间提亮 —— 所以必须是
+   *   色板档位而不是 OVERLAY 固定值。Bug4 用户报障：彩蛋 JS 移植了但这组
+   *   CSS 变量漏了 ⇒ 卡片以裸文本渲染。
+   */
+  foilSilver: string;
+  foilGold: string;
+  foilGoldHi: string;
+  foilSheen: string;
 }
 
 /**
@@ -108,6 +118,11 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     //   dotIdle 同老项目 `#C9C7BE`（不是 --line #ECEAE2，后者太浅、点在白底上几乎看不见）。
     dotOn: '#2FA866',
     dotIdle: '#C9C7BE',
+    // 🔴 开奖卡金属分档（老项目 index.html:66 日间组，逐字）
+    foilSilver: '#A9ACB4',
+    foilGold: '#8F7126',
+    foilGoldHi: '#C9A24B',
+    foilSheen: 'rgba(255,255,255,.5)',
   },
   dark: {
     bg: '#0F0F11',
@@ -138,6 +153,11 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
     //   （index.html:498/499 只出现一次，无夜间分支）。照实抄。
     dotOn: '#2FA866',
     dotIdle: '#C9C7BE',
+    // 🔴 开奖卡金属分档（老项目 index.html:90 夜间组，逐字：夜间提亮一档）
+    foilSilver: '#8E9199',
+    foilGold: '#D4B068',
+    foilGoldHi: '#F0D89A',
+    foilSheen: 'rgba(255,255,255,.42)',
   },
 } as const;
 
@@ -174,6 +194,8 @@ export const OVERLAY = {
    */
   shadowChip: '0 14px 36px rgba(0,0,0,.16)',
   shadowCard: '0 18px 48px rgba(0,0,0,.2)',
+  /** 开奖卡投影（老项目 #nsDraw box-shadow 逐字，Bug4 补齐） */
+  shadowDraw: '0 24px 70px rgba(20,20,18,.16)',
   /**
    * 弹窗/响铃卡级浮起投影（老项目 index.html:189 与 :509 是**同一个值**）。
    * 🔴 原先 `.box` 用的是 `0 10px 40px var(--ring)` —— 那是"聚焦光圈"的量级，
@@ -345,6 +367,12 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--zoom-solid', p.zoomSolid);
   s.setProperty('--dot-on', p.dotOn);
   s.setProperty('--dot-idle', p.dotIdle);
+  // 🔴 开奖卡金属分档（Bug4 补齐；只被 #eggDraw 卡面消费，见 PALETTE 注释）
+  s.setProperty('--foil-silver', p.foilSilver);
+  s.setProperty('--foil-gold', p.foilGold);
+  s.setProperty('--foil-gold-hi', p.foilGoldHi);
+  s.setProperty('--foil-sheen', p.foilSheen);
+  s.setProperty('--shadow-draw', OVERLAY.shadowDraw);
   s.setProperty('--img-menu-shadow', OVERLAY.imgMenuShadow);
   s.setProperty('--zoom-btn-ink', OVERLAY.zoomBtnInk);
   s.setProperty('--zoom-pri-bg', OVERLAY.zoomPriBg);

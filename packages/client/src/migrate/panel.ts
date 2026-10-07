@@ -330,6 +330,9 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
     passWrap.classList.remove('hidden');
     go.classList.remove('hidden');
     cancel.classList.remove('hidden');
+    // 🔴 进度文案必须清：出码失败回到输入态时，"正在写入备份…"若残留在 tip 里，
+    //   下一次出码前用户会看到一句滞后的进度（且 showInput 也被失败路径复用）。
+    tip.textContent = '';
   };
 
   const teardown = (): void => {
@@ -515,6 +518,12 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
   //   本机当前会话已持有口令时，**直接出码**，不再弹口令框——
   //   否则用户明明刚解锁过，点「扫码换机」还要再输一次口令（体验与老项目不一致）。
   //   preKey 为空（本次是「记忆解锁」进来的、sessionPass 为空）时行为不变，仍要口令框。
+  //
+  //   🔴🔴 可见态必须逐字对齐老项目 preKey 路径（index.html:9131-9136，Bug3 用户报障）：
+  //     老项目 = `bakShowStage(2)` —— **按钮整排不可见**（go/cancel 在 stage1 里），
+  //     进度写成出码区的一行文字 `bakTip.textContent = '正在写入备份…'`，出码后覆写。
+  //     bj 此前只藏了口令框、go/cancel 留在屏上，go 的文案还被换成「正在写入备份…」
+  //     ⇒ 用户看到的是一个凭空闪现的"工作中"按钮界面，报障原话「这个界面不应该出现」。
   if (making && deps.preKey && deps.onMake) {
     const pre0 = deps.precheck?.() ?? null;
     if (pre0) {
@@ -523,8 +532,12 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
       passWrap.classList.add('hidden');
       doneWrap.classList.add('hidden');
       outWrap.classList.remove('hidden');
+      // 🔴 老项目口径：进度提示进**出码区文字行**，按钮整排隐藏（renderCode 成功后
+      //   也会各自 hidden，此处先藏为的是中间态不闪按钮）；失败由 showInput 一并恢复。
+      go.classList.add('hidden');
+      cancel.classList.add('hidden');
+      tip.textContent = COPY.migrateWorking;
       go.disabled = true;
-      go.textContent = COPY.migrateWorking;
       const mk = deps.onMake;
       void (async () => {
         try {

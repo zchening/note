@@ -670,3 +670,75 @@ test('REM-15 🔴🔴 提醒面板开着时，遮罩守卫必须认得出来（�
     await page.close();
   }
 });
+
+/* ══════════ Bug6/2（2026-10-08 用户报障）══════════ */
+
+/**
+ * REM-16 🔴 相对时间串（周日下午两点）chip 加提醒 → 下划线 + 真源
+ *
+ * 🔴 Bug6 用户报障「周日下午两点 喝水…添加为提醒事项成功后，时间串下面是没有下划线的」。
+ *   真浏览器实测（HEAD）：chip 路径对相对时间串的下划线**是好的**——本条把它钉成
+ *   常驻回归闸：凡动 reconcile / spansToNodes(remIds 闸) / ReminderMarkNode 的改动，
+ *   必须让这条保持绿。相对格式与 REM-04 的冒号格式走的是同一条对账路，
+ *   差异只在字符串形态——所以它俩**必须各钉一条**（输入形状不同，能拦的回归不同）。
+ */
+test('REM-16 🔴 相对时间串 chip 加提醒：下划线盖住时间串（Bug6 回归闸）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem16', 'pw');
+  try {
+    await typeBody(page, '周日下午两点 喝水');
+    await new Promise((r) => setTimeout(r, 300));
+    await caretTo(page, 2);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    await withTimeout(
+      page.waitForFunction(() => document.querySelectorAll('.ns-editor u.rem-mark').length > 0, { timeout: 5000 }),
+      6000, '等下划线出现',
+    );
+    const marked = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.ns-editor u.rem-mark')).map((e) => e.textContent));
+    assert.equal(marked.join(''), '周日下午两点', `下划线应正好盖住相对时间串，实际=${JSON.stringify(marked)}`);
+    const allText = await page.evaluate(() => document.querySelector('.ns-editor').textContent);
+    assert.ok(allText.includes('喝水'), '正文文字必须完整');
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * REM-17 🔴🔴 空笔记里点进正文再开面板加提醒（Bug2 用户形状）
+ *
+ * 🔴🔴 病根：用户先点进**空正文**（光标=空段落的 element 锚点）再开面板，
+ *   saveEditorSelection 把 element 锚点存下来、insertRemLineToEditor 恢复时
+ *   把它**强设成 'text' 类型** → sel.insertText 静默空转 → 插行没进正文 →
+ *   提醒被对账按「正文找不到时间串」判死 → 正文、提醒面板两边什么都没有，
+ *   且**面板照常收起、零报错**。
+ *
+ * 🔴 REM-07 此前只测「不碰正文直接开面板」的形状（panelSavedSel=null → 文末追加），
+ *   这类形状盲区正是本项目判据纪律里说的「输入形状决定判据能发现哪类 bug」。
+ */
+test('REM-17 🔴🔴 空笔记点进正文再开面板加提醒（Bug2 用户形状）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem17', 'pw');
+  try {
+    // 用户形状：先点进空正文（空段落 element 锚点），再开面板
+    await page.click('.ns-editor');
+    await new Promise((r) => setTimeout(r, 300));
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.fill('.ns-rem-input', '开会');
+    await page.click('.ns-rem-add');
+    await withTimeout(
+      page.waitForSelector('.ns-rembox', { state: 'hidden', timeout: 5000 }),
+      6000, '等面板收起',
+    );
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((doc.reminders || []).length, 1, `真源应恰好一条提醒，实际=${JSON.stringify(doc.reminders || [])}`);
+    const body = await page.evaluate(() => document.querySelector('.ns-editor').textContent);
+    assert.ok(body.includes('开会'), `正文应出现提醒时间串行，实际=${JSON.stringify(body)}`);
+  } finally {
+    await page.close();
+  }
+});

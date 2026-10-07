@@ -74,6 +74,9 @@ import {
   CLICK_COMMAND,
   COMMAND_PRIORITY_HIGH,
   COMMAND_PRIORITY_LOW,
+  DELETE_CHARACTER_COMMAND,
+  KEY_BACKSPACE_COMMAND,
+  KEY_DELETE_COMMAND,
   KEY_ENTER_COMMAND,
   type LexicalNode,
 } from 'lexical';
@@ -480,10 +483,179 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
   // 🔴 收起态标题上按 Enter：把**光标后的标题文字**搬到折叠块**外面**（用户报障第 5 条）。
   const unregisterEnter = registerFoldEnter(editor);
 
+  // 🔴🔴🔴 收起态折叠块的**删除键家族**拦截（Bug1，2026-10-08 用户报障）：
+  //   下方行行首 Backspace → Lexical 默认把该行并进折叠**末尾**子块
+  //   （收起态正文 display:none ⇒ 字消失进看不见的地方）。
+  //   必须注册在 richText 之前（本函数在 registerBehaviors 里本就排在它前面），
+  //   优先级与 ENTER 同档（HIGH）。
+  const unregisterFoldBackspace = registerFoldBackspace(editor);
+
   return () => {
     onClick();
     unregisterEnter();
+    unregisterFoldBackspace();
   };
+}
+
+/**
+ * 🔴🔴🔴 收起态折叠块的 Backspace / Delete 拦截 —— Bug1（2026-10-08 用户报障）。
+ *
+ * 症状：「折叠列表收起，光标定位到折叠列表下方一行文字最前面，按删除键或者 backspace，
+ * 期望这行文字接在折叠列表标题后面，实际这行文字接在折叠列表内部正文最后面」。
+ *
+ * 病根：Lexical 的 `mergeNodes` 把当前段并进前兄弟 ElementNode 时，是把它 children
+ * **追加到目标 children 末尾** —— 对 FoldNode 那就是正文最后一段；而收起态正文
+ * `display:none`，用户看到的是"这行字凭空消失"。老项目是原生 contenteditable，
+ * 浏览器按**视觉行**合并 —— 接的是可见的标题行。与 registerFoldEnter（报障第 5 条）
+ * 是同一病根（"Lexical 按模型合并、老项目按视觉合并"）的另一面。
+ *
+ * 两条拦截路径（其余形态一律放行给默认行为）：
+ *  ① Backspace：光标在**根级段落行首**（text 锚 offset 0 / element 锚 0），
+ *     且前一个兄弟是**收起态** FoldNode ⇒ 把本段文字并进折叠**第一个子段落（标题）**；
+ *  ② Delete：光标在**收起态折叠标题末尾** ⇒ 把折叠块**下一个根级兄弟段**并进标题。
+ *     默认行为会删进隐藏正文第一个字（内容损坏），必须拦。
+ *
+ * 🔴 展开态一律不拦（FOLD-BS2 反向闸钉着）：展开态正文可见，默认合并
+ *   = 与老项目浏览器行为一致。
+ * 🔴 段内含非纯文本子节点（链接/图片/提醒标记包裹层）时**不并、也不放默认**
+ *   —— 默认=并进隐藏正文=损坏；放行成 no-op 最安全（罕见形态，宁可少做）。
+ */
+function registerFoldBackspace(editor: LexicalEditor): () => void {
+  /**
+   * 共用判定。@returns true = 本次删除已被折叠拦截（调用方应认领事件）。
+   * 🔴🔴 **必须同时挂三条命令**（Android 实测教训，2026-10-08）：
+   *   - KEY_BACKSPACE / KEY_DELETE（keydown）：桌面与硬件键盘的主路；
+   *   - 🔴 DELETE_CHARACTER_COMMAND：**Android 软键盘的退格不派发 keydown 的
+   *     Backspace 语义**，走 `beforeinput deleteContentBackward`，Lexical 把它
+   *     派发成 DELETE_CHARACTER_COMMAND(true)（Lexical.dev.js:7755）——只挂
+   *     KEY_BACKSPACE 的话手机上拦截完全不生效（e2e 用 Playwright keydown
+   *     测不出这个差异，判据形状骗了实现）。desktop 的 keydown 被我认领后
+   *     preventDefault ⇒ 不会再走 beforeinput ⇒ 三条不会双重执行。
+   */
+  const tryIntercept = (backward: boolean): boolean => {
+    const sel = $getSelection();
+    if (!$isRangeSelection(sel) || !sel.isCollapsed()) return false;
+    if (backward) {
+      const anchor = sel.anchor;
+      let para: ElementNode | null = null;
+      if (anchor.type === 'text') {
+        if (anchor.offset !== 0) return false;
+        const tn = anchor.getNode();
+        if (!$isTextNode(tn)) return false;
+        const parent = tn.getParent();
+        para = $isElementNode(parent) ? parent : null;
+      } else if (anchor.type === 'element') {
+        // element 锚 offset 0 = 块起点（空段落里光标的唯一形态）
+        if (anchor.offset !== 0) return false;
+        const node = anchor.getNode();
+        para = $isElementNode(node) ? node : null;
+      }
+      if (!para) return false;
+      // 只处理根级段落（折叠块只出现在 root 下）
+      const gp = para.getParent();
+      if (!gp || gp.getKey() !== $getRoot().getKey()) return false;
+      const prev = para.getPreviousSibling();
+      if (!$isFoldNode(prev)) return false;
+      if (prev.open) return false; // 展开态放行（FOLD-BS2 钉）
+      if (!mergeLineIntoFoldTitle(prev, para)) {
+        // 含非纯文本子节点：吞键保安全（见函数头注释）
+        return true;
+      }
+      return true;
+    }
+    /* ---- Delete（前向）：光标在收起态折叠标题末尾 ---- */
+    const anchor = sel.anchor;
+    if (anchor.type !== 'text') return false;
+    const tn = anchor.getNode();
+    if (!$isTextNode(tn)) return false;
+    const para = tn.getParent();
+    if (!$isElementNode(para)) return false;
+    // 必须是折叠块的**标题段**（第一个子段落），且光标在标题末尾
+    const fold = para.getParent();
+    if (!$isFoldNode(fold)) return false;
+    if (fold.getFirstChild()?.getKey() !== para.getKey()) return false;
+    if (tn.getNextSibling() !== null) return false; // 标题内还有文字，默认删字即可
+    if (anchor.offset !== tn.getTextContentSize()) return false;
+    if (fold.open) return false; // 展开态放行
+    const next = fold.getNextSibling();
+    if (!$isElementNode(next)) {
+      // 折叠块后面没有可合并的段落：吞键——默认会删进隐藏正文（内容损坏）
+      return true;
+    }
+    if (!mergeLineIntoFoldTitle(fold, next)) {
+      return true;
+    }
+    return true;
+  };
+
+  const unregisterBackspace = editor.registerCommand(
+    KEY_BACKSPACE_COMMAND,
+    (event) => {
+      if (!tryIntercept(true)) return false;
+      event?.preventDefault();
+      return true;
+    },
+    COMMAND_PRIORITY_HIGH,
+  );
+
+  const unregisterDelete = editor.registerCommand(
+    KEY_DELETE_COMMAND,
+    (event) => {
+      if (!tryIntercept(false)) return false;
+      event?.preventDefault();
+      return true;
+    },
+    COMMAND_PRIORITY_HIGH,
+  );
+
+  // 🔴 Android 软键盘主路（beforeinput deleteContentBackward/deleteContentForward
+  //   → DELETE_CHARACTER_COMMAND）。payload 是布尔方向，不是 Event。
+  const unregisterDeleteChar = editor.registerCommand(
+    DELETE_CHARACTER_COMMAND,
+    (isBackward) => {
+      if (!tryIntercept(isBackward === true)) return false;
+      return true;
+    },
+    COMMAND_PRIORITY_HIGH,
+  );
+
+  return () => {
+    unregisterBackspace();
+    unregisterDelete();
+    unregisterDeleteChar();
+  };
+}
+
+/**
+ * 把一个根级段落的文字并进折叠块**标题**（第一个子段落），并删除该段落。
+ * 光标落到合并后的标题末尾（= "文字接在标题后面"的落点）。
+ *
+ * 🔴 只接受**纯文本子节点**的段落（链接/图片/标记包裹层一律不并，调用方负责吞键）：
+ *   标题的 canonical 是 span 数组，非纯文本的搬运会破坏 serialize 的往返不变量。
+ * 🔴 标题的**字段与 DOM 必须同改**：`__titleJson` 是导出权威（nodeToBlock 优先取它），
+ *   只 append 子节点不改字段 ⇒ 导出丢字；只改字段不动子节点 ⇒ 屏上不显示。
+ *   与 update 监听器里的"折叠标题回写"同一纪律的另一面。
+ *
+ * @returns 是否执行了合并（false = 段落含非纯文本，调用方应吞键保安全）
+ */
+function mergeLineIntoFoldTitle(fold: FoldNode, line: ElementNode): boolean {
+  const head = fold.getFirstChild();
+  if (!head || !$isElementNode(head)) return false;
+  const kids = line.getChildren();
+  const lineSpans: Span[] = [];
+  for (const k of kids) {
+    if (!$isTextNode(k)) return false;
+    lineSpans.push({ t: k.getTextContent() });
+  }
+  // 🔴 空行（没有可并文字）也走同一落点：删掉空段、光标到标题末尾
+  if (lineSpans.length > 0) {
+    head.append(...spansToNodes(lineSpans, new Set()));
+    const nextTitle = [...fold.title, ...lineSpans];
+    fold.setTitle(nextTitle);
+  }
+  line.remove();
+  head.selectEnd();
+  return true;
 }
 
 /**

@@ -554,3 +554,137 @@ test('FOLD-ENTER4 🔴🔴🔴 标题末尾回车必须换到折叠块外，随�
     await page.close();
   }
 });
+
+/* ══════════ Bug1（2026-10-08 用户报障）══════════ */
+
+/**
+ * 两个用例共用的场景搭建：
+ *   [p:BODY] [fold(标题 | 正文内容)] [p:组外文字]
+ *
+ * 🔴 「组外文字」这一行怎么造：收起态标题末尾按 Enter（FOLD-ENTER1 已修的行为）
+ *   会在折叠块**外面**落一行并把光标放在那里 —— 这是当前代码里唯一一条
+ *   "真实键盘可达的折叠块外落点"路径。直接用 after-blocks 钩子是**错的**：
+ *   `$caretAfterAllBlocks` 是 `last.selectEnd()`，last=折叠块自己 ⇒ 光标落在
+ *   fold 内部正文末尾，根本不在块外（第一版就栽在这，BS1 假绿/BS2 假红）。
+ */
+async function setupFoldWithOutsideLine(page) {
+  await page.click('#editor-host');
+  await page.keyboard.type('BODY');
+  await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+  await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+  await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_BODY_START__());
+  await page.keyboard.type('正文内容');
+  await new Promise((r) => setTimeout(r, 300));
+  // 收起（点三角：命中区=标题行左起 22px）
+  await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
+  await new Promise((r) => setTimeout(r, 400));
+  // 收起态标题末尾回车 → 折叠块外下方一行，光标落在那里
+  await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
+  await page.keyboard.press('Enter');
+  await new Promise((r) => setTimeout(r, 400));
+  await page.keyboard.type('组外文字');
+  await new Promise((r) => setTimeout(r, 400));
+  // 光标已在「组外文字」行尾 → Home 到行首（真浏览器键盘可用）
+  await page.keyboard.press('Home');
+  await new Promise((r) => setTimeout(r, 200));
+}
+
+test('FOLD-BS1 🔴🔴 收起态：下方行行首 Backspace 并进**标题**（Bug1）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fbs1', PASS);
+  try {
+    await setupFoldWithOutsideLine(page);
+    await page.keyboard.press('Backspace');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const blocks = doc.blocks || [];
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    assert.ok(fi >= 0, '真源里应有 fold 块：' + JSON.stringify(blocks.map((b) => b.t)));
+    // 🔴 应该有：该行文字接在标题后面
+    const title = (blocks[fi].title || []).map((s) => s.t).join('');
+    assert.ok(title.includes('组外文字'), `标题应吸收「组外文字」，实际=${JSON.stringify(title)}`);
+    // 🔴 不应该有：文字不得落进折叠正文
+    const bodyText = JSON.stringify(blocks[fi].children || []);
+    assert.ok(!bodyText.includes('组外文字'), `正文不得吸收该行，实际=${bodyText}`);
+    // 🔴 不应该有：折叠块不得变两个（FOLD-ENTER3 同款教训）
+    const foldCount = blocks.filter((b) => b.t === 'fold').length;
+    assert.equal(foldCount, 1, `折叠块必须仍是 1 个，实际=${foldCount}`);
+    // 正文 BODY 不许被动
+    const allText = blocks.map((b) => JSON.stringify(b)).join('');
+    assert.ok(allText.includes('BODY'), '正文 BODY 块应仍在');
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * FOLD-BS2 反向闸：折叠块**展开**时，下方行行首 Backspace 保持默认
+ * （并入可见的折叠正文）——收起态拦截不许误伤展开态。
+ */
+test('FOLD-BS2 反向闸：展开态下方行行首 Backspace 并进折叠正文', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fbs2', PASS);
+  try {
+    await setupFoldWithOutsideLine(page);
+    // 再点一次三角 = 展开
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
+    await new Promise((r) => setTimeout(r, 400));
+    // 🔴 光标可能被开合逻辑挪走：重新点进「组外文字」行再 Home
+    await page.click('.ns-editor > :last-child');
+    await page.keyboard.press('Home');
+    await new Promise((r) => setTimeout(r, 200));
+    await page.keyboard.press('Backspace');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const blocks = doc.blocks || [];
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    assert.ok(fi >= 0, '真源里应有 fold 块');
+    const bodyText = JSON.stringify(blocks[fi].children || []);
+    assert.ok(bodyText.includes('组外文字'),
+      `展开态该行应留在折叠正文侧（默认行为），实际=${bodyText}`);
+    const title = (blocks[fi].title || []).map((s) => s.t).join('');
+    assert.ok(!title.includes('组外文字'), `标题不得吸收（那是收起态的语义），实际=${JSON.stringify(title)}`);
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * FOLD-BS3 🔴🔴🔴 Android 软键盘主路：beforeinput deleteContentBackward
+ *
+ * 🔴🔴 手机的退格**不发 keydown 的 Backspace 语义**，走 beforeinput
+ *   `deleteContentBackward`，Lexical 把它派发成 DELETE_CHARACTER_COMMAND(true)
+ *   （Lexical.dev.js:7755）。只挂 KEY_BACKSPACE 的话手机上拦截完全不生效。
+ *   本条用合成 beforeinput（与 Android 真实输入形状同构）从最外层真实入口进，
+ *   钉住 DELETE_CHARACTER 那条通道不许被"顺手优化掉"。
+ */
+test('FOLD-BS3 🔴🔴 Android 形状：beforeinput deleteContentBackward 并进**标题**（Bug1）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fbs3', PASS);
+  try {
+    await setupFoldWithOutsideLine(page);
+    // 🔴 不按 Backspace 键，派发 Android 形状的 beforeinput
+    await page.evaluate(() => {
+      const root = document.querySelector('.ns-editor');
+      root.dispatchEvent(new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'deleteContentBackward',
+        data: null,
+      }));
+    });
+    await new Promise((r) => setTimeout(r, 600));
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const blocks = doc.blocks || [];
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    assert.ok(fi >= 0, '真源里应有 fold 块：' + JSON.stringify(blocks.map((b) => b.t)));
+    const title = (blocks[fi].title || []).map((s) => s.t).join('');
+    assert.ok(title.includes('组外文字'), `标题应吸收「组外文字」，实际=${JSON.stringify(title)}`);
+    const bodyText = JSON.stringify(blocks[fi].children || []);
+    assert.ok(!bodyText.includes('组外文字'), `正文不得吸收该行，实际=${bodyText}`);
+    const foldCount = blocks.filter((b) => b.t === 'fold').length;
+    assert.equal(foldCount, 1, `折叠块必须仍是 1 个，实际=${foldCount}`);
+  } finally {
+    await page.close();
+  }
+});

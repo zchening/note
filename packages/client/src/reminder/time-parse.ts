@@ -110,7 +110,11 @@ export function collectRelTimeMatches(text: string, now: number | Date): TimeMat
   const WD = '一二三四五六日天';
   const reRel = new RegExp(
     // 分支 A：显式日期段 + 时段词? + 时刻
-    '(?:大后天|后天|明天|今天|' + WD_UP + '|' + WD_SEG + '|(?:这个月|本月)\\d{1,2}[日号]|(?:下个月|下月)\\d{1,2}[日号])' +
+    //   🔴 「N月N日」是 2026-10-08 用户拍板的**新增扩展**（老项目 :6188 没有）：
+    //     「10月18日下午两点 喝水」此前两头落空 —— 分支 A 无此形态、分支 B 被
+    //     (?<![年月日号:]) 挡住，更糟的是漏捞成裸「两点」算成今天 02:00。
+    //     必须放在 (?:这个月|本月)/(?:下个月|下月) 之后，互不抢占。
+    '(?:大后天|后天|明天|今天|' + WD_UP + '|' + WD_SEG + '|(?:这个月|本月)\\d{1,2}[日号]|(?:下个月|下月)\\d{1,2}[日号]|\\d{1,2}月\\d{1,2}[日号])' +
       '[\\s]*(?:凌晨|早上|上午|中午|下午|傍晚|晚上|夜里)?[\\s]*' + TIME_SEG + '(?!\\d)' +
       '|' +
       // 分支 B：裸时刻。
@@ -122,7 +126,7 @@ export function collectRelTimeMatches(text: string, now: number | Date): TimeMat
     'g',
   );
   const reDateSeg = new RegExp(
-    '^(大后天|后天|明天|今天|' + WD_UP + '|' + WD_SEG + '|(?:这个月|本月)(\\d{1,2})[日号]|(?:下个月|下月)(\\d{1,2})[日号])',
+    '^(大后天|后天|明天|今天|' + WD_UP + '|' + WD_SEG + '|(?:这个月|本月)(\\d{1,2})[日号]|(?:下个月|下月)(\\d{1,2})[日号]|(\\d{1,2})月(\\d{1,2})[日号])',
   );
   const rePartSeg = /^(凌晨|早上|上午|中午|下午|傍晚|晚上|夜里)/;
   let m: RegExpExecArray | null;
@@ -188,6 +192,15 @@ export function collectRelTimeMatches(text: string, now: number | Date): TimeMat
         // 周一=0 体系；日/天 → 6（本周第 7 天）
         const dayIdx = idx <= 5 ? idx : 6;
         D = d0 - ((n.getDay() + 6) % 7) + dayIdx + (dm[2] === '下' ? 7 : 0);
+      } else if (dm[7] !== undefined && dm[8] !== undefined) {
+        // 🔴 「N月N日」（用户拍板扩展）：无年份按今年，已过即过期（红线 2，不顺延明年）。
+        //   MO 是 0-based（getMonth 体系），与下方 new Date(y0, MO, ...) 对齐。
+        const MO2 = Number(dm[7]);
+        const D2 = Number(dm[8]);
+        if (MO2 < 1 || MO2 > 12) continue;
+        if (D2 < 1 || D2 > new Date(y0, MO2, 0).getDate()) continue;
+        MO = MO2 - 1;
+        D = D2;
       } else {
         const N = Number(dm[5] || dm[6]);
         if (N < 1 || N > 31) continue;

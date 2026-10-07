@@ -285,3 +285,63 @@ test('T27 collectRelTimeMatches 可独立调用且与总入口口径一致', () 
   assert.equal(rel[0].at, all[0].at);
   assert.equal(all[0].at, at(2026, 10, 6, 15, 0));
 });
+
+/* =============== 「N月N日」+时段词+中文时刻（用户拍板扩展，2026-10-08） ===============
+ * 🔴 背景（Bug5，用户报障）：「10月18日下午两点 喝水」「10月18日14点 喝水」不弹提醒 chip。
+ *   病根有两层：分支 A 日期段没有「N月N日」形态；分支 B 的裸时刻被 (?<![年月日号:]) 挡住
+ *   ——更糟的是「10月18日下午两点」会漏捞到裸「两点」算成今天 02:00（时段词被日字隔断）。
+ *   老项目也没有这个形态（:6188 分支 A 逐字核对过），本组判据是**用户拍板的新增扩展**，
+ *   不是复刻对齐 —— 别当成"老项目就有"写错注释。
+ * 🔴 年份口径与短格式契约一致：无年份按今年，已过就是过期，不顺延明年（红线 2）。 */
+test('T28 「N月N日」+时段词+中文时刻：10月18日下午两点', () => {
+  const r = collectTimeMatches('10月18日下午两点 喝水', NOW);
+  assert.equal(r.length, 1, `应恰命中一条，实际=${JSON.stringify(r)}`);
+  assert.equal(r[0].at, at(2026, 10, 18, 14, 0), show(r[0]?.at ?? NaN));
+  assert.equal(r[0].expired, false);
+  // 时段词必须被吃进匹配串（不得漏捞成裸「两点」）
+  assert.equal(r[0].index, 0);
+  assert.equal(r[0].length, '10月18日下午两点'.length);
+});
+
+test('T29 「N月N日」+阿拉伯点：10月18日14点', () => {
+  const r = collectTimeMatches('10月18日14点 喝水', NOW);
+  assert.equal(r.length, 1, `应恰命中一条，实际=${JSON.stringify(r)}`);
+  assert.equal(r[0].at, at(2026, 10, 18, 14, 0), show(r[0]?.at ?? NaN));
+});
+
+test('T30 「N月N日」+晚上+半点：12月3日晚上8点半', () => {
+  const r = collectTimeMatches('12月3日晚上8点半', NOW);
+  assert.equal(r.length, 1, `应恰命中一条，实际=${JSON.stringify(r)}`);
+  assert.equal(r[0].at, at(2026, 12, 3, 20, 30), show(r[0]?.at ?? NaN));
+});
+
+test('T31 「N月N日」今年已过 = 过期，不顺延明年（红线 2）', () => {
+  // NOW = 2026-10-05，9月1日早已过
+  const r = collectTimeMatches('9月1日下午三点 交报告', NOW);
+  assert.equal(r.length, 1, '应命中（过期也要命中，expired 标记交给上层）');
+  assert.equal(r[0].expired, true, '今年已过必须标 expired，不得顺延明年');
+  assert.equal(r[0].at, at(2026, 9, 1, 15, 0), show(r[0]?.at ?? NaN));
+});
+
+test('T32 非法月日整段不命中，且不得漏捞裸时刻', () => {
+  const r = collectTimeMatches('13月40日下午两点 开会', NOW);
+  assert.equal(r.length, 0, `非法日期必须整段不命中（含裸时刻），实际=${JSON.stringify(r)}`);
+});
+
+test('T33 「N月N日 H:MM」冒号形态不被双重命中', () => {
+  const r = collectTimeMatches('10月18日 14:30 喝水', NOW);
+  assert.equal(r.length, 1, `绝对组已命中，相对组必须避让，实际=${JSON.stringify(r)}`);
+  assert.equal(r[0].at, at(2026, 10, 18, 14, 30), show(r[0]?.at ?? NaN));
+});
+
+test('T34 事项区（全角空格之后）的「N月N日」不命中', () => {
+  const r = collectTimeMatches('喝水　10月18日下午两点', NOW);
+  assert.equal(r.length, 0, `全角空格后是事项区，实际=${JSON.stringify(r)}`);
+});
+
+test('T35 matchTimeAt：光标落在「10月18日下午两点」串上可命中', () => {
+  const s = '10月18日下午两点 喝水';
+  const m = matchTimeAt(s, 4, NOW);
+  assert.ok(m, '光标在时间串内应命中');
+  assert.equal(m.at, at(2026, 10, 18, 14, 0), show(m?.at ?? NaN));
+});

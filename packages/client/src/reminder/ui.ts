@@ -22,6 +22,7 @@ import { COPY } from '../ui/copy.ts';
 import { ICON_X } from '../ui/icons.ts';
 import { fmtChipDay, fmtChipTime, fmtLate, fmtRemInsert, itemForChip, matchAtCaret } from '../reminder/format.ts';
 import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
+import { pickFireableAt } from './schedule.ts';
 import { syncRemindersToNative } from './native-rem.ts';
 import type { SyncOutcome } from './native-rem.ts';
 
@@ -120,6 +121,12 @@ export class ReminderUI {
 
   /** 定时器句柄。切笔记/锁屏时要清掉，否则旧笔记的提醒会在新笔记里炸。 */
   private timer: number | undefined;
+
+  /**
+   * 🔴 当前 timer 是"为哪条提醒而设的"（目标时刻 ms）。undefined = 无在途目标。
+   *   fireScheduled 靠它把"只 fire 为它而设的那条"钉成结构事实（Bug7，见 schedule.ts）。
+   */
+  private pendingAt: number | undefined;
 
   private audioCtx: AudioContext | null = null;
 
@@ -491,8 +498,12 @@ export class ReminderUI {
   /**
    * 启动调度。**必须在每次真源变化后重排**（对账可能新增/删除提醒）。
    *
-   * 🔴 调度口径：`setTimeout` 到最近那条 + 1 秒，醒来看还有没有到点的。
-   *   用 setInterval 轮询会让笔记本休眠醒来后一次性炸出十几张卡。
+   * 🔴 调度口径 = 老项目 v5.54 用户拍板 A（index.html:7533「过期彻底静默（用户拍板 A）：
+   *   过期提醒不再补弹卡片，直接排下一条未来提醒」）：只给**未来**的最近一条排 timer，
+   *   唤醒时只 fire「当初为它而设」的那条（pickFireableAt，见 reminder/schedule.ts）。
+   *   页面加载时已过期的提醒**一律不响** —— firedIds 只在内存、刷新即丢，
+   *   若醒来扫全部 due，点一次「刷新」（location.reload）就会把所有过期提醒
+   *   炸成一张卡（Bug7 用户实测截图）。用 setInterval 同理更糟（休眠醒来炸十几张）。
    *
    * 🔴🔴🔴 这里同时把提醒列表**交给原生排精确闹钟**（老项目 `syncRemindersToNative`）。
    *   为什么必须挂在 `schedule()` 上而不是散到各个 mutator 里：
@@ -539,24 +550,44 @@ export class ReminderUI {
     return out;
   }
 
-  /** 只重排页内定时器。定时器自己醒来时走这条（老项目 fireReminder :7551 同款：不重复同步原生）。 */
+  /**
+   * 只重排页内定时器（v5.54 口径：只排**未来**的下一条，见 schedule() 注释）。
+   * 定时器自己醒来时走 fireScheduled（老项目 fireReminder :7551 同款：不重复同步原生）。
+   */
   private rearm(): void {
     if (this.timer !== undefined) {
       window.clearTimeout(this.timer);
       this.timer = undefined;
     }
-    const due = dueReminders(this.host.getDoc());
-    const now = Date.now();
-    for (const r of due) {
-      if (!this.firedIds.has(r.id)) this.fire(r);
-    }
     const up = upcomingReminders(this.host.getDoc());
-    if (up.length === 0) return;
+    if (up.length === 0) {
+      // 🔴 没有未来提醒 ⇒ pendingAt 必须置空：此时若留着旧值，下一次 fireScheduled
+      //   会拿一个"谁也不对应"的目标去匹配（pickFireableAt 匹配不上是安全的，
+      //   但把状态清干净才不会让下一个人误读）。
+      this.pendingAt = undefined;
+      return;
+    }
     const next = Math.min(...up.map((r) => Date.parse(r.at)));
-    const wait = Math.max(250, Math.min(next - now + 1000, 2147483647));
-    // 🔴 醒来自调用的是 `rearm` 而不是 `schedule`：老项目 :7551 fireReminder 里
-    //   重新排程**不**带 syncRemindersToNative。跟着做，避免每响一次铃就重排一次原生闹钟。
-    this.timer = window.setTimeout(() => this.rearm(), wait);
+    this.pendingAt = next;
+    const wait = Math.max(250, Math.min(next - Date.now() + 1000, 2147483647));
+    // 🔴 醒来走 fireScheduled（fire + rearm），**不**带 syncRemindersToNative：
+    //   老项目 :7551 fireReminder 里重新排程同样不带原生同步 —— 避免每响一次铃
+    //   就重排一次原生闹钟。
+    this.timer = window.setTimeout(() => this.fireScheduled(), wait);
+  }
+
+  /**
+   * 定时器唤醒：只 fire「当初为它而设」的那条（老项目 v5.54 用户拍板 A）。
+   * 🔴 **绝不**在这里扫全部 due —— 那是"每次刷新把过期提醒炸成一张卡"的病根（Bug7）。
+   *   深睡晚触发 ≤60s 仍会响（与 RemReceiver.kt 的丢弃线同源，见 schedule.ts）。
+   */
+  private fireScheduled(): void {
+    this.timer = undefined;
+    const target = this.pendingAt;
+    this.pendingAt = undefined;
+    const due = dueReminders(this.host.getDoc());
+    for (const r of pickFireableAt(due, target, this.firedIds)) this.fire(r);
+    this.rearm();
   }
 
   /**

@@ -32,7 +32,7 @@ import {
   type EditorState,
   type LexicalEditor,
 } from 'lexical';
-import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode } from 'lexical';
+import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode, $isTextNode } from 'lexical';
 // 🔴 官方链接可点扩展：让识别出来的链接**真的点得动**（探针实锤，见 registerClickableLink 处注释）
 // 🔴 0.52 的 LexicalEditor **没有 editor.use()**（typecheck TS2339 直接报出来），
 //   所以只能调底层 registerClickableLink(editor, signals)，用不了官方那个 Extension 包装。
@@ -465,8 +465,10 @@ function hasOverlayPanelOpen(): boolean {
  */
 let panelSavedSel: {
   anchorKey: string;
+  anchorType: 'text' | 'element';
   anchorOffset: number;
   focusKey: string;
+  focusType: 'text' | 'element';
   focusOffset: number;
 } | null = null;
 
@@ -485,8 +487,14 @@ function saveEditorSelection(): void {
     }
     panelSavedSel = {
       anchorKey: String(sel.anchor.key),
+      // 🔴🔴 **点的类型必须存**：空段落里的光标是 element 锚点（段落里没有
+      //   TextNode），恢复时若强设成 'text'，sel.insertText 会**静默空转** ——
+      //   症状是 Bug2：「面板点添加 → 面板收起 → 正文和提醒两边什么都没有」
+      //   （插行没进正文，提醒被对账按"正文找不到时间串"判死）。
+      anchorType: sel.anchor.type,
       anchorOffset: sel.anchor.offset,
       focusKey: String(sel.focus.key),
+      focusType: sel.focus.type,
       focusOffset: sel.focus.offset,
     };
   });
@@ -509,13 +517,25 @@ function insertRemLineToEditor(text: string): void {
       //    🔴 用 $getNodeByKey 而不是 ed.getEditorState()._nodeMap：
       //      后者是私有字段，bundled ESM 下改名/压缩即失效，且失败时报
       //      "undefined is not a function" 这种完全指不到错的错。
+      //    🔴🔴 点类型以**节点实际形态**为准，不照抄保存值：保存后文档可能被
+      //      对账/远端合并重建，节点会换 key 或换形态（text ↔ element）。
+      //      空段落锚点是 element —— 强设 'text' 会让 insertText 静默空转（Bug2 病根）；
+      //      偏移也要按形态钳制（文本按内容长度、元素按子节点数），防越界。
       if (panelSavedSel) {
         const anchor = $getNodeByKey(panelSavedSel.anchorKey);
         const focus = $getNodeByKey(panelSavedSel.focusKey);
         if (anchor && focus) {
+          const aIsText = $isTextNode(anchor);
+          const fIsText = $isTextNode(focus);
+          const aOff = aIsText
+            ? Math.min(panelSavedSel.anchorOffset, anchor.getTextContentSize())
+            : Math.min(panelSavedSel.anchorOffset, $isElementNode(anchor) ? anchor.getChildrenSize() : 0);
+          const fOff = fIsText
+            ? Math.min(panelSavedSel.focusOffset, focus.getTextContentSize())
+            : Math.min(panelSavedSel.focusOffset, $isElementNode(focus) ? focus.getChildrenSize() : 0);
           const sel = $createRangeSelection();
-          sel.anchor.set(anchor.getKey(), panelSavedSel.anchorOffset, 'text');
-          sel.focus.set(focus.getKey(), panelSavedSel.focusOffset, 'text');
+          sel.anchor.set(anchor.getKey(), aOff, aIsText ? 'text' : 'element');
+          sel.focus.set(focus.getKey(), fOff, fIsText ? 'text' : 'element');
           $setSelection(sel);
         }
       }

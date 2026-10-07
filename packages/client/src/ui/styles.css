@@ -2153,3 +2153,38 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
 }
 /* 复制按钮不挂任何自定义类：`.box button:not(.box-x)` 已是全站通栏按钮规则
  *（老项目 :518 同款），另起一套类只会造成"这个弹窗的按钮小一号"。 */
+
+/* ── v9.2.0 刷新开奖卡（老项目 index.html:119-148 逐字移植，id nsDraw→eggDraw）
+ *    Bug4 用户报障根因：彩蛋 JS（egg/draw.ts）移植了，这块 CSS 一条没跟过来，
+ *    卡片以裸文本渲染在 body 末尾。与 #nsGreet 同一条底部浮层泳道（bottom:64px），
+ *    互斥由 drawConsume 的在场守卫保证。非模态、不抓焦点、点一下即收；
+ *    R/SR/SSR 定时自收，UR 不自收（hold.ur=0，老项目拍板）。
+ *    🔴 颜色只走变量：金属分档色见 theme.ts PALETTE.foil*，投影见 OVERLAY.shadowDraw。 */
+#eggDraw{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:59;width:min(88vw,340px);
+  background:var(--box-bg);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow-draw);
+  padding:30px 26px 22px;text-align:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  -webkit-user-select:none;user-select:none;animation:drawRise .5s cubic-bezier(.2,.7,.3,1) both}
+/* 通用 rise 的 to 帧是 transform:none，fill-mode:both 会在动画结束后永久接管 transform，
+   把基座的 translateX(-50%) 抹掉＝卡片右偏半个屏（v5.44 remCard 同款事故，必须自带居中帧）。 */
+@keyframes drawRise{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
+#eggDraw.out{animation:drawOut .3s ease both}
+@keyframes drawOut{to{opacity:0;transform:translate(-50%,8px)}}
+#eggDraw .dw-tx{font-size:15px;line-height:1.9;color:var(--fg);letter-spacing:.02em}
+#eggDraw .dw-ft{margin-top:14px;font:400 9.5px/1 var(--mono);letter-spacing:.18em;color:var(--muted);opacity:.7}
+#eggDraw .dw-rar{position:absolute;top:0;right:0;font:600 10px/1 var(--mono);letter-spacing:.12em;
+  padding:5px 10px 5px 12px;border-radius:0 18px 0 10px;color:var(--muted);background:var(--hover)}
+#eggDraw.sr::before,#eggDraw.ssr::before,#eggDraw.ur::before{content:'';position:absolute;inset:5px;border-radius:13px;pointer-events:none}
+#eggDraw.sr::before{border:1px solid var(--foil-silver);opacity:.5}
+#eggDraw.sr .dw-rar{color:var(--foil-silver)}
+#eggDraw.ssr{border-color:var(--foil-gold)}
+#eggDraw.ssr::before{border:1px solid var(--foil-gold);opacity:.55}
+#eggDraw.ssr .dw-tx{font-family:var(--serif);font-size:16.5px;letter-spacing:.04em}
+#eggDraw.ssr .dw-rar{color:var(--foil-gold);background:var(--accent-soft)}
+#eggDraw.ur{border:1px solid transparent;overflow:hidden;
+  background:linear-gradient(var(--box-bg),var(--box-bg)) padding-box,linear-gradient(135deg,var(--foil-gold),var(--foil-gold-hi),var(--foil-silver),var(--foil-gold)) border-box}
+#eggDraw.ur::before{border:1px solid var(--foil-gold-hi);opacity:.7}
+#eggDraw.ur .dw-tx{font-family:var(--serif);font-size:17px;letter-spacing:.05em;color:var(--foil-gold)}
+#eggDraw.ur .dw-rar{color:var(--box-bg);background:linear-gradient(135deg,var(--foil-gold),var(--foil-gold-hi))}
+#eggDraw.ur::after{content:'';position:absolute;top:-60%;left:-32%;width:40%;height:220%;transform:rotate(20deg);pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--foil-sheen),transparent);animation:dwSweep 2.8s ease-in-out .45s 2}
+@keyframes dwSweep{0%{left:-40%}55%{left:118%}100%{left:118%}}

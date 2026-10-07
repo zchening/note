@@ -399,13 +399,20 @@ test('REMN-16 🔴🔴 调用点齐备：ReminderUI.schedule / mountEditor / 改
   assert.ok(cpIdx > 0 && mainClean.slice(cpIdx).includes('reminderRef?.schedule();'), '改口令成功后必须重排（老项目 :8339）');
 });
 
-test('REMN-17 🔴 反向：定时器自己醒来只能走 rearm，绝不能重排原生闹钟', () => {
+test('REMN-17 🔴 反向：定时器自己醒来只能走 fireScheduled→rearm，绝不能重排原生闹钟', () => {
   // 🔴 照老项目 :7551 fireReminder 的口径：响完铃重新排程**不**带
-  //   syncRemindersToNative。若这里写成 `setTimeout(() => this.schedule(), wait)`，
+  //   syncRemindersToNative。若写成 `setTimeout(() => this.schedule(), wait)`，
   //   每响一次铃就重排一次原生闹钟（无谓的 Keystore 加解密 + setAlarmClock）。
+  //   🔴 2026-10-08 Bug7 改造后回调是 fireScheduled（fire + rearm），
+  //   「不重排原生」的不变量不变，钉的结构随接线更新。
   const clean = stripComments(REM_UI_SRC);
-  assert.match(clean, /setTimeout\(\(\)\s*=>\s*this\.rearm\(\),\s*wait\)/, '定时器回调必须是 rearm');
-  assert.doesNotMatch(clean, /setTimeout\(\(\)\s*=>\s*this\.schedule\(\)/, '定时器回调不得直接调 schedule（会重复同步原生）');
+  assert.match(clean, /setTimeout\(\(\)\s*=>\s*this\.fireScheduled\(\),\s*wait\)/, '定时器回调必须是 fireScheduled');
+  // fireScheduled 本体：先 fire 为它而设的那条（pickFireableAt），再 rearm，且不碰原生
+  assert.match(clean, /for \(const r of pickFireableAt\(due, target, this\.firedIds\)\) this\.fire\(r\);/, '唤醒只 fire 为它而设的那条（Bug7）');
+  const fireScheduledBody = clean.match(/private fireScheduled\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(fireScheduledBody.includes('this.rearm()'), '唤醒后必须重新排程下一条');
+  assert.ok(!fireScheduledBody.includes('syncNative'), '唤醒路径不得同步原生闹钟');
+  assert.ok(!fireScheduledBody.includes('this.schedule()'), '唤醒路径不得走 schedule（会重复同步原生）');
 });
 
 test('REMN-18 🔴 桥探测的源码形态：Capacitor 在前、裸挂在后（顺序钉死）', () => {
