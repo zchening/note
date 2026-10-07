@@ -110,10 +110,28 @@ function rawGet(target) {
   });
 }
 
-test.after(() => {
-  if (child) child.kill();
-  if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
-  if (deployDir) fs.rmSync(deployDir, { recursive: true, force: true });
+// 🔴🔴 清理必须**等子进程真退出**再删目录，不能 kill() 完就立刻 rmSync。
+//
+//   本地 Windows 永远绿、GitHub Actions（Linux）必红的经典坑，CI 首次抓到：
+//     ENOTEMPTY: directory not empty, rmdir '/tmp/bj-srv-XXXX'
+//   成因：`child.kill()` 只是**投递** SIGTERM，子进程还在跑退场逻辑（failmap.js
+//   定时写快照、server.js 写笔记落盘）。此时 rmSync 开始遍历目录并逐项删除，
+//   删到一半子进程又新建了文件 ⇒ Linux 的 rmdir 报 ENOTEMPTY。
+//   为什么本地不复现：Windows 上 fs.rmSync 的 force:true 对"目录非空"更宽容，
+//   且本地时序恰好更松（没有 CI 那样多核并行 + 磁盘压力）。
+//
+//   🔴 正解是**等 exit 事件**，不是给 rmSync 加 retry —— retry 只是把症状拖慢，
+//   仍在和子进程抢目录；而 exit 事件是"它真的结束了"的唯一硬信号。
+test.after(async () => {
+  if (child && child.exitCode === null) {
+    const exited = new Promise((r) => child.once('exit', r));
+    child.kill();
+    // 🔴 兜底超时：进程若因故不响应 SIGTERM，不能让整个测试文件挂死在这里。
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+  }
+  for (const d of [dataDir, deployDir]) {
+    if (d) fs.rmSync(d, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
 });
 
 test('/healthz 自报版本与关键路径（部署核对第一判据）', async () => {
@@ -633,8 +651,14 @@ test('图床签名：必须是 SHA1(字典序串 + secret)，不是 HMAC', async
     assert.equal(t.folder, FOLDER, 'folder 应原样下发');
     assert.equal(t.cloudName, CLOUD, 'cloud_name 应原样下发');
   } finally {
-    up.kill();
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(www, { recursive: true, force: true });
+    // 🔴 同 test.after：等子进程真退出再删目录，否则 Linux 上会 ENOTEMPTY。
+    //   （这里同样有 failmap 定时写快照，kill() 只是投递信号）
+    if (up.exitCode === null) {
+      const upExited = new Promise((r) => up.once('exit', r));
+      up.kill();
+      await Promise.race([upExited, new Promise((r) => setTimeout(r, 5000))]);
+    }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    fs.rmSync(www, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
