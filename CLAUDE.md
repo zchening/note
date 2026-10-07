@@ -49,6 +49,18 @@ cd D:/Users/zchen/Documents/WorkBuddyProject/NoteSync
 - 🔴 **新增服务端文件必须同步加进上传清单**，漏了就是 ESM 找不到模块、服务起不来
 - 🔴 **新增静态资源子目录**（如 `icons/`）要确认部署脚本会递归传 —— 它原本只传顶层文件
 
+## APK 发版（GitHub 云构建 + 自动 OTA，勿手打）
+
+APK 不在本机出，全部由 `.github/workflows/build-apk.yml` 完成。手打 `gradlew assembleRelease` 只在本地调试时用，**发版一律走 CI**，否则本地签名/版本号/OTA 元数据三者容易不一致。
+
+- **触发**：`git tag vX.Y.Z && git push origin <tag>`（tag 推送）；或 `gh workflow run build-apk.yml -R zchening/note`（手动，版本号取 `package.json`）。
+- **三作业**：`test`（单测闸，不绿不出包） → `build`（JDK21 + 签名出 `app-release.apk`） → `deploy`（腾讯云 OTA + GitHub Releases）。
+- **两发布目标同进同退**：`deploy` 作业先上传腾讯云并线上校验通过，最后才发 GitHub Release —— 两处不会一处新一处旧。
+- 🔴 **版本号唯一真源 = `package.json`**：tag 名 / APK `versionName` / OTA `tag_name` / Release 名全部从它派生；`build.mjs` 删静态资源必须同步删 `STATIC_REQUIRED` 清单，否则 CI 的 build 直接 `exit 1`（v1.13.1 曾因此红过一次）。
+- 产物落点（线上已校验）：腾讯云 `https://bj.xuyinji.com.cn/dl/vX.Y.Z.apk` + `/api/latest` 指向它；GitHub Releases 同版本附 `NoteSyncX-vX.Y.Z.apk`。手机点「检查更新」走 `/api/latest`。
+- 上传顺序的硬纪律（倒装：两个 APK 先就位、`latest_app.json` 最后落）只在 `tools/push_bj_apk.py` 里有权威，CI 只调它，不另写。
+- 密钥：签名四件套 + SSH 私钥 `BJ_SSH_KEY` 都是 repo secret；改密钥/换部署机要同步改这两处与 `push_bj_apk.py` 的 `HOST`。
+
 ## git
 
 ```bash
