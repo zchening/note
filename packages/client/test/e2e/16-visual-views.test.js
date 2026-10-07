@@ -1209,6 +1209,290 @@ test('VVW-13 🔴 历史每行 [预览][恢复] 两枚按钮，预览能内联�
 });
 
 /* ══════════════════════════════════════════════════════════════════════
+ * 历史版本「预览」不许让页面闪一下（用户报障第 6 条）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴🔴 这条钉的不是"最终有没有展开"，而是**中间帧**。
+ *
+ *   VVW-13 已经在钉终态了（`.hist-preview` 出现、高度>0、可滚），
+ *   而用户报障第 6 条是「点击预览的时候，页面**不要闪一下**」——
+ *   终态断言对闪烁**恒绿**：闪 500ms 之后终态照样是"展开成功"。
+ *   所以必须采 rAF 帧序列，钉"从点击到稳定之间有没有不可见的中间态"。
+ *
+ * 🔴🔴🔴 根因（量化实锤，不是推理）：
+ *   `ui/menu.ts:203` 每次 render() 都 `el.innerHTML = '<div class="box menu-box">…'`
+ *   **整块重建菜单盒**，而 `ui/styles.css:134` 的 `.box` 上挂着
+ *   `animation: nsRise .5s cubic-bezier(.2,.7,.3,1) both`。
+ *   ⇒ 每点一次预览，`.box` 作为一个**全新元素**重新入场：
+ *   从 `opacity:0 / translateY(10px)` 爬到 `opacity:1 / translateY(0)`，
+ *   整张菜单在 0.5s 里淡入 + 上移 ⇒ 用户看到的"闪一下"。
+ *
+ *   老项目（index.html:686）`<div class="box" id="menuBox">` 是**HTML 里常驻的节点**，
+ *   预览走 `row.appendChild(box)`（:8512）只加一个子节点，**从不碰菜单盒本身**
+ *   ⇒ 菜单盒的入场动画只在首次打开时播一次。
+ *
+ * 🔴 三条判据分工（缺一条就会被"把动画删了"或"把整块重建改成局部更新"骗过）：
+ *   HIST-PREVIEW-01 菜单盒必须是**同一个 DOM 节点**跨过 render（老项目口径）
+ *   HIST-PREVIEW-02 点预览后**零帧** opacity<1（不许重播入场）
+ *   HIST-PREVIEW-03 展开态与预览内容**同帧**落地（不许"先展开后补内容"）
+ *   反向闸在 HIST-PREVIEW-04：首次打开菜单**必须**仍有入场动画 ——
+ *   不然"删掉 .box 的 animation"就是一条能骗过 01~03 的假修。
+ */
+test('VVW-30 🔴 历史预览：菜单盒常驻 + 点预览零中间帧（用户报障第 6 条）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw30', 'pw');
+  try {
+    await openMenu(page);
+    await page.click('#menuHistEntry');
+    await page.waitForSelector('#histSave', { timeout: 10_000 });
+    await page.click('#histSave');
+    await page.waitForSelector('.list-row[data-at] [data-preview]', { timeout: 10_000 });
+    // 🔴 等入场动画（.5s）跑完再开始采样，否则量到的是"打开菜单"那一下的正常入场
+    await page.waitForTimeout(800);
+
+    // ── HIST-PREVIEW-01：菜单盒是常驻节点，不许被 innerHTML 换掉 ──
+    // 🔴 用**元素身份**判，不是用 querySelector 重新找 —— 重新找永远能找到，
+    //   恒真。判据是"点击前拿到的那个对象，点击后还是不是 document 里的同一个"。
+    await page.evaluate(() => {
+      window.__histBoxRef = document.querySelector('.menu-box');
+      window.__histFrames = [];
+      window.__histStop = false;
+      const t0 = performance.now();
+      // 🔴 采样函数必须自包含：被序列化进页面，不能引用外部作用域。
+      const tick = () => {
+        if (window.__histStop) return;
+        const box = document.querySelector('.menu-box');
+        const row = document.querySelector('.list-row[data-at]');
+        const pv = row ? row.querySelector('.hist-preview') : null;
+        window.__histFrames.push({
+          t: Math.round(performance.now() - t0),
+          sameNode: box === window.__histBoxRef,
+          opacity: box ? getComputedStyle(box).opacity : null,
+          // transform 归一化：matrix(1,0,0,1,0,0) 与 none 都算"没动"
+          moved: box ? getComputedStyle(box).transform !== 'none' &&
+            getComputedStyle(box).transform !== 'matrix(1, 0, 0, 1, 0, 0)' : null,
+          boxExists: !!box,
+          rowOpen: row ? row.classList.contains('hist-open') : null,
+          pvExists: !!pv,
+          pvLen: pv ? (pv.textContent || '').trim().length : 0,
+        });
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    assert.ok(
+      await page.evaluate(() => !!window.__histBoxRef),
+      '采样前必须能拿到菜单盒节点',
+    );
+
+    await page.click('.list-row[data-at] [data-preview]');
+    await page.waitForSelector('.list-row[data-at] .hist-preview', { timeout: 10_000 });
+    await page.waitForTimeout(700);
+
+    const fr = await page.evaluate(() => {
+      window.__histStop = true;
+      return window.__histFrames;
+    });
+    assert.ok(fr.length >= 5, `采帧太少（${fr.length}），采帧器没跑起来，判据会假绿`);
+
+    // ── HIST-PREVIEW-01 ──
+    const swapped = fr.filter((f) => !f.sameNode);
+    assert.deepEqual(
+      swapped.map((f) => f.t),
+      [],
+      `菜单盒被换掉了（老项目 #menuBox 是常驻节点，预览只 appendChild 子节点）。` +
+        `变帧时刻=${JSON.stringify(swapped.map((f) => f.t))}。` +
+        `根因：menu.ts:203 整块 innerHTML 重建 .box，.box 的 nsRise 入场动画被重播。`,
+    );
+
+    // ── HIST-PREVIEW-02：零帧半透明（不许重播入场）──
+    const faded = fr.filter((f) => f.boxExists && parseFloat(f.opacity) < 0.99);
+    assert.deepEqual(
+      faded.map((f) => `${f.t}ms:${f.opacity}`),
+      [],
+      `点预览后菜单盒有 ${faded.length} 帧半透明 ⇒ 入场动画被重播了，这就是"闪一下"。`,
+    );
+    const slid = fr.filter((f) => f.moved === true);
+    assert.deepEqual(
+      slid.map((f) => f.t),
+      [],
+      `点预览后菜单盒有 ${slid.length} 帧带位移（transform≠none）⇒ nsRise 的 translateY 在重播。`,
+    );
+
+    // ── HIST-PREVIEW-03：展开态与内容同帧落地 ──
+    // 🔴 "有"必须有"不应该有"配对：只钉"最后展开了"的话，
+    //   "先展开成空行、1 秒后补内容"这种闪法照样绿。
+    const openNoPv = fr.filter((f) => f.rowOpen && !f.pvExists);
+    assert.deepEqual(
+      openNoPv.map((f) => f.t),
+      [],
+      `有 ${openNoPv.length} 帧"hist-open 已加但 .hist-preview 还没进 DOM" ⇒ 内容后补，用户看到的就是一行空白先跳出来。`,
+    );
+    const pvEmpty = fr.filter((f) => f.pvExists && f.pvLen === 0);
+    assert.deepEqual(
+      pvEmpty.map((f) => f.t),
+      [],
+      `有 ${pvEmpty.length} 帧".hist-preview 在树里但内容为空"。`,
+    );
+    // 反向闸：确实量到了展开帧，否则上面三条全在空集上断言
+    assert.ok(
+      fr.some((f) => f.rowOpen && f.pvExists && f.pvLen > 0),
+      '整轮都没量到"已展开且有内容"的帧 —— 采样窗口太短或选择器错了，判据恒真。',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * 🔴 反向闸（防"把动画删了"这条假修）：
+ *   HIST-PREVIEW-02 钉的是"重播 ⇒ 红"。但只要有人把 `.box` 的
+ *   `animation: nsRise …` 整条删掉，01~03 会全绿 —— 而老项目确实有入场动画
+ *   （index.html:509 `animation:rise .5s cubic-bezier(.2,.7,.3,1) both`），
+ *   删掉就是另一处视觉回退。
+ *
+ *   所以这里钉：**首次打开菜单**必须有半透明入场帧。
+ *   合起来才唯一确定正解 = **保留 `.box` 常驻 + 只在首次 open 时播一次动画**。
+ */
+test('VVW-31 🔴 反向闸：首次打开菜单仍必须有 nsRise 入场动画', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw31', 'pw');
+  try {
+    await page.evaluate(() => {
+      window.__openFrames = [];
+      window.__openStop = false;
+      const t0 = performance.now();
+      const tick = () => {
+        if (window.__openStop) return;
+        const box = document.querySelector('.menu-box');
+        window.__openFrames.push({
+          t: Math.round(performance.now() - t0),
+          exists: !!box,
+          anim: box ? getComputedStyle(box).animationName : null,
+          opacity: box ? getComputedStyle(box).opacity : null,
+        });
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    await openMenu(page);
+    await page.waitForSelector('.menu-box', { timeout: 10_000 });
+    await page.waitForTimeout(800);
+
+    const fr = await page.evaluate(() => {
+      window.__openStop = true;
+      return window.__openFrames;
+    });
+    const withBox = fr.filter((f) => f.exists);
+    assert.ok(withBox.length >= 5, `采帧太少（${withBox.length}），判据会假绿`);
+    const anims = [...new Set(withBox.map((f) => f.anim))];
+    assert.deepEqual(
+      anims,
+      ['nsRise'],
+      `菜单盒入场动画名应恒为 nsRise（老项目 rise 的 bj 私有名），实际 ${JSON.stringify(anims)}`,
+    );
+    const faded = withBox.filter((f) => parseFloat(f.opacity) < 0.99);
+    assert.ok(
+      faded.length > 0,
+      '首次打开菜单一帧半透明都没有 ⇒ 入场动画被删了。' +
+        '老项目 index.html:509 有 `animation:rise .5s … both`，删掉是视觉回退。',
+    );
+    // 动画必须**跑完**（终态 opacity=1），不许卡在中途
+    assert.equal(
+      withBox[withBox.length - 1].opacity,
+      '1',
+      '入场动画结束后 opacity 应为 1',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * 🔴🔴🔴 这条是**变异实测补上的**，不是先想到的。
+ *
+ *   背景：把菜单盒改成常驻节点时，我漏了 `close()` 里的 `el.innerHTML = ''`
+ *   —— 它会把常驻盒子一起摘掉。后果不是"多闪一下"，而是
+ *   **菜单彻底坏掉**：render() 只往那个已脱离文档的 box 写内容，
+ *   而 el 里已经空了 ⇒ 重新打开菜单时 `.menu-box` 永远不出现
+ *   （探针实测：`page.waitForSelector('.menu-box')` 10s 超时）。
+ *
+ * 🔴 而 VVW-30 / VVW-31 在这个 bug 下**全绿** —— 两条都只在
+ *   "同一次 open 会话内"采样，而 close→reopen 跨过了会话边界。
+ *   ⇒ 判据的采样窗口本身就是 bug 的藏身处。
+ *   「凡是把节点生命周期从"每次 render 重建"改成"常驻」的修复，
+ *     必须补一条跨 close/reopen 的判据」，否则改对一半也会绿。
+ *
+ * 三条一起钉：
+ *   ① 关菜单后 `.menu-box` 仍在 DOM 里（老项目只切 mask 的 hidden）
+ *   ② 重新打开后主菜单 11 项齐全可见
+ *   ③ 重新打开后仍是**同一个节点对象**
+ */
+test('VVW-32 🔴 菜单盒常驻后，关闭再打开必须仍可用且是同一节点', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw32', 'pw');
+  try {
+    await openMenu(page);
+    await page.waitForSelector('.menu-box', { timeout: 10_000 });
+    await page.waitForTimeout(800);
+
+    // 记住盒子对象 + 塞个标记，用来验"同一个节点"
+    const before = await page.evaluate(() => {
+      const box = document.querySelector('.menu-box');
+      box.__histMarker = 'ORIGINAL';
+      return { hasMenu: !!document.querySelector('#menuHome') };
+    });
+    assert.ok(before.hasMenu, '首次打开时主菜单应在');
+
+    // 关闭：走真实的点遮罩空白（不是调 close()，那是内部函数）
+    await page.evaluate(() => {
+      const mask = document.querySelector('#menuMask');
+      mask.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await page.waitForTimeout(300);
+
+    const closed = await page.evaluate(() => ({
+      maskHidden: document.querySelector('#menuMask')?.classList.contains('hidden') ?? false,
+      boxStillInDom: !!document.querySelector('.menu-box'),
+      // 🔴 关键：盒子必须还在，且标记还在（说明没被重建过）
+      markerSurvived: document.querySelector('.menu-box')?.__histMarker === 'ORIGINAL',
+    }));
+    assert.equal(closed.maskHidden, true, '点遮罩后菜单应隐藏');
+    assert.ok(
+      closed.boxStillInDom,
+      '关菜单后 `.menu-box` 被摘出了 DOM。老项目 index.html:8035 只切 mask 的 hidden，' +
+        '`#menuBox` 是 HTML 常驻节点。摘掉它下次 open() 就写进了孤儿节点，菜单直接坏掉。',
+    );
+    assert.ok(closed.markerSurvived, '菜单盒被重建了（节点身份丢失）');
+
+    // 重新打开 —— 这一步在"close 拆盒子"的 bug 下会 10s 超时
+    await openMenu(page);
+    await page.waitForSelector('.menu-box', { timeout: 10_000 });
+    await page.waitForTimeout(300);
+
+    const reopened = await page.evaluate(() => ({
+      marker: document.querySelector('.menu-box')?.__histMarker ?? null,
+      items: document.querySelectorAll('.menu-box .menu-item').length,
+      home: !!document.querySelector('#menuHome'),
+      about: !!document.querySelector('#menuAbout'),
+      boxH: Math.round(document.querySelector('.menu-box')?.getBoundingClientRect().height ?? 0),
+    }));
+    assert.equal(
+      reopened.marker,
+      'ORIGINAL',
+      '重新打开后菜单盒不是同一个节点 ⇒ 常驻没生效（每次 open 都在重建盒子）。',
+    );
+    assert.ok(reopened.home, '重新打开后主菜单项缺失（#menuHome）');
+    assert.ok(reopened.about, '重新打开后「关于」项缺失（#menuAbout）');
+    assert.ok(
+      reopened.items >= 11,
+      `重新打开后菜单项应 ≥11 个，实际 ${reopened.items}`,
+    );
+    assert.ok(reopened.boxH > 0, '重新打开后菜单盒高度为 0 —— 视觉上等于菜单没打开');
+  } finally {
+    await page.close();
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════
  * 链接打开方式二级页（用户报障第 4 条）
  * 「设置链接弹窗不同…且没有显示系统浏览器图标…没有选中状态」
  * ══════════════════════════════════════════════════════════════════════ */
@@ -2500,5 +2784,455 @@ test('VVW-28 🔴🔴 触屏：点折叠三角开合不得弹键盘（报障第 
     await assertNoKeyboard(page, '点折叠三角展开后');
   } finally {
     await closeTouch(page);
+  }
+});
+
+/**
+ * VVW-29 🔴🔴🔴 夜间滚动条**轨道（track）**颜色必须与老项目同口径（用户报障第 5 条）
+ *
+ * 用户原话：「夜间模式滚动条后面背景条（track）颜色和老版本不一样」。
+ *
+ * ── 根因（真浏览器 + 源码双向核实，不是推理）────────────────────────────
+ *  🔴 **两边都没有 `::-webkit-scrollbar-track` 声明**（老项目 grep scrollbar 只有
+ *     426-427 两条 width/thumb；bj styles.css:609-610 逐字同款）。
+ *     ⇒ track 颜色**完全由 UA 默认值决定**，而 UA 默认值只认一个东西：
+ *     **`color-scheme`**。
+ *
+ *  老项目（notesync/index.html）：
+ *    :14   `<meta name="color-scheme" content="light">`   ← **单值**
+ *    :80   `:root { color-scheme: light }`
+ *    :92   `body.dark { color-scheme: dark }`              ← **类名驱动**
+ *    :1124-1127 注释明写这套是**为国产浏览器"网页夜间"强制反色做的对抗**
+ *  bj（www/index.html + styles.css）：
+ *    :6    `<meta name="color-scheme" content="light dark">`  ← **双值**！
+ *    :1194-1196  唯一定义 `@media (prefers-color-scheme:dark){ html:not(.force-light) body{color-scheme:dark} }`
+ *
+ *  两处偏差叠加 ⇒ 夜间 track 走 UA 的深色档，与老项目的浅色档不同：
+ *    ① meta 声明 `light dark` = 主动告诉 UA「我支持深色」⇒ UA 直接给深色 track；
+ *    ② 老项目靠**类名**切 color-scheme，bj 靠**媒体查询**切 ——
+ *       用户手动切主题（`applyTheme` 写 `.dark` 类）时，媒体查询不跟着变，
+ *       于是「应用内夜间」和「系统夜间」在 track 上是两套答案。
+ *
+ *  🔴🔴 判据必须**真浏览器读 computedStyle**，不能正则匹配 CSS 字符串：
+ *     `color-scheme` 是继承属性，正则算不准它在哪一层生效（这正是本仓记忆里
+ *     「判『CSS 补丁生效』必须真浏览器读 computedStyle」那条）。
+ *
+ *  🔴🔴 必须钉**日间与夜间两态**。只测夜间会漏掉反向问题
+ *     （若有人把 color-scheme 写死成 dark，日间就会反过来错）。
+ *  用 `openEditorAt` 的 `iso` 钉死时钟（07:00/19:00 是本项目日夜分界，见 MEMORY）。
+ */
+test('VVW-29 🔴🔴🔴 日夜两态 color-scheme 必须与老项目同口径（夜间滚动条 track 这条报障）', async () => {
+  // 🔴 老项目逐值参照（notesync/index.html，只读）：
+  //   :14 <meta name="color-scheme" content="light">
+  //   :80 :root{color-scheme:light}   :92 body.dark{color-scheme:dark}
+  // ⇒ 日间落在 light、**应用内夜间**落在 dark，两态都由**类名**决定，不看系统偏好。
+  const readCs = (page) =>
+    page.evaluate(() => {
+      const cs = getComputedStyle(document.body);
+      const meta = document.querySelector('meta[name="color-scheme"]');
+      return {
+        metaContent: meta ? meta.getAttribute('content') : null,
+        bodyColorScheme: cs.colorScheme,
+        htmlClass: document.documentElement.className,
+        bodyClass: document.body.className,
+        isDark: document.body.classList.contains('dark'),
+        // 🔴 顺手把 scrollbar 的自定义部分也读出来（老项目只声明 width+thumb，
+        //   track 留白 ⇒ 这两项在两边都应是 null，钉住"没人偷偷加 track 声明"）。
+        sbWidth: (() => {
+          const ed = document.getElementById('editor-host') || document.querySelector('.ns-editor');
+          return ed ? getComputedStyle(ed).getPropertyValue('scrollbar-color') : null;
+        })(),
+      };
+    });
+
+  const cases = [
+    { label: '日间（钉 10:00）', iso: new Date('2026-07-15T10:00:00'), wantDark: false },
+    { label: '夜间（钉 22:00）', iso: new Date('2026-07-15T22:00:00'), wantDark: true },
+  ];
+
+  for (const c of cases) {
+    const page = await openEditorAt(h.browser(), h.baseUrl(), 'vvw29', 'pw', { iso: c.iso });
+    try {
+      await page.waitForSelector('#editor-host', { state: 'attached', timeout: 15_000 });
+      // 等主题真值落定（applyTheme 是启动时跑的，别在它前面读）
+      await withTimeout(
+        page.waitForFunction(
+          (d) => document.body.classList.contains('dark') === d, c.wantDark, { timeout: 8000 },
+        ),
+        10_000,
+        `等${c.label}主题落定`,
+      );
+      const got = await readCs(page);
+
+      // 🔴 断言 1：主题类名必须真的切了（否则下面全是恒真）
+      assert.equal(got.isDark, c.wantDark, `${c.label}：body.dark 应为 ${c.wantDark}`);
+
+      // 🔴 断言 2：meta 必须是**单值** light。老项目 :14 原文是 `content="light"`。
+      //   bj 现在是 "light dark" —— 这一个字符串就是夜间 track 变色的直接原因。
+      //   写成精确等值而不是"包含 light"：双值与单值在这里行为完全不同。
+      assert.equal(
+        got.metaContent, 'light',
+        `${c.label}：meta[name=color-scheme] 必须是单值 "light"（老项目 :14 原文），`
+        + `实际="${got.metaContent}"。写成 "light dark" 等于主动告诉 UA 本页支持深色，`
+        + `UA 会直接给深色滚动条轨道 —— 正是用户报的那条`,
+      );
+
+      // 🔴 断言 3：computedStyle 的 color-scheme 必须与主题态一致。
+      //   老项目是**类名驱动**（:80/:92），所以日间 light、应用内夜间 dark ——
+      //   注意不是 "normal"/"dark light"，那会让 UA 走另一套默认色。
+      const want = c.wantDark ? 'dark' : 'light';
+      assert.equal(
+        got.bodyColorScheme, want,
+        `${c.label}：body 的 computedStyle.color-scheme 应为 "${want}"（老项目 :80/:92 类名驱动），`
+        + `实际="${got.bodyColorScheme}"`,
+      );
+
+      // 🔴🔴 断言 4（**这条已改口径**，见 VVW-33）：轨道色改由**显式声明**兜住。
+      //   这里只保留「thumb 位不许被偷偷改成自定义色」。
+      //   老项目 426-427 只声明 width + `thumb{background:var(--line)}`，没碰 `scrollbar-color`。
+      //   本项目为了在 Windows 深色系统主题下把日间轨道压回白色（用户报障第 5 条回访），
+      //   额外补了 track 声明 —— 见 VVW-33 与 styles.css 的显式定色段。
+      //   🔴 但 thumb 仍是老项目口径 `var(--line)`，滑块颜色**不许**被人换成别的东西。
+      //   期望值是 CSS **初值** `auto`，不是空串 —— 我第一版写 `''`，
+      //   判据在实现改对之后仍然红（`auto` !== `''`），差点被当成"没修好"回滚实现。
+      //   教训同本文件头第 3 条：getPropertyValue 对**未声明**的属性返回初值，不是空串。
+      const thumbPart = String(got.sbWidth).split(/\s+/)[0];
+      assert.equal(
+        thumbPart, 'auto',
+        `${c.label}：scrollbar-color 的**滑块位**必须仍是 auto —— 老项目没碰它，`
+        + `滑块色归 .ns-editor 的 ::-webkit-scrollbar-thumb: var(--line) 管。`
+        + `实际="${got.sbWidth}"`,
+      );
+    } finally {
+      await page.close();
+    }
+  }
+});
+
+/**
+ * VVW-33 🔴🔴🔴 滚动条**轨道（track）**必须由页面显式定色，不能交给 UA + 系统主题
+ *                （用户报障第 5 条**回访**：夜间修好后，日间轨道在用户实机上变成黑色）
+ *
+ * 用户实机原话（2026-10-07，附 Windows 桌面 Chrome 截图）：
+ *   「电脑 chrome 打开，日间模式，滚动条后面那个条状背景应该显示白色，结果显示成黑色。」
+ * 截图中滚动条是 **Windows 原生经典滚动条**：纯黑槽 + 灰色滑块 + 上下箭头。
+ *
+ * ── 为什么 color-scheme 那条修复（VVW-29）不足以解决本条 ──────────────────
+ *   第一批把 color-scheme 改成类名驱动（:root → light / body.dark → dark），
+ *   夜间确实与老项目对齐了，**但日间在用户实机上仍然是黑槽**。
+ *   机制（推断，非实测）：Windows 处于**深色系统主题**时，系统深色滚动条主题
+ *   压过了页面声明的 `color-scheme: light`。
+ *   ⇒ 光靠 color-scheme 这一个间接开关，**拿不到确定色**。
+ *
+ * 🔴🔴🔴 本条的判据设计踩过一次坑，必须写下来（这轮的教训比代码本身重要）：
+ *
+ *   我先前连做两轮「裁图读滚动条区域像素」，得出「bj 与老项目逐像素一致，不是回归」
+ *   的结论。用户实机截图直接推翻。
+ *   事后做**变量有效性检查**才发现：把 color-scheme 设成
+ *   `normal / light / dark / light dark` 四种，headless 与 headed 下
+ *   **四种渲染像素完全相同**（`255,255,255` + `236,234,226`）
+ *   ⇒ **被测变量根本没接上**，再细化也是白细化。
+ *   本轮（第三批开工前）我把同样的检查又跑了一遍，这次结论是**有效的**，量到了三件事：
+ *
+ *   ① `getComputedStyle(el,'::-webkit-scrollbar-track').backgroundColor`
+ *      **敏感可测**：6 个容器分别声明 6 个不同颜色 → 读出 6 个互不相同的值。
+ *      ⇒ 判据可以钉在**声明层**。
+ *   ② 裁图读像素在 headless 下**恒为 `255,255,255`**，且 `gutter` 恒为 2
+ *      （滚动条根本没被绘制）⇒ **像素层判据恒真，等于没有断言**。
+ *      本条因此**只用声明层**，不裁图。
+ *   ③ `scrollbar-color: auto <track>` 这种「只定 track、thumb 交给 UA」的写法
+ *      **被 Chromium 丢弃**（读回 `auto`）；必须两色都给才生效。
+ *      ⇒ 想只改轨道色又不碰滑块色，走不通，必须自己把 thumb 色也写上。
+ *
+ * ── 实现口径（与老项目的关系要说清楚）──────────────────────────────────────
+ *   老项目 notesync/index.html 全文只有 426-427 两行：
+ *     #editor::-webkit-scrollbar{width:8px}
+ *     #editor::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+ *   `git log -S` 双仓均查不到 `::-webkit-scrollbar-track` / `scrollbar-color`。
+ *   ⇒ **老项目轨道色同样 100% 由 UA + 系统主题决定**，它没解决 Windows 深色下的问题，
+ *      只是用户在老项目上看到的是白色（可能老项目当时跑在系统浅色主题下，
+ *      或浏览器对同一页面用了不同的 UA 默认值）。
+ *   本条是**有意的、必须记录的偏离**：不再把轨道色交给系统。
+ *   规则值用页面自己的 `--line` 令牌，日夜自动跟随，不硬编码任何颜色字面量
+ *   （本仓 ui-contract 有机械扫描，加字面量会红）。
+ *
+ * ── 为什么这条判据不是恒真 ────────────────────────────────────────────────
+ *   · 正向闸：日夜两态都要求 track 的 computed backgroundColor 精确等于 `--line` 的计算值。
+ *     改实现前它们是 `rgba(0,0,0,0)`（= 未声明），判据**红**。
+ *   · 反向闸 A：color-scheme 三行（meta 单值 light / :root light / body.dark dark）必须仍在。
+ *     防止有人为了修本条把夜间那条修复一起回退掉。
+ *   · 反向闸 B：`.ns-rem-wheel` 的 `scrollbar-width:none` + `::-webkit-scrollbar{display:none}`
+ *     必须仍在 —— 时间滚轮是**故意不显示滚动条**的，别被这条规则误伤。
+ *   · 反向闸 C：`.ns-editor` 的 `width:8px` + `thumb:var(--line)` 必须逐字仍在（滑块不许变粗变色）。
+ *   · 变异分层：除了「删掉整条规则」，还要验「只删 track 声明」与「把值改成硬编码字面量」
+ *     两种更隐蔽的变异也能转红 —— 后者会被 ui-contract 之外的路径放过，只靠本条抓。
+ */
+test('VVW-33 🔴🔴🔴 日夜两态滚动条轨道必须显式定色为 --line（用户实机日间黑槽）', async () => {
+  /**
+   * 在页面里量三样东西，全部走真浏览器 computedStyle。
+   * 🔴 被序列进页面的函数必须**自包含**，不能引用外部作用域（本文件头纪律）。
+   */
+  const readScrollbar = (sels) => {
+    const norm = (c) => {
+      const s = String(c).trim();
+      // 🔴 getPropertyValue 对**自定义属性**返回的是**原始字面量**（"#ECEAE2"），
+      //   不像 getComputedStyle 的计算值那样是 rgb() —— 本文件头纪律第 1 条。
+      //   三种写法都要认，否则前置闸会拿 "#ECEAE2" 去比 "rgb(236,234,226)" 而假红。
+      const hex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+      if (hex) {
+        let h6 = hex[1];
+        if (h6.length === 3) h6 = h6.split('').map((c) => c + c).join('');
+        return `rgb(${parseInt(h6.slice(0, 2), 16)}, ${parseInt(h6.slice(2, 4), 16)}, ${parseInt(h6.slice(4, 6), 16)})`;
+      }
+      const m = s.match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)\s*(?:[,/]\s*([\d.]+)\s*)?\)$/);
+      if (!m) return s;
+      const a = m[4] === undefined ? 1 : Number(m[4]);
+      return a === 1
+        ? `rgb(${Math.round(+m[1])}, ${Math.round(+m[2])}, ${Math.round(+m[3])})`
+        : `rgba(${Math.round(+m[1])}, ${Math.round(+m[2])}, ${Math.round(+m[3])}, ${Number(a.toFixed(3))})`;
+    };
+    const lineVar = norm(getComputedStyle(document.documentElement).getPropertyValue('--line'));
+    const out = { lineVar, targets: [] };
+    for (const sel of sels) {
+      const el = document.querySelector(sel);
+      if (!el) { out.targets.push({ sel, missing: true }); continue; }
+      let track = null, thumb = null, wkWidth = null, sbColor = null, wheelDisplay = null;
+      try { track = norm(getComputedStyle(el, '::-webkit-scrollbar-track').backgroundColor); }
+      catch (e) { track = `ERR:${String(e && e.message)}`; }
+      try { thumb = norm(getComputedStyle(el, '::-webkit-scrollbar-thumb').backgroundColor); }
+      catch (e) { thumb = `ERR:${String(e && e.message)}`; }
+      try { wkWidth = getComputedStyle(el, '::-webkit-scrollbar').width || null; }
+      catch (e) { wkWidth = `ERR:${String(e && e.message)}`; }
+      const own = getComputedStyle(el);
+      sbColor = own.scrollbarColor;
+      wheelDisplay = own.scrollbarWidth;
+      out.targets.push({ sel, missing: false, track, thumb, wkWidth, sbColor, wheelDisplay });
+    }
+    return out;
+  };
+
+  // 🔴 覆盖**全部**会滚的容器。多写几个无害（missing 时下面会 fail 并报出选择器），
+  //   少写一个就等于给那个容器留了无保护的口子 —— 这正是上一轮漏掉的原因。
+  //
+  // 🔴🔴 选择器**全部来自真浏览器实测**（一次性探针扫过每个视图的 querySelectorAll），
+  //   不是照着 styles.css 的类名想当然写的。我第一版凭印象写成了
+  //   `#remCardList` / `#remBoxList` —— 真实类名是 `.ns-remcard-list` / `.ns-rem-list`，
+  //   前置闸立刻抓红。同批还纠正了另两处：`.list-scroll` 要进二级视图才有，
+  //   `.hist-preview` 要真有历史版本才有。
+  //   ⇒ 分两组：OPEN_IN_MENU 是**首页就能量到**的；其余走 DEEP 组（开对应面板后量）。
+  const TRACK_TARGETS = [
+    '.ns-editor',        // :596  正文编辑器（老项目唯一显式定过 scrollbar 的容器）
+    '#menuMainView',     // :947  菜单主视图
+    '.ns-remcard-list',  // :1329 提醒卡片列表
+    '.ns-rembox',        // :1353 提醒面板
+    '.ns-rem-list',      // :1416 提醒列表
+  ];
+
+  // 需要额外入口才出现在 DOM 的容器。逐个写清入口，缺入口时判据 fail 而不是静默跳过。
+  const DEEP_TARGETS = [
+    { sel: '.list-scroll', open: '菜单 → 收藏笔记', hint: 'menu.ts:348/414 二级视图' },
+    { sel: '.hist-preview', open: '菜单 → 历史版本（且该笔记真有历史版本）', hint: 'menu.ts:406' },
+  ];
+
+  const cases = [
+    { label: '日间（钉 10:00）', iso: new Date('2026-07-15T10:00:00'), wantDark: false },
+    { label: '夜间（钉 22:00）', iso: new Date('2026-07-15T22:00:00'), wantDark: true },
+  ];
+
+  for (const c of cases) {
+    const page = await openEditorAt(h.browser(), h.baseUrl(), 'vvw33', 'pw', { iso: c.iso });
+    try {
+      await page.waitForSelector('#editor-host', { state: 'attached', timeout: 15_000 });
+      await withTimeout(
+        page.waitForFunction(
+          (d) => document.body.classList.contains('dark') === d, c.wantDark, { timeout: 8000 },
+        ),
+        10_000,
+        `等${c.label}主题落定`,
+      );
+
+      // 菜单容器要打开菜单才在 DOM 里；打不开就直接 fail，不静默跳过。
+      await page.evaluate(() => {
+        const btn = document.getElementById('menuBtn');
+        if (btn) btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await page.waitForTimeout(400);
+
+      // 🔴 二级视图（收藏/历史）里的 .list-scroll 只有进去才有。
+      //   实测入口是菜单项「收藏笔记」，menu.ts 的 openView('fav') 走这里。
+      //   进不去就 fail —— 判据静默跳过 = 少一个容器的保护网。
+      const deepOpened = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('#menuMainView .menu-item'));
+        const fav = rows.find((r) => (r.textContent || '').includes('收藏'));
+        if (!fav) return { ok: false, why: '菜单里没有「收藏」项' };
+        fav.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return { ok: true };
+      });
+      await page.waitForTimeout(400);
+      const deepSels = ['.list-scroll'];
+      if (deepOpened.ok) {
+        const deepHas = await page.evaluate((s) => document.querySelectorAll(s).length, '.list-scroll');
+        if (deepHas === 0) deepSels.length = 0; // 收藏夹为空时不渲染容器，由断言 4 的声明层兜住
+      }
+
+      const got = await page.evaluate(readScrollbar, [...TRACK_TARGETS, ...deepSels]);
+
+      // 🔴 断言 0（前置闸，不然后面全是恒真）：主题必须真的切了，且 --line 随之变化。
+      //   只断言 isDark 不够 —— 若 applyThemeVars 没跟着换 --line，下面的"精确等于"会假绿。
+      const wantLine = c.wantDark ? 'rgb(36, 36, 40)' : 'rgb(236, 234, 226)';
+      assert.equal(
+        got.lineVar, wantLine,
+        `${c.label}：--line 的计算值应为 ${wantLine}（theme.ts PALETTE.`
+        + `${c.wantDark ? 'dark' : 'light'}.line）。实际="${got.lineVar}" —— `
+        + `若这里就红，说明主题令牌没落定，下面所有"轨道等于 --line"的断言都不可信`,
+      );
+
+      // 🔴 断言 1（正向闸，承重）：每个滚动容器的 track 都必须显式等于 --line。
+      for (const t of got.targets) {
+        assert.ok(!t.missing, `${c.label}：判据选择器 "${t.sel}" 在页面上不存在 —— `
+          + `容器被改名/挪走时这条判据会**静默失去保护**，必须先更新判据再改实现`);
+      }
+
+      const WHEEL = '.ns-rem-wheel';
+      for (const t of got.targets) {
+        // 🔴🔴 反向闸 B 优先：时间滚轮是**故意**隐藏滚动条的，不能被轨道色规则改掉。
+        if (t.sel === WHEEL) {
+          assert.equal(
+            t.wheelDisplay, 'none',
+            `${c.label}：.ns-rem-wheel 必须仍是 scrollbar-width:none（老项目 :236 逐字同款，`
+            + `时间滚轮故意不画滚动条）。实际="${t.wheelDisplay}"`,
+          );
+          continue;
+        }
+
+        assert.equal(
+          t.track, wantLine,
+          `${c.label}：${t.sel} 的 ::-webkit-scrollbar-track 背景必须显式等于 --line`
+          + `（${wantLine}），不能交给 UA + 系统主题 —— Windows 深色系统主题下 UA 会给黑槽，`
+          + `这正是用户实机截图里的那条。实际="${t.track}"`
+          + `${t.track === 'rgba(0, 0, 0, 0)' ? '（rgba(0,0,0,0) = 完全没声明，靠 UA 决定）' : ''}`,
+        );
+      }
+
+      // 🔴 断言 2（反向闸 A）：color-scheme 三行必须仍在。
+      //   本条修的是"轨道色不确定"，**不能**为此把 VVW-29 那条夜间修复回退掉 ——
+      //   两条是并存的：color-scheme 管表单控件/UA 默认，track 声明管轨道本身。
+      const cs = await page.evaluate(() => {
+        const meta = document.querySelector('meta[name="color-scheme"]');
+        const html = getComputedStyle(document.documentElement).colorScheme;
+        const body = getComputedStyle(document.body).colorScheme;
+        return { meta: meta ? meta.getAttribute('content') : null, html, body };
+      });
+      assert.equal(
+        cs.meta, 'light',
+        `${c.label}：meta[name=color-scheme] 必须仍是单值 light（老项目 :14 原文）。`
+        + `本条只补轨道色，不许改它。实际="${cs.meta}"`,
+      );
+      // 🔴 我第一版把 :root 也断言成"夜间 = dark"，判据红。查老项目才发现：
+      //   notesync/index.html:80  `:root { color-scheme: light }`  ← **只有这一条，永不改**
+      //   notesync/index.html:92  `body.dark { color-scheme: dark }` ← 夜间只落在这里
+      //   ⇒ :root 的 color-scheme 是**两态都 light**，这是老项目的原样。
+      //   bj 的 styles.css:1214-1215 与之逐字一致，本条不许改它。
+      assert.equal(
+        cs.html, 'light',
+        `${c.label}：:root 的 color-scheme 必须恒为 light（老项目 :80 原文，`
+        + `夜间只由 body.dark 接管，:root 不动）。实际="${cs.html}"`,
+      );
+      assert.equal(
+        cs.body, c.wantDark ? 'dark' : 'light',
+        `${c.label}：body 的 color-scheme 应为 "${c.wantDark ? 'dark' : 'light'}"。`
+        + `实际="${cs.body}"`,
+      );
+
+      // 🔴 断言 3（反向闸 C）：.ns-editor 的滑块不许被顺带改粗或改色。
+      //   老项目 426-427 逐字：width:8px + thumb:var(--line) + radius:4px。
+      const ed = got.targets.find((t) => t.sel === '.ns-editor');
+      assert.equal(
+        ed.wkWidth, '8px',
+        `${c.label}：.ns-editor 的 ::-webkit-scrollbar 宽度必须是 8px（老项目 :426 逐字）。`
+        + `本条只补 track，不许动 width。实际="${ed.wkWidth}"`,
+      );
+      assert.equal(
+        ed.thumb, wantLine,
+        `${c.label}：.ns-editor 的 ::-webkit-scrollbar-thumb 必须是 var(--line)`
+        + `（${wantLine}，老项目 :427 逐字）。实际="${ed.thumb}"`,
+      );
+
+      // 🔴 断言 4（组二 · 样式表声明层）：那些**打不开的面板**容器
+      //   （彩蛋图鉴 #eggList、游戏镜像 .ns-mirror-box、时间滚轮 .ns-rem-wheel）
+      //   在 e2e 里没有可达入口，覆盖不到就等于留了无保护的口子。
+      //   ⇒ 这一组直接读**产物里内联的 CSS 文本**，按选择器逐条查有没有 track 声明。
+      //   ⚠️ 只对**伪元素**用文本匹配是安全的：`::-webkit-scrollbar-track` 只可能来自
+      //      样式表，不像普通属性那样被 specificity 吃回（这条已在声明层验证过可读且敏感）。
+      const cssText = await page.evaluate(() => {
+        // 产物把 CSS 内联在 <style> 里（无外链 .css，见 build.mjs indexHtml）
+        return Array.from(document.querySelectorAll('style'))
+          .map((s) => s.textContent || '').join('\n');
+      });
+      // 按 CSS 规则块切开，逐块找选择器与声明。不用正则硬啃整个文件 ——
+      // 「选择器里带逗号」和「声明里带 }」都会让朴素正则错切。
+      const rules = [];
+      {
+        // 🔴 去注释，否则注释里写的 ::-webkit-scrollbar-track 会被当成真声明。
+        const stripped = cssText.replace(/\/\*[\s\S]*?\*\//g, '');
+        let depth = 0, buf = '', i = 0;
+        for (; i < stripped.length; i++) {
+          const ch = stripped[i];
+          if (ch === '{') { depth++; buf += ch; }
+          else if (ch === '}') { depth--; buf += ch; if (depth === 0) { rules.push(buf); buf = ''; } }
+          else buf += ch;
+        }
+        if (buf.trim()) rules.push(buf);
+      }
+// 🔴🔴 为什么**不接受** `*::-webkit-scrollbar-track`：
+      //   通配规则确实能覆盖全部容器，但代价是 —— 以后谁新增一个滚动容器，
+      //   哪怕完全忘了这条规则，也照样"有保护"（全局规则命中它）。
+      //   那样这条断言就失去了"逐个钉住"的意义，退化成恒真。
+      //   ⇒ 实现里用**逐选择器显式列出**的规则，判据才认。
+      //   （这也正是 styles.css 那段注释要求逐个列出的原因，两边是对偶的。）
+      const hasTrackDecl = (sel) => {
+        const wanted = sel.split(',').map((s) => s.trim()).filter(Boolean);
+        for (const raw of rules) {
+          const open = raw.indexOf('{');
+          if (open < 0) continue;
+          const sels = raw.slice(0, open);
+          const body = raw.slice(open + 1, raw.lastIndexOf('}'));
+          if (!/::\s*-webkit-scrollbar-track/.test(sels)) continue;
+          if (!/(^|[;{\s])background(-color)?\s*:/.test(body)) continue;
+          const parts = sels.split(',').map((s) => s.replace(/\s+/g, ' ').trim());
+          for (const want of wanted) {
+            const w = want.replace(/\s+/g, ' ').trim();
+            if (parts.some((p) => p === w || p === `${w}::-webkit-scrollbar-track`)) return true;
+          }
+        }
+        return false;
+      };
+
+      for (const sel of ['#eggList', '.ns-mirror-box', '.list-scroll', '.hist-preview', '.ns-remcard-list', '.ns-rem-list', '.ns-rembox', '#menuMainView', '.ns-editor']) {
+        assert.ok(
+          hasTrackDecl(sel),
+          `${c.label}：样式表里 ${sel} 缺 ::-webkit-scrollbar-track 的 background 声明 —— `
+          + `这些容器（尤其 #eggList / .ns-mirror-box）e2e 打不开，声明层是它们唯一的保护网。`
+          + `缺了 = Windows 深色系统主题下会画成黑槽，而没有任何判据会红。`,
+        );
+      }
+
+      // 🔴 断言 5（反向闸 B · 声明层）：.ns-rem-wheel 必须继续隐藏滚动条。
+      //   顶部那条轨道色规则是全局的（命中所有 ::-webkit-scrollbar-track），
+      //   很容易顺手把这条也"统一"掉 ⇒ 时间滚轮会凭空多出一条轨道。
+      const wheelRules = rules.filter((r) => r.includes('.ns-rem-wheel'));
+      assert.ok(
+        wheelRules.some((r) => /scrollbar-width\s*:\s*none/.test(r)),
+        `${c.label}：.ns-rem-wheel 必须仍有 scrollbar-width:none（老项目 :236 逐字同款）。`
+        + `样式表实测没找到这条声明。`,
+      );
+      assert.ok(
+        wheelRules.some((r) => /::-webkit-scrollbar\s*\{[^}]*display\s*:\s*none/.test(r)),
+        `${c.label}：.ns-rem-wheel 必须仍有 ::-webkit-scrollbar{display:none}。`
+        + `样式表实测没找到这条声明。`,
+      );
+    } finally {
+      await page.close();
+    }
   }
 });

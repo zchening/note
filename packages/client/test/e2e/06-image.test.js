@@ -572,3 +572,173 @@ test('IMG-09 🔴 桌面点图片直接开查看器，不弹长按菜单（老�
     await page.close();
   }
 });
+
+/* ================================================================== *
+ * 退格删图：把「bj 现有行为」钉住
+ * ================================================================== */
+
+/**
+ * IMG-10~12 为什么存在 —— 这是一条**反向结论的守卫**，不是新功能判据。
+ *
+ * 老项目 index.html:4586-4621 有一段 `imgBeforeCaret` + keydown 接线，
+ * 专门处理「光标在**行内** `<img>` 右侧按退格 → 删掉整张图」。
+ * 差异盘点时把这条列为 bj 的 P1 缺口（"bj 无任何 registerBackspace"）。
+ *
+ * 🔴 真浏览器实测（2026-10-07 探针，四个位置逐一定位）结论是**不适用，不要移植**：
+ *   老项目的图片是**裸行内 `<img>`**（直接 `range.insertNode(img)` 插进文本流）；
+ *   bj 的图片是 `ImageBlockNode extends DecoratorNode` 且 `isInline(): false`，
+ *   **永远独占一个块**。所以"光标紧贴图片右侧"这个形态在 bj **构造不出来**，
+ *   而块级 decorator 的退格行为由 Lexical 内建（rich-text 的
+ *   KEY_BACKSPACE_COMMAND → DELETE_CHARACTER_COMMAND）已经处理得很好：
+ *     图在文末（光标是块光标）→ 一次退格删图
+ *     图后有文字段，光标落在该段行首 → 一次退格删图
+ *     点图片选中（NodeSelection）→ 一次退格删图
+ *     图后有**空段落** → 第一次退格收掉空段落并选中图片，第二次删图（教科书行为）
+ *
+ * ⇒ 照抄 `imgBeforeCaret` 只会得到一段**永不命中**的死代码
+ *   （与 `window.__NOTESYNC_NATIVE__` 那次同形状：声明在、判定永不成立）。
+ *
+ * 但这三条判据必须留下：将来谁若改了节点模型（比如把图片改成 inline），
+ *   或 Lexical 升级改了 decorator 的退格语义，"删不掉图"会**零报错**地回归，
+ *   而届时没人会想起当年为什么判定不用做。
+ */
+
+/**
+ * 等到真源里图块数变成 `want`。
+ *
+ * 🔴🔴 不能用固定 `waitForTimeout`：编辑器是 debounce 写真源，固定等待在慢机器上
+ *   读到的是**还没落盘的真源**。第一次跑 IMG-12 就是这么红的 ——
+ *   报出来像"删除没持久化"，差点让人去改产品代码（20-empty-para.test.js 记过同款）。
+ *   等条件：真 bug 会超时并报清楚，慢机器会自己多等一会儿。
+ */
+const waitImgCount = (page, want, label) =>
+  withTimeout(
+    page.waitForFunction(
+      (w) => {
+        const d = window.__NOTESYNC_DOC__?.();
+        if (!d || typeof d !== 'object') return false;
+        return (d.blocks ?? []).filter((b) => b.t === 'img').length === w;
+      },
+      want,
+      { timeout: 15_000 },
+    ),
+    18_000,
+    label,
+  );
+
+test('IMG-10 🔴🔴 图在文末：一次退格就删掉整张图', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'i10', 'pw');
+  try {
+    await installFakeCloud(page);
+    await page.click('.ns-editor');
+    await page.keyboard.type('AAA');
+    await attachImage(page);
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('#uploadNote')?.dataset.kind === 'ok', { timeout: 15000 }),
+      20000, '等上传成功',
+    );
+    await page.waitForTimeout(600);
+    const before = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((before.blocks || []).filter((b) => b.t === 'img').length, 1, '前置：应有一张图');
+
+    await page.keyboard.press('Backspace');
+    await waitImgCount(page, 0, 'IMG-10 等真源里图块数到 0');
+
+    const after = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((after.blocks || []).filter((b) => b.t === 'img').length, 0,
+      `文末的图应被一次退格删掉，实际=${JSON.stringify(after.blocks)}`);
+    assert.equal(await page.evaluate(() => document.querySelectorAll('.ns-img').length), 0, 'DOM 里也不该再有图');
+    // 反向：正文不能被顺手吃掉
+    const txt = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent || '');
+    assert.match(txt, /AAA/, `删图不该吃掉正文，实际="${txt}"`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('IMG-11 🔴🔴 图后有文字段：光标落在该段行首，一次退格删图', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'i11', 'pw');
+  try {
+    await installFakeCloud(page);
+    await page.click('.ns-editor');
+    await attachImage(page);
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('#uploadNote')?.dataset.kind === 'ok', { timeout: 15000 }),
+      20000, '等上传成功',
+    );
+    await page.waitForTimeout(600);
+    await page.keyboard.type('CCC');
+    await page.waitForTimeout(400);
+    // 光标移到 CCC 行首（Home 在本编辑器里能落到段首）
+    await page.keyboard.press('Home');
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Backspace');
+    await waitImgCount(page, 0, 'IMG-11 等真源里图块数到 0');
+
+    const after = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((after.blocks || []).filter((b) => b.t === 'img').length, 0,
+      `图后段落行首退格应删掉图，实际=${JSON.stringify(after.blocks)}`);
+    // 反向：后一段的文字必须原样留下（删的是图，不是那一行）
+    const txt = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent || '');
+    assert.match(txt, /CCC/, `删图不该吃掉后一段文字，实际="${txt}"`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('IMG-12 🔴🔴 图后是空段落：两次退格删掉图，且删除结果能持久化（重载后不复活）', async () => {
+  // 🔴 这一条刻意**不**走"点图片选中"：桌面点图片会打开查看器（IMG-09 已断言），
+  //   退格落在查看器上而不是编辑器 —— 那不是"删不掉图"，是另一条路径。
+  //   真实用户在这里的形态是：插图后系统留了一个空段落，光标就在那个空段落里按退格。
+  //   教科书行为：**第一次**退格收掉空段落并选中图片，**第二次**删图。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'i12', 'pw');
+  try {
+    await installFakeCloud(page);
+    await page.click('.ns-editor');
+    await page.keyboard.type('BBB');
+    await attachImage(page);
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('#uploadNote')?.dataset.kind === 'ok', { timeout: 15000 }),
+      20000, '等上传成功',
+    );
+    await page.waitForTimeout(600);
+    // 打一个字再删掉它 ⇒ 稳定造出"图 + 后面的空段落、光标在空段落"这个形态
+    await page.keyboard.type('Z');
+    await page.waitForTimeout(400);
+    await page.keyboard.press('Backspace');
+    await page.waitForTimeout(400);
+    const pre = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((pre.blocks || []).filter((b) => b.t === 'img').length, 1, '前置：此时图应还在');
+
+    await page.keyboard.press('Backspace'); // 收掉空段落、选中图
+    await page.waitForTimeout(300);
+    await page.keyboard.press('Backspace'); // 删图
+    await waitImgCount(page, 0, 'IMG-12 等真源里图块数到 0');
+
+    const after = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((after.blocks || []).filter((b) => b.t === 'img').length, 0,
+      `两次退格后应删掉图，实际=${JSON.stringify(after.blocks)}`);
+    // 反向：正文不能被顺手吃掉
+    const txt = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent || '');
+    assert.match(txt, /BBB/, `删图不该吃掉正文，实际="${txt}"`);
+
+    // 🔴 持久化是另一半：只删 DOM 不写真源 ⇒ 重载后图"复活"，
+    //   用户以为删掉了，隔天打开又在那儿。
+    await page.reload();
+    await page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20000 });
+    // 重载要走解密 + 拉远端 + 写真源，等"真源可读"而不是等固定秒数
+    await withTimeout(
+      page.waitForFunction(() => {
+        const d = window.__NOTESYNC_DOC__?.();
+        return !!d && typeof d === 'object' && Array.isArray(d.blocks) && d.blocks.length > 0;
+      }, { timeout: 20_000 }),
+      24_000,
+      'IMG-12 等重载后真源就绪',
+    );
+    const reloaded = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.equal((reloaded.blocks || []).filter((b) => b.t === 'img').length, 0,
+      `重载后不该复活，实际=${JSON.stringify(reloaded.blocks)}`);
+  } finally {
+    await page.close();
+  }
+});

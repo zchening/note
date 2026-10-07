@@ -576,6 +576,48 @@ export function docToLexical(doc: Doc): void {
 }
 
 /**
+ * 🔴🔴 **局部**替换根节点下的若干块，其余块**一个节点都不碰**。
+ *
+ * 存在的唯一理由：用户报障第 7 条「打字时换行或正在打的字被吞」。
+ * `docToLexical` 是 `root.clear()` + 整篇重建 —— 每敲一个字、
+ * 只要提醒对账算出标记有变化，就销毁全文 DOM（见 reminder/local-mark.ts 文件头）。
+ *
+ * 🔴🔴🔴 **为什么这个函数对判错位置零容错**：
+ *   `indexes` 是**顶层下标**，指向 root 的直接子节点。
+ *   越界 / 传空 / 长度不符都必须**抛错而不是静默跳过** ——
+ *   静默跳过的症状是"下划线没铺上但没有任何报错"，而调用方
+ *   （main.ts 对账路径）拿不到信号就会以为已经处理完了。
+ *   宁可整篇重建（那条路永远正确），也不要静默错位。
+ *
+ * @param indexes 顶层块下标（升序）
+ * @returns 实际替换了几块（与 indexes.length 必须相等，否则说明有块是空的、没被 append）
+ */
+export function replaceBlocksAt(doc: Doc, indexes: readonly number[]): number {
+  const remIds = new Set((doc.reminders ?? []).map((r) => r.id));
+  const root = $getRoot();
+  const kids = root.getChildren();
+  const blocks = doc.blocks ?? [];
+  if (indexes.length === 0) return 0;
+  // 🔴 先整批校验再动手：绝不做"改到一半才发现后面的下标越界"
+  for (const i of indexes) {
+    if (!Number.isInteger(i) || i < 0 || i >= kids.length) {
+      throw new Error(`replaceBlocksAt: 下标 ${i} 越界（root 有 ${kids.length} 个顶层块）`);
+    }
+    if (i >= blocks.length) {
+      throw new Error(`replaceBlocksAt: 下标 ${i} 越界（doc 只有 ${blocks.length} 个块）`);
+    }
+  }
+  let done = 0;
+  for (const i of indexes) {
+    const n = blockToNode(blocks[i]!, remIds);
+    if (!n) continue; // 空块：留在原地，不动
+    kids[i]!.replace(n);
+    done += 1;
+  }
+  return done;
+}
+
+/**
  * Lexical 状态 → 模型 JSON。
  *
  * 🔴 整段遍历必须包在 state.read() 回调**内部**：

@@ -98,8 +98,17 @@ async function seal(d, dk = SHARED_DK) {
  * 搭一个受控 SyncClient。
  * @param opts.doc 本地初始文档（用一个可变的 holder，之后可随时改）
  * @param opts.setDoc 替换写回回调（默认写进holder）
+ *
+ * 🔴🔴 **返回的 c 由用例自己负责 stop()**（收尾在用例末尾显式调）。
+ *   起因是 2 秒轮询基线（老项目 index.html:10040 同款）：不 stop 的话，
+ *   轮询会在用例跑完之后继续打 fetch。
+ *   症状极其恶劣 —— 用例 `t.after` 里 clearCache(NOTE) 已经执行完了，
+ *   轮询才把内容推上去、把缓存又写回一版 ⇒ **后一个用例读到的是前一用例的残留**；
+ *   而 fakeFetch 的响应队列按序号取，队列耗尽后返回 undefined，
+ *   pullInner 读 `res.status` 就抛"Cannot read properties of undefined"——
+ *   报错完全指不到被测的东西。这正是 S5-E1/C1/C2/C2b/C3 五条集体变红的真因。
  */
-async function mkClient(handlers, opts = {}) {
+async function mkClient(ctx, handlers, opts = {}) {
   const holder = { doc: opts.doc ?? emptyDoc() };
   const snaps = [];
   const errs = [];
@@ -116,6 +125,9 @@ async function mkClient(handlers, opts = {}) {
     onError: (m) => errs.push(m),
     isOnline: opts.isOnline ?? (() => true),
   });
+  // 🔴🔴 用 t.after 而不是让每条用例自己记得调 stop() ——
+  //   手写 17 次必漏，而漏掉的后果**不是报错**，是下一个用例读到上一用例的残留。
+  ctx.after(() => c.stop());
   return { c, doc: () => holder.doc, setDoc: (d) => { holder.doc = d; }, snaps, errs };
 }
 
@@ -124,9 +136,9 @@ const settle = () => new Promise((r) => setTimeout(r, 950));
 
 /* ---------------- N1 网络层失败 ---------------- */
 
-test('S5-N1 fetch reject → offline，且本地文档一字不少', async () => {
+test('S5-N1 fetch reject → offline，且本地文档一字不少', async (tc) => {
   globalThis.fetch = fakeFetch([new Error('network down')]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   // 模拟"我刚打完字"：本地有内容，base 还是空的
   t.setDoc(docOf('我写的字'));
   await t.c.start();
@@ -134,10 +146,10 @@ test('S5-N1 fetch reject → offline，且本地文档一字不少', async () =>
   assert.deepEqual(textsOf(t.doc()), ['我写的字'], '🔴 网络失败绝不能清空本地文档');
 });
 
-test('S5-N1b navigator 报离线时连 fetch 都不该发', async () => {
+test('S5-N1b navigator 报离线时连 fetch 都不该发', async (tc) => {
   const h = fakeFetch([ok('')]);
   globalThis.fetch = h;
-  const t = await mkClient([], { isOnline: () => false });
+  const t = await mkClient(tc, [], { isOnline: () => false });
   await t.c.start();
   assert.equal(t.c.getState(), 'offline');
   assert.equal(h.calls.length, 0, '已知离线还发请求 = 白等一个超时');
@@ -145,9 +157,9 @@ test('S5-N1b navigator 报离线时连 fetch 都不该发', async () => {
 
 /* ---------------- N2 200 + 空体 ---------------- */
 
-test('S5-N2 200+空体 → 当作新笔记，不报错', async () => {
+test('S5-N2 200+空体 → 当作新笔记，不报错', async (tc) => {
   globalThis.fetch = fakeFetch([ok('')]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   await t.c.start();
   assert.equal(t.c.getState(), 'idle', '空体应判定为"服务端无此笔记"');
   assert.deepEqual(t.errs, [], '空体不是错误，不该弹提示');
@@ -155,12 +167,12 @@ test('S5-N2 200+空体 → 当作新笔记，不报错', async () => {
 
 /* ---------------- N3 解密失败 ---------------- */
 
-test('S5-N3 解密失败 → 同一句文案，不区分口令错/数据坏', async () => {
+test('S5-N3 解密失败 → 同一句文案，不区分口令错/数据坏', async (tc) => {
   // 用**另一把**密钥加密，模拟"口令不对"（客户端持有的是 SHARED_DK）
   const wrongDk = await deriveKey('口令不对');
   const env = await seal(docOf('远端内容'), wrongDk);
   globalThis.fetch = fakeFetch([ok(env)]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   await t.c.start();
   assert.equal(t.c.getState(), 'offline', '解不开应停在 offline');
   assert.equal(t.errs.length, 1, `应恰好一条错误提示，实际 ${t.errs.length}`);
@@ -170,9 +182,9 @@ test('S5-N3 解密失败 → 同一句文案，不区分口令错/数据坏', as
 
 /* ---------------- N4 推送失败不清 dirty ---------------- */
 
-test('S5-N4 推送失败 → 停在 offline，绝不回idle', async () => {
+test('S5-N4 推送失败 → 停在 offline，绝不回idle', async (tc) => {
   globalThis.fetch = fakeFetch([ok(''), new Error('post failed')]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   await t.c.start();          // GET 空体 → pulled → idle
   t.setDoc(docOf('本地字'));
   t.c.noteEdit();             // → dirty
@@ -182,10 +194,10 @@ test('S5-N4 推送失败 → 停在 offline，绝不回idle', async () => {
 
 /* ---------------- N5 去抖 ---------------- */
 
-test('S5-N5 连续打字只推一次（去抖 700ms）', async () => {
+test('S5-N5 连续打字只推一次（去抖 700ms）', async (tc) => {
   const h = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h;
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('abc'));
   await t.c.start();
   for (let i = 0; i < 20; i++) t.c.noteEdit();
@@ -196,27 +208,40 @@ test('S5-N5 连续打字只推一次（去抖 700ms）', async () => {
 
 /* ---------------- N6 远端没动 ---------------- */
 
-test('S5-N6 远端 == base → 本地原样保留（不覆盖）', async () => {
+test('S5-N6 远端 == base → 本地原样保留（不覆盖）', async (tc) => {
   const envBase = await seal(docOf('共同祖先'));
-  globalThis.fetch = fakeFetch([ok(envBase), ok(envBase)]);
-  const t = await mkClient([]);
+  // 🔴 第三条是**这次推送**的响应。缺了它的症状极其费解：
+  //   `merge-clean` 之后会真的发一次 POST（本地确有改动要推），
+  //   而 fakeFetch 按序号取 handler，队列耗尽返回 undefined
+  //   ⇒ push 读 `res.status` 抛 "Cannot read properties of undefined"
+  //   ⇒ 报错指向 push，与"本地有没有被覆盖"八竿子打不着。
+  const h = fakeFetch([ok(envBase), ok(envBase), ok({ ok: true })]);
+  globalThis.fetch = h;
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('共同祖先'));
   await t.c.start();          // 拉一次：本地==base==远端 → pulled，base 填好
 
   t.setDoc(docOf('共同祖先', '本地新增'));
-  await t.c.refresh();        // 再拉：远端仍是 base
+  await t.c.refresh();        // 再拉：远端仍是 base，本地已改 ⇒ merge-clean
   const texts = textsOf(t.doc());
   assert.ok(texts.includes('本地新增'), `本地新增被覆盖了：${JSON.stringify(texts)}`);
   assert.ok(texts.includes('共同祖先'), `原有内容丢了：${JSON.stringify(texts)}`);
+  // 🔴 补一条推送判据：本地有改动 + 远端未变 ⇒ 必须真的推上去。
+  //   只 send('merge-clean') 而不 push 的话，状态会永久停在 pushing
+  //   （去抖定时器只认 dirty），服务端收不到这一版。
+  assert.ok(
+    h.calls.some((c) => c.method === 'POST'),
+    '🔴 本地有改动、远端未变，却没发 POST = merge-clean 之后无人推送（状态永久停在 pushing）',
+  );
 });
 
 /* ---------------- N7 只有远端动 ---------------- */
 
-test('S5-N7 本地 == base、远端变了 → 直接采纳远端', async () => {
+test('S5-N7 本地 == base、远端变了 → 直接采纳远端', async (tc) => {
   const envBase = await seal(docOf('祖先'));
   const envNew = await seal(docOf('祖先', '远端新增'));
   globalThis.fetch = fakeFetch([ok(envBase), ok(envNew)]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('祖先'));
   await t.c.start();
   await t.c.refresh();
@@ -226,11 +251,11 @@ test('S5-N7 本地 == base、远端变了 → 直接采纳远端', async () => {
 
 /* ---------------- N8 两边都动（改不同处） ---------------- */
 
-test('S5-N8 两边改不同处 → 三方合并后推上去', async () => {
+test('S5-N8 两边改不同处 → 三方合并后推上去', async (tc) => {
   const envBase = await seal(docOf('A', 'B', 'C'));
   const envRemote = await seal(docOf('A', 'B', 'C', '远端尾'));
   globalThis.fetch = fakeFetch([ok(envBase), ok(envRemote), ok({ ok: true })]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('A', 'B', 'C'));
   await t.c.start();
 
@@ -247,11 +272,11 @@ test('S5-N8 两边改不同处 → 三方合并后推上去', async () => {
 
 /* ---------------- N9 冲突 ---------------- */
 
-test('S5-N9 两边改同一处 → conflict 态 + 冲突详情可读', async () => {
+test('S5-N9 两边改同一处 → conflict 态 + 冲突详情可读', async (tc) => {
   const envBase = await seal(docOf('原文'));
   const envRemote = await seal(docOf('远端改的'));
   globalThis.fetch = fakeFetch([ok(envBase), ok(envRemote)]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('原文'));
   await t.c.start();
 
@@ -268,9 +293,9 @@ test('S5-N9 两边改同一处 → conflict 态 + 冲突详情可读', async () 
 
 /* ---------------- N10 429 ---------------- */
 
-test('S5-N10 429 → 提示 + offline', async () => {
+test('S5-N10 429 → 提示 + offline', async (tc) => {
   globalThis.fetch = fakeFetch([tooMany()]);
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   await t.c.start();
   assert.equal(t.c.getState(), 'offline');
   assert.match(t.errs[0], /尝试太频繁/);
@@ -278,10 +303,10 @@ test('S5-N10 429 → 提示 + offline', async () => {
 
 /* ---------------- E1 信封与 AAD ---------------- */
 
-test('S5-E1 推上去的是真信封，AAD 用 note 域，载荷里无明文', async () => {
+test('S5-E1 推上去的是真信封，AAD 用 note 域，载荷里无明文', async (tc) => {
   const h = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h;
-  const t = await mkClient([]);
+  const t = await mkClient(tc, []);
   t.setDoc(docOf('密文测试'));
   await t.c.start();
   t.c.noteEdit();
@@ -303,7 +328,7 @@ test('S5-E1 推上去的是真信封，AAD 用 note 域，载荷里无明文', a
   assert.deepEqual(parseDoc(pt), docOf('密文测试'));
 });
 
-test('S5-E2 AAD 域分离：note 密文不能用 meta 域解开', async () => {
+test('S5-E2 AAD 域分离：note 密文不能用 meta 域解开', async (tc) => {
   // 🔴 用途域分离的意义就在这条：否则同一把钥匙下，
   //   "笔记正文"的密文可以被当"口令哨兵"拿去解锁，反之亦然。
   const env = await encryptString('x', SHARED_DK.key, 'note', SHARED_DK);
@@ -324,12 +349,12 @@ test('S5-E2 AAD 域分离：note 密文不能用 meta 域解开', async () => {
  *   没有测试钉住它，下一个人做"重构"时会理所当然地把它删掉。
  * ====================================================================== */
 
-test('S5-C1 推送成功后本地缓存必须更新（断网时不回退到旧内容）', async () => {
+test('S5-C1 推送成功后本地缓存必须更新（断网时不回退到旧内容）', async (tc) => {
   const NOTE = 'cache-note';
   clearCache(NOTE);
   const h = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h;
-  const t = await mkClient([], { noteId: NOTE });
+  const t = await mkClient(tc, [], { noteId: NOTE });
   t.setDoc(docOf('第一版'));
   await t.c.start();
   t.c.noteEdit();
@@ -351,13 +376,13 @@ test('S5-C1 推送成功后本地缓存必须更新（断网时不回退到旧�
   clearCache(NOTE);
 });
 
-test('S5-C2 推送失败时缓存**不许**更新（否则以为存上了）', async () => {
+test('S5-C2 推送失败时缓存**不许**更新（否则以为存上了）', async (tc) => {
   const NOTE = 'cache-fail';
   clearCache(NOTE);
   // 先成功推一版，让缓存有内容
   const h1 = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h1;
-  const t = await mkClient([], { noteId: NOTE });
+  const t = await mkClient(tc, [], { noteId: NOTE });
   t.setDoc(docOf('已存'));
   await t.c.start();
   t.c.noteEdit();
@@ -397,12 +422,12 @@ test('S5-C2 推送失败时缓存**不许**更新（否则以为存上了）', a
   clearCache(NOTE);
 });
 
-test('S5-C2b 🔴🔴 页面卸载前必须把待推内容落本地（老项目 pagehide → flushDirtySave 同款）', async () => {
+test('S5-C2b 🔴🔴 页面卸载前必须把待推内容落本地（老项目 pagehide → flushDirtySave 同款）', async (tc) => {
   const NOTE = 'flush-on-unload';
   clearCache(NOTE);
   const h1 = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h1;
-  const t = await mkClient([], { noteId: NOTE });
+  const t = await mkClient(tc, [], { noteId: NOTE });
   t.setDoc(docOf('起手'));
   await t.c.start();
   t.c.noteEdit();
@@ -435,12 +460,12 @@ test('S5-C2b 🔴🔴 页面卸载前必须把待推内容落本地（老项目 
   clearCache(NOTE);
 });
 
-test('S5-C3 缓存信封的盐与信封一致（换会话能解开自己写的密文）', async () => {
+test('S5-C3 缓存信封的盐与信封一致（换会话能解开自己写的密文）', async (tc) => {
   const NOTE = 'cache-salt';
   clearCache(NOTE);
   const h = fakeFetch([ok(''), ok({ ok: true })]);
   globalThis.fetch = h;
-  const t = await mkClient([], { noteId: NOTE });
+  const t = await mkClient(tc, [], { noteId: NOTE });
   t.setDoc(docOf('盐要对'));
   await t.c.start();
   t.c.noteEdit();
@@ -448,6 +473,54 @@ test('S5-C3 缓存信封的盐与信封一致（换会话能解开自己写的�
   const c = readCache(NOTE);
   assert.equal(c.salt, SHARED_DK.saltB64, '缓存里的盐与实际用的钥匙不配对');
   assert.equal(c.iter, SHARED_DK.iter, '缓存里必须存KDF 迭代数，否则将来调高迭代后老缓存全废');
+  clearCache(NOTE);
+});
+
+test('S5-MC1 远端未变、本地有改动：merge-clean 之后必须真的推一次（不许永久卡在 pushing）', async (tc) => {
+  const NOTE = 'merge-clean-push';
+  clearCache(NOTE);
+  // 🔴🔴 远端必须返回**非空**信封。
+  //   坑：GET 返回空体时 `pullInner` 有"200+空体=新笔记"的短路
+  //   （`send('pulled')` 后直接 return），**根本进不了** `eq(remoteDoc, base)` 这一支
+  //   ⇒ 判据会测到一条永远走不到的路径上，恒绿且毫无意义（我第一版就是这么写的）。
+  // 🔴 用函数型 handler（按 method 分流）而不是按序号的固定序列：
+  //   2 秒轮询会持续打 GET，固定序列很快耗尽 ⇒ 后续 fetch 拿到 undefined ⇒
+  //   报错完全指不到被测的东西（本文件 mkClient 的注释已记过这个坑）。
+  const envBase = await seal(docOf('共同的祖先'));
+  const h = fakeFetch(
+    Array.from({ length: 60 }, () => (url, init) =>
+      init && init.method === 'POST' ? ok({ ok: true }) : ok(envBase)),
+  );
+  globalThis.fetch = h;
+
+  const t = await mkClient(tc, [], { noteId: NOTE });
+  await t.c.start();
+  assert.equal(t.snaps.at(-1), 'idle', '前置：远端为空且本地无改动时应当直接落到 idle');
+
+  // 本地改动（等价用户打字）⇒ dirty，并排了一个 700ms 的去抖推送
+  t.setDoc(docOf('我刚打的字'));
+  t.c.noteEdit();
+  assert.equal(t.snaps.at(-1), 'dirty', '前置：本地改动后应当是 dirty');
+
+  // 🔴🔴 关键一步：**在去抖窗口内**触发一次拉（模拟 SSE 广播 / 2 秒轮询先到一步）。
+  //   dirty --refresh--> syncing ⇒ pull 判「远端 == base 且本地 != base」
+  //   ⇒ send('merge-clean') ⇒ **pushing**。
+  //   病态实现在这一支 send 完就 return，**没有真的 push**；
+  //   而去抖定时器只认 `state === 'dirty'` 才推 ⇒ 状态永久停在 pushing。
+  //   v1.13.0 把三处比较从裸 `canonicalize` 换成 `eq`（normalize 后比较）之后，
+  //   "打字后"必然命中这一支 ⇒ e2e 的 E2E-S2/E2E-S3 直接红。
+  await t.c.refresh();
+
+  // 等过去抖窗口（700ms），看有没有人把这次改动真的推出去
+  await settle();
+
+  const posts = h.calls.filter((c) => c.method === 'POST');
+  assert.ok(
+    posts.length >= 1,
+    '🔴 本地有改动却一个 POST 都没发 = 状态停在 pushing 而无人推送（底栏永远"推送中…"）',
+  );
+  assert.equal(posts.length, 1, `🔴 推了 ${posts.length} 次：一次改动只该推一次`);
+  assert.equal(t.snaps.at(-1), 'idle', `🔴 推完必须回到 idle，实测停在 ${t.snaps.at(-1)}`);
   clearCache(NOTE);
 });
 

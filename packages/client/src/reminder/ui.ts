@@ -22,7 +22,23 @@ import { COPY } from '../ui/copy.ts';
 import { ICON_X } from '../ui/icons.ts';
 import { fmtChipDay, fmtChipTime, fmtLate, fmtRemInsert, itemForChip, matchAtCaret } from '../reminder/format.ts';
 import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
+import { syncRemindersToNative } from './native-rem.ts';
+import type { SyncOutcome } from './native-rem.ts';
+
 import type { Doc } from '@bj/shared-schema';
+/**
+ * 🔴 最近一次原生闹钟同步的结论留存（`?diag` 面板读，见 syncNative 的注释）。
+ *
+ * 🔴 为什么是**模块级单份**而不是挂在 UI 实例上：原生闹钟只有一份，
+ *   面板也只是读"最近一次"，多份留存必然出现分叉（面板读到 A、另一个面板读到 B）。
+ * 纯可观测性，**不参与任何业务判定** —— 删掉它只少两格诊断读数，行为完全不变。
+ */
+let lastNativeOutcome: { note: string; at: number; scheduled: number | null } | null = null;
+
+/** 读最近一次原生同步结论。从没同步过（或非壳内）返回 null ⇒ 诊断渲染成 `n/a`。 */
+export function lastNativeSyncOutcome(): { note: string; at: number; scheduled: number | null } | null {
+  return lastNativeOutcome;
+}
 
 type ReminderDoc = Doc;
 
@@ -477,8 +493,54 @@ export class ReminderUI {
    *
    * 🔴 调度口径：`setTimeout` 到最近那条 + 1 秒，醒来看还有没有到点的。
    *   用 setInterval 轮询会让笔记本休眠醒来后一次性炸出十几张卡。
+   *
+   * 🔴🔴🔴 这里同时把提醒列表**交给原生排精确闹钟**（老项目 `syncRemindersToNative`）。
+   *   为什么必须挂在 `schedule()` 上而不是散到各个 mutator 里：
+   *   bj 的 `schedule()` 已经是「真源变了就重排」的**唯一收口**（面板加、面板删、
+   *   对账增删、setDoc 写回都会经过它），挂在这里就等于**一遍不漏**。
+   *   漏挂的症状是老项目 v5.55 那个 P0：App 退后台或杀进程后到点不响铃，
+   *   而页内定时器那条路（`fire` → 卡片 + 声音）**照样正常** ⇒ 界面上零异常。
    */
   schedule(): void {
+    this.rearm();
+    void this.syncNative();
+  }
+
+  /**
+   * 同步提醒列表到原生闹钟层（App退后台 / 杀进程后到点仍响铃的唯一保障）。
+   *
+   * 🔴 当前笔记名取自 `[data-note]`（`main.ts mountEditor` 写的）。
+   *   与老项目 :7013 的 `skip-no-note` 闸同源：**空笔记名一律跳过**——
+   *   空串在原生侧是 "" 分区，误传会清首页分区却碰不到具名分区的闹钟。
+   *
+   * 🔴 返回值不抛错、也不静默丢弃：`SyncOutcome.note` 能区分
+   *   「没桥」（网页版正常）/「桥抛了」（壳内异常，值得查）两种收场。
+   *
+   * 🔴🔴 结论**顺手留一份给诊断面板**（`lastNativeSyncOutcome`）：
+   *   `schedule()` 用 `void this.syncNative()` 调它，返回值当场丢掉 ——
+   *   于是 `?diag` 第 5 组的 `scheduled` 与第 8 组的 `lastNativeSync` 永远读不到，
+   *   两条读数恒为 `n/a`，等于这一格诊断白给。
+   *   老项目是靠 `window.__remNativeScheduled` / `__lastNativeSync` 两个全局做到的
+   *   （`index.html:2054`）。**留存放在真正产出它的地方**（本模块），
+   *   而不是让 main.ts 包一层 —— 包一层就得把 private 方法改成 public，
+   *   那是为诊断拓宽生产 API，得不偿失。
+   *   纯可观测性留存，不参与任何业务判定。
+   */
+  private async syncNative(): Promise<SyncOutcome> {
+    const noteId = this.currentNoteName();
+    const out = await syncRemindersToNative(this.host.getDoc().reminders ?? [], noteId);
+    lastNativeOutcome = {
+      note: out.note,
+      at: Date.now(),
+      // 🔴 原生没报数时（老壳 / 异常形态）`scheduled` 键不出现 ⇒ 归一成 null。
+      //   "没报数"与"报 0"必须能分辨：后者是"同步了但一条都没排上"。
+      scheduled: out.scheduled ?? null,
+    };
+    return out;
+  }
+
+  /** 只重排页内定时器。定时器自己醒来时走这条（老项目 fireReminder :7551 同款：不重复同步原生）。 */
+  private rearm(): void {
     if (this.timer !== undefined) {
       window.clearTimeout(this.timer);
       this.timer = undefined;
@@ -492,7 +554,9 @@ export class ReminderUI {
     if (up.length === 0) return;
     const next = Math.min(...up.map((r) => Date.parse(r.at)));
     const wait = Math.max(250, Math.min(next - now + 1000, 2147483647));
-    this.timer = window.setTimeout(() => this.schedule(), wait);
+    // 🔴 醒来自调用的是 `rearm` 而不是 `schedule`：老项目 :7551 fireReminder 里
+    //   重新排程**不**带 syncRemindersToNative。跟着做，避免每响一次铃就重排一次原生闹钟。
+    this.timer = window.setTimeout(() => this.rearm(), wait);
   }
 
   /**

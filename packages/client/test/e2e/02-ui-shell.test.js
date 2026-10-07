@@ -125,6 +125,71 @@ test('E2E-UI3 连点 logo 7 次推进皮肤环，覆膜层真的画出来', asyn
   await page.close();
 });
 
+/**
+ * E2E-UI3T 切档反馈气泡（老项目 index.html:1737-1743 `say()` + :1758）
+ *
+ * 🔴🔴 老项目专门留这 1.5s 标签的理由：七连点是**隐蔽彩蛋**，切档后只有左上角
+ *   字标变了（NoteSync → NOTE-SYNC.EXE → N O T E S Y N C），而档位名还写在
+ *   `brand.title`（原生 tooltip）上 —— **触屏没有 hover**，手机用户连点七下后
+ *   唯一能看到的只有"配色变了"，说不出变成了哪一档。
+ *
+ * 🔴 判据挑的是**真浏览器可见性**（`.show` + computed opacity），不读 CSS 文本：
+ *   CSS 里写了规则 ≠ 元素被挂上、≠ class 被加上 —— 本项目在 `.ns-qr-warn`
+ *   上栽过"用了类名 ≠ 样式命中它"。
+ */
+test('E2E-UI3T 🔴🔴 切档必须弹 1.5s 气泡，且首屏绝不弹', async () => {
+  // 反向闸（必须**先**做，用一张干净页）：刚进编辑器时不许有气泡。
+  // 挂在 setSkin() 里就会每次打开笔记先弹 1.5s —— 那是把彩蛋变成骚扰。
+  {
+    const fresh = await openEditorPage('ui3t0');
+    await fresh.waitForTimeout(1800);
+    const shown = await fresh.$('#skinToast.show');
+    assert.equal(shown, null, '首屏绝不许弹切档气泡（setSkin 里不许调 saySkin）');
+    await fresh.close();
+  }
+
+  const page = await openEditorPage('ui3t');
+
+  /** 连点 7 下并等气泡出现，返回气泡文案。 */
+  const tap7 = async () => {
+    for (let i = 0; i < 7; i += 1) await page.click('#brand');
+    await withTimeout(page.waitForSelector('#skinToast.show', { timeout: 5000 }), 8000, '等切档气泡');
+    return page.textContent('#skinToast');
+  };
+
+  // ① 第一格：终端绿
+  assert.equal((await tap7()).trim(), '复古 · 终端绿', '第 1 格气泡文案');
+  // 🔴 必须**真的看得见**：只是 class 加上了而 opacity 还是 0，等于没弹。
+  //   `.show` 到 opacity:1 之间有 0.32s 过渡，所以**等**它到 1，不能立刻读
+  //   （立刻读到的是过渡中间值 0.1，那会让这条判据随机红，
+  //    而"随机红"最容易被误判成不稳定用例直接跳过）。
+  await withTimeout(
+    page.waitForFunction(
+      () => {
+        const el = document.querySelector('#skinToast');
+        return !!el && Number(getComputedStyle(el).opacity) > 0.99;
+      },
+      { timeout: 3000 },
+    ),
+    5000,
+    '等气泡淡入到完全可见',
+  );
+
+  // ② 自动收起（1500ms，老项目 :1742）
+  await withTimeout(
+    page.waitForFunction(() => !document.querySelector('#skinToast.show'), { timeout: 4000 }),
+    6000,
+    '气泡应 1.5s 后自动收起',
+  );
+
+  // ③ 第二格：文案必须**换掉**，不是残留上一句（摘 show → 强制回流 → 加 show 那条）
+  assert.equal((await tap7()).trim(), '复古 · 打字机纸', '第 2 格气泡文案（连续切档也要更新）');
+
+  // ④ 第三格：回到默认
+  assert.equal((await tap7()).trim(), '已恢复默认', '第 3 格气泡文案');
+  await page.close();
+});
+
 test('E2E-UI4 主题随时间规则（19:00-07:00 夜间）', async () => {
   const page = await openEditorPage('uix');
   // 首屏按当前真实时间解析；只断言"变量与 body class 自洽"，

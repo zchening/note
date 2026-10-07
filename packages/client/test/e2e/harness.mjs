@@ -265,7 +265,22 @@ export function withTimeout(p, ms, label) {
 }
 
 export async function launchBrowser() {
-  return withTimeout(chromium.launch(), 60_000, 'chromium.launch');
+  // 🔴🔴 `NOTESYNC_E2E_HEADED=1` 切到**有头**桌面 Chromium。
+  //
+  //   存在的理由（2026-10-07 实锤）：headless Chromium 用的是**自绘 overlay 滚动条**，
+  //   桌面 Chrome 用的是**Windows 原生经典滚动条**（带上下箭头），两者渲染路径
+  //   完全不同。同一条 `::-webkit-scrollbar-track`：
+  //     headless 量到 日间 `255,255,255`（白）
+  //     用户桌面实机看到 日间 **黑色**
+  //   ⇒ 这是一条**测试环境与真实环境分叉**的坑，性质同「headless Lexical 单测绿
+  //   ≠ 真编辑器绿」。凡量"UA 渲染出来的样子"（滚动条、原生控件、系统色），
+  //   **headless 的读数不可信**，必须用这个开关复现。
+  const headed = process.env.NOTESYNC_E2E_HEADED === '1';
+  return withTimeout(
+    chromium.launch(headed ? { headless: false } : {}),
+    60_000,
+    'chromium.launch',
+  );
 }
 
 /** 逐个兜住：任一 close 挂住都不许影响收尾。 */
@@ -291,6 +306,22 @@ export function installHarness(test, { dir, onReady, api }) {
   /** 没传就现造一个：默认就带上内存 API，绝不让用例"默认跑在离线分支上"。 */
   const store = api ?? makeApiStore();
 
+  /**
+   * 🔴 v1.13.0 新增：**在页面任何脚本执行之前**注入的初始化脚本。
+   * 能力（函数）而不是字符串，让调用方能闭包带参数。
+   *
+   * 为什么需要它：有些环境事实只能在页面脚本运行**之前**种下 ——
+   *   最典型的是 `window.Capacitor`（原生桥）。等 goto 完再去 `page.evaluate`
+   *   设它就已经晚了：应用脚本早跑完 boot() 了，判据只能测出一个恒假分支。
+   * 这类"必须在 before 前种"的场景无法用 evaluate 补救，所以必须是钩子。
+   *
+   * 🔴 传给 `browser.newPage()` 之外的页面不生效（本项目所有用例都走 newPage）。
+   */
+  const initScripts = [];
+  const registerInit = (fn) => {
+    if (typeof fn === 'function') initScripts.push(fn);
+  };
+
   test.before(async () => {
     const s = await serveStatic(dir, store);
     base = s.base;
@@ -298,7 +329,7 @@ export function installHarness(test, { dir, onReady, api }) {
     browser = await launchBrowser();
     // 🔴 onReady 可选：多数文件只是要个浏览器 + base，不需要额外装配。
     //   写成必填会让每个文件都塞一个空函数，纯粹是噪音。
-    if (onReady) await onReady({ browser, base });
+    if (onReady) await onReady({ browser, base, registerInit });
   });
 
   test.after(async () => {
@@ -315,6 +346,11 @@ export function installHarness(test, { dir, onReady, api }) {
     browser: () => browser,
     /** 内存 API。用例据此断言"确实推上去了 / 云端确实是这样"。 */
     api: store,
+    /**
+     * 🔴 注册一个"页面脚本执行前"的初始化脚本（见 registerInit 的注释）。
+     * 必须在 test.before 跑完（即用例内第一次 newPage 之前）注册。
+     */
+    addInitScript: registerInit,
   };
 }
 

@@ -167,7 +167,142 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-modal', 'true');
   el.setAttribute('aria-label', COPY.titleMenu);
+  // 🔴🔴🔴 菜单盒 `.box` **必须在这里建一次并常驻**，render() 只换它的 innerHTML。
+  //
+  //   根因（用户报障第 6 条「历史版本→点击预览的时候，页面不要闪一下」，
+  //   2026-10-07 真浏览器 rAF 逐帧实锤，不是推理）：
+  //   此前 render() 走 `el.innerHTML = '<div class="box menu-box">…'` —— 整块重建。
+  //   而 `ui/styles.css:134` 的 `.box` 挂着
+  //     `animation: nsRise .5s cubic-bezier(.2,.7,.3,1) both`
+  //     （from{opacity:0;transform:translateY(10px)}）。
+  //   ⇒ 每点一次预览，`.box` 作为一个**全新元素**重新入场：
+  //     整张菜单在 0.5s 里从透明+下移 10px 淡入上来。
+  //   实测采样（点一次预览，44 帧）：opacity 从 "0" 爬到 "1"，
+  //     其中 13 帧 opacity<0.99、43 帧 transform≠none。
+  //     这就是"闪一下"——不是内容问题，是**盒被重建 ⇒ 入场动画重播**。
+  //
+  //   老项目（index.html:686）`<div class="box" id="menuBox">` 是 **HTML 里常驻的节点**，
+  //   全文没有 `menuBox.innerHTML = ''`；关菜单只 `menuMask.classList.add('hidden')`（:8035），
+  //   预览走 `row.appendChild(box)`（:8512）只加一个子节点 —— **从不碰菜单盒本身**。
+  //   所以老项目的 rise 只在每次真正打开菜单时播一次，state 变化不重播。
+  //
+  //   ⚠️ 与"删掉 .box 的 animation"是两回事：入场动画要留着（老项目 :509 有），
+  //     正解是**盒子常驻 + 只换内容**，让动画有资格只在首次显示时播。
+  //   判据：16-visual-views.test.js 的 VVW-30（零中间帧 + 节点身份）
+  //   与 VVW-31（反向闸：首次打开仍必须播）。
+  //
+  // 🔴 `tabindex="-1"` 不是可选项：没有它 div 不可聚焦，`focus()` 是**静默 no-op**，
+  //   Esc 照样关不掉菜单（e2e VIS-05 实锤）。-1 = 可编程聚焦但**不进 Tab 序列**
+  //   （菜单不该让用户 Tab 进去逐项走）。
+  const box = document.createElement('div');
+  box.className = 'box menu-box';
+  box.tabIndex = -1;
+  el.appendChild(box);
   host.appendChild(el);
+
+  /* ------------------------------------------------------------------ *
+   * 触屏首击兜底 —— 老项目 index.html:7915-7938 `menuTapGuard`
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 病根（老项目 v6.2/v6.3 实测，不是推测）：菜单主视图是
+   *   `#menuMainView{max-height:min(72vh,560px);overflow-y:auto}`（styles.css）
+   *   这样一个**滚动容器**。触屏上手指落下时浏览器先要判"这是不是一次滚动手势"，
+   *   于是**第一次点按的 click 会被吞掉** —— 用户看到的是
+   *   「返回首页要点两次」「点收藏没反应」。
+   *
+   * 🔴 `touch-action: manipulation`（老项目 :437 / bj `.menu-item` 也有）
+   *   **管不了这个**：它只去掉双击缩放那 300ms 延迟，管不了"手势判定吞掉 click"。
+   *   所以必须有这段兜底，靠了 CSS 就等于没修。
+   *
+   * 🔴🔴 兜底的四段时序缺一不可，任何一段漏了都会变成**更坏的 bug**：
+   *   1. `pointerdown` 记起点 → 才知道后面有没有位移；
+   *   2. `pointermove` 超阈值判为滚动 ⇒ 不补（**真在滚动时不许误触发菜单项**，
+   *      漏了这条的症状是"想滚列表却跳进了某篇笔记"）；
+   *   3. `pointerup` 后等 350ms，真实 click 始终没到 ⇒ 补一次 `el.click()`；
+   *   4. 万一迟到的真实 click 后到 ⇒ capture 阶段吞掉（**防一次点击执行两遍**。
+   *      漏了这条的症状是"点一下开了两个弹层 / 发了两次请求"）。
+   *
+   * 🔴 挂在**常驻的 `box`** 上（不是每次 render 后的行）：`box` 全生命周期唯一，
+   *   而 `box.innerHTML` 每次 render 都换 —— 挂在行上等于每换一次视图重新接一次线，
+   *   且二级页的行在 `close()` 时被清空，监听器跟着一起丢。
+   *   （这与"盒子常驻、只换内容"那条修「点预览闪一下」的纪律同源。）
+   */
+  (function tapGuard(): void {
+    /** 位移超过这么多像素就判成滚动手势（老项目原文：10）。 */
+    const MOVE_TOLERANCE_PX = 10;
+    /** 等真实 click 的时长（老项目原文：350ms）。 */
+    const SYNTH_WAIT_MS = 350;
+    /** 补发后吞掉迟到真实 click 的窗口（老项目原文：800ms）。 */
+    const SYNTH_WINDOW_MS = 800;
+    /**
+     * 需要兜底的行。
+     *
+     * 🔴 **比老项目多一个 `.list-row`**：老项目只写 `.menu-item`，但它的收藏夹 /
+     *   历史版本列表同样是滚动容器（`#menuFavList/#menuHistList` 都带 max-height
+     *   + overflow-y，bj 对应 `.list-scroll`），**同一个病根在二级页照样成立**，
+     *   老项目那句是漏了二级页。这里按病根而不是按字面补齐。
+     *   `.list-row` 里没接线的那几种（冲突页的只读行）`click()` 是 no-op，无害。
+     */
+    const ROW_SEL = '.menu-item, .list-row';
+
+    let start: { x: number; y: number } | null = null;
+    let moved = false;
+    let gotClick = false;
+    let synthUntil = 0;
+
+    box.addEventListener(
+      'pointerdown',
+      (e) => {
+        start = { x: e.clientX, y: e.clientY };
+        moved = false;
+        gotClick = false;
+      },
+      true,
+    );
+    box.addEventListener(
+      'pointermove',
+      (e) => {
+        if (!start) return;
+        if (Math.abs(e.clientX - start.x) > MOVE_TOLERANCE_PX) moved = true;
+        if (Math.abs(e.clientY - start.y) > MOVE_TOLERANCE_PX) moved = true;
+      },
+      true,
+    );
+    box.addEventListener(
+      'click',
+      (e) => {
+        // 迟到的真实 click：吞掉，避免与补发的那次重复执行
+        if (Date.now() < synthUntil && e.isTrusted) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+        gotClick = true;
+      },
+      true,
+    );
+    box.addEventListener(
+      'pointerup',
+      (e) => {
+        // 鼠标不兜底（它没有"手势吞 click"这回事）；滚过了也不兜底
+        if (e.pointerType === 'mouse' || moved || !start) return;
+        const target = e.target;
+        const row = target instanceof Element ? target.closest<HTMLElement>(ROW_SEL) : null;
+        if (!row) return;
+        setTimeout(() => {
+          if (gotClick) return;
+          synthUntil = Date.now() + SYNTH_WINDOW_MS;
+          try {
+            row.click();
+          } catch {
+            /* 补发失败也只等于"这次没点到"，不该冒到事件处理器里 */
+          }
+        }, SYNTH_WAIT_MS);
+      },
+      true,
+    );
+  })();
 
   let view: MenuView = 'main';
   let open = false;
@@ -197,10 +332,12 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     //   bj 曾自己加一个 #menuClose，导致收藏夹/历史版本/打开链接三个二级页右上角
     //   都多出一个预期外的 X（用户报障第 4 条）。
     //   现在删掉，退出方式与老项目一致：点遮罩空白 / 按 Esc / 点菜单项。
-    // 🔴 `tabindex="-1"` 不是可选项：没有它div 不可聚焦，`focus()` 是**静默 no-op**，
-    //   Esc 照样关不掉菜单（我第一版就漏了它，测试报`intercepts pointer events`）。
-    //   -1 = 可编程聚焦但**不进 Tab 序列**（菜单不该让用户 Tab 进去逐项走）。
-    el.innerHTML = `<div class="box menu-box" tabindex="-1">${body}</div>`;
+    // 🔴 只换**常驻盒子**的内容，**不碰盒子本身**（老项目 index.html:686 的
+    //   `#menuBox` 是 HTML 常驻节点）。整块 `el.innerHTML = '<div class="box …>'`
+    //   会把盒子重建 ⇒ `.box` 的 `animation: nsRise .5s both`（styles.css:134）
+    //   每帧 state 变化都重播一次 ⇒ 用户看到"页面闪一下"（报障第 6 条）。
+    //   逐帧实测与判据见 buildMenu 里 box 的注释。
+    box.innerHTML = body;
     wire();
     // 🔴🔴 打开后必须把焦点收进菜单，否则**键盘用户按 Esc 关不掉菜单**。
     //   症状（e2e VIS-05 实锤）：`el.addEventListener('keydown')` 里判Esc 关菜单，
@@ -211,8 +348,10 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     //   焦点给到**菜单盒本体**（不是某一行的 tabindex）——行是 div role=button，
     //   聚焦它会让读屏/键盘用户以为直接进入了某一菜单项。
     //   try 包住：极端环境（元素尚未布局）focus 可能抛，抛了不该让整个 open 失败。
+    //   🔴 焦点给常驻盒子（不再 querySelector 重新找）——盒子是同一个对象，
+    //   focus 是幂等的，不会在每次 render 时把焦点弹来弹去。
     try {
-      el.querySelector<HTMLElement>('.menu-box')?.focus({ preventScroll: true });
+      box.focus({ preventScroll: true });
     } catch {
       /* 焦点收不进菜单不该影响菜单本身可用 */
     }
@@ -576,7 +715,13 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     open = false;
     view = 'main';
     el.classList.add('hidden');
-    el.innerHTML = '';
+    // 🔴🔴 只清**盒子的内容**，不拆盒子（老项目 index.html:8035 关菜单只有
+    //   `menuMask.classList.add('hidden')`，全文没有 `menuBox.innerHTML = ''`）。
+    //   🔴 曾经的 `el.innerHTML = ''` 会连常驻的 `.box` 一起摘掉 —— 那样
+    //   下次 open() 时它就是个"全新元素"，`.box` 的 `animation: nsRise .5s both`
+    //   又要重播一遍。用户报障第 6 条「点预览时页面闪一下」修不掉。
+    //   焦点落在已摘节点上的风险也顺带消失（见下面的 onClose 注释）。
+    box.innerHTML = '';
     // 🔴 关掉后必须把焦点**还给编辑器**（老项目红线 10，弹窗/浮层通用纪律）。
     //   打开时我们把焦点收进了菜单（否则 Esc 关不掉，见 render 里的注释），
     //   关闭时若不还回去，焦点就落在一个刚被摘干净的节点上 ——

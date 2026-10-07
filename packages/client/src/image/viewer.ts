@@ -24,15 +24,18 @@
  *      桌面「滚轮缩放 · 双击 1:1 · 点空白关闭」/ 触屏「双指缩放 · 点图片即回笔记」。
  *   ⑤ Esc 只关一层：菜单在场时先关菜单（老项目 nsImgEsc :5513）。
  *
- * 🔴 为什么「保存到相册」在 bj 里走 `<a download>` 而不是老项目那套桥/阶梯：
- *   老项目有 Capacitor 原生桥（ImgSave.saveImageUrl / ImgClip）与四级阶梯，
- *   那些是**壳内**路径；bj 是纯 Web。纯 Web 下真正能落地的只有两条：
- *   浏览器下载、或系统分享面板。两条都给，且**如实告知**结果 ——
- *   浏览器不允许静默落盘时必须让用户看见（这是"静默降级"的红线）。
+ * 🔴 「保存到相册」的五级回退（老项目 index.html:5547-5592 `nsImgSave` 同款顺序）：
+ *   壳内 https 直链/ base64 两条**原生桥档**排在最前（`ImgSave.saveImageUrl` /
+ *   `saveImage`，见 image/native-img-save.ts），之后才是分享面板与 `<a download>`。
+ *   原生档是唯一真正"写进相册"的一档 —— 分享面板只是把文件交给系统菜单，
+ *   用户还得自己再点一次保存；而 `<a download>` 在 WebView 里常常是哑弹。
+ *   排在分享面板之前是老项目 v9.3.0 的定稿，照抄。
  */
 
 import { dismissKeyboardForTouch } from '../platform/touch.ts';
 import { COPY } from '../ui/copy.ts';
+import { nativeSaveImage, nativeSaveImageUrl } from './native-img-save.ts';
+import { blobToB64 } from '../export/render.ts';
 
 /** 是否存在精确指针。与 pickImage() 的 hasPrecisePointer 同口径。 */
 function hasFinePointer(): boolean {
@@ -132,33 +135,77 @@ function copyImageLink(src: string): void {
 }
 
 /**
- * 保存到相册。
+ * 保存到相册。五级回退，老项目 index.html:5547-5592 `nsImgSave` 同款顺序。
  *
- * 🔴🔴 bj 是纯 Web，**没有**老项目那套 Capacitor ImgSave/ImgClip 桥，
- *   所以只有两条真能落地的路：`<a download>` 与系统分享面板。
- *   顺序按"成功率高者先"：分享面板在手机上几乎是唯一真正把图写进相册的口子
- *   （Chrome 桌面会让 download 直接落盘，移动端 WebView 则常常无反应）。
+ * 🔴🔴 **顺序是承重的，不能换**（老项目 v9.3.0 定稿，index.html:5558-5560 原文）：
+ *   ① 壳内 https 直链→ 原生 DownloadManager 存相册（`saveImageUrl`）
+ *   ② base64 桥 → 原生存相册（`saveImage`，留给旧壳与 `data:` 本地图）
+ *   ③ 系统分享面板
+ *   ④ `<a download>`
+ *   ⑤ 明说失败，请长按另存
+ *   为什么原生排在分享面板**前面**：原生是唯一真正"写进相册"的一档。
+ *   分享面板只是把文件**交给**系统菜单，用户还得自己点一次"保存"；
+ *   而老项目把 `<a download>` 放在分享面板之后，正是因为它在WebView 里常常是哑弹。
+ *   漏掉 ①② 的症状与老项目 v9.2.0 之前完全一样：**点保存没进相册**，
+ *   且因为 ③④ 照样"成功"，界面上看不出任何异常。
+ *
+ * 🔴🔴 **桥不存在时返回 false 不抛错**（image/native-img-save.ts 里两个 native 函数同款）：
+ *   抛错会把 ③④ 整条回退链断掉 —— 症状是"有原生桥的机器上分享面板也不弹了"。
+ *   既有口径见 main.ts:863-864`nativeCopyImage` 的同款注释。
  *
  * 🔴🔴 **绝不静默**：两条都拿不到结果时必须明说，不能给"已保存"然后什么都没发生。
  *   那是最坏的一种失败 —— 用户以为存好了，回头找不到图。
  */
 function saveImageToAlbum(src: string): void {
   void (async () => {
-    // ① 系统分享面板（移动端落到相册的主力）
+    // ① 壳内 https 直链 → 原生下载并存相册。
+    //   原生自己用 HttpURLConnection 取字节，不吃页面 CORS（ImgSavePlugin.kt:82），
+    //   这正是老项目把它设为主路径的原因：Cloudinary 偶发 CORS/缓存失败
+    //   会让"点保存"一路滑到 ④window.open，用户看到的正是"变成打开链接"。
+    if (await nativeSaveImageUrl(src)) {
+      flashStatus(COPY.imgSaveAlbumOk);
+      return;
+    }
+
+    // 取 blob 供 ②③④ 共用。失败不抛：让 ④ 的 `<a download>` 去试 src 本身。
+    let blob: Blob | null = null;
     try {
       const res = await fetch(src);
-      const blob = await res.blob();
-      const file = new File([blob], 'note-image.png', { type: blob.type || 'image/png' });
-      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }) && navigator.share) {
-        await navigator.share({ files: [file] });
-        flashStatus('已通过系统分享发出，可选「保存到相册」');
-        return;
-      }
-    } catch (e) {
-      // 用户主动取消分享：不弹失败文案（老项目 exportImage 的 AbortError 同款口径）
-      if (e instanceof Error && e.name === 'AbortError') return;
+      if (res.ok) blob = await res.blob();
+    } catch {
+      blob = null;
     }
-    // ② `<a download>`：桌面直接落盘，移动端视内核
+
+    // ② base64 桥 → 原生存相册（旧壳 / data: 本地图走这条）。
+    //   🔴 `blobToB64` 剥掉了 `data:` 前缀，Kotlin 侧 `Base64.decode` 才解得开。
+    if (blob) {
+      try {
+        const saved = await nativeSaveImage(await blobToB64(blob), blob.type || 'image/png');
+        if (saved) {
+          flashStatus(COPY.imgSaveAlbumOk);
+          return;
+        }
+      } catch {
+        /* 桥异常继续往下走回退链，绝不中断 */
+      }
+    }
+
+    // ③ 系统分享面板（移动端落到相册的主力）
+    if (blob) {
+      try {
+        const file = new File([blob], 'note-image.png', { type: blob.type || 'image/png' });
+        if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }) && navigator.share) {
+          await navigator.share({ files: [file] });
+          flashStatus('已通过系统分享发出，可选「保存到相册」');
+          return;
+        }
+      } catch (e) {
+        // 用户主动取消分享：不弹失败文案（老项目 exportImage 的 AbortError 同款口径）
+        if (e instanceof Error && e.name === 'AbortError') return;
+      }
+    }
+
+    // ④ `<a download>`：桌面直接落盘，移动端视内核
     try {
       const a = document.createElement('a');
       a.href = src;
@@ -168,6 +215,7 @@ function saveImageToAlbum(src: string): void {
       a.remove();
       flashStatus('已触发下载；若没反应请长按图片另存');
     } catch {
+      // ⑤ 两条都拿不到结果 ⇒ **明说**，绝不给「已保存」
       flashStatus('这台设备无法直接保存，请长按图片另存');
     }
   })();

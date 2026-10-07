@@ -235,7 +235,33 @@ test('SCAN-E 扫码配对全链路', async (t) => {
 
       // headless 没有摄像头 ⇒ 必然走"相机起不来"那条路
       await page.click('#landingScan');
-      await new Promise((r) => setTimeout(r, 2500));
+      // 🔴🔴 必须**等条件**，不能死等固定时长。
+      //
+      //   固定 2500ms 的实证（v1.13.0）：同一份代码连跑，有时 t+800ms 就拿到
+      //   「扫码启动失败」，有时 t+2500ms 还是「层已拆、原因未到」⇒ 判据随机红。
+      //   两种错都比测试红更糟：慢机器上假红会让人以为是这次改动引入的回归，
+      //   快机器上假绿会放过"从来不给原因"这种真 bug。
+      //   ⇒ 轮询等到「层还在」或「原因已可见」为止，最多 12 秒。
+      //   🔴 条件必须是**终态**「层已收场 且 原因可见」，不能是「层还在 或 原因可见」。
+      //     后者是恒真的：层建起来那一瞬间条件就满足，而层最终必然被拆，
+      //     ⇒ 变异成"写了文案但仍是 hidden"时判据照样绿（我第一版就是这么写的，
+      //        变异实测：删掉 `classList.remove('hidden')` 后 E06 依然全绿）。
+      //     这条纪律与"判『看不见』要用可见性"是同一族：**判终态，别判中间态**。
+      await withTimeout(
+        page.waitForFunction(() => {
+          if (document.querySelector('#scanMask') !== null) return false; // 层还没收场
+          const w = document.getElementById('landingScanMsg');
+          if (!w || w.classList.contains('hidden')) return false;
+          if ((w.textContent ?? '').length === 0) return false;
+          // 🔴 还得等**入场动画落位**：这个警示位是 `#landing .landing-in` 的子节点，
+          //   带 animation-delay 且 fill-mode 是 backwards ⇒ 刚 remove('hidden') 的
+          //   那一刻 opacity 实测是 **0**，读到它会被后面的"透明度为 0"断言打回。
+          //   （与切皮肤气泡那条同款：.show 到 opacity:1 有过渡，立刻读是中间值。）
+          return Number(getComputedStyle(w).opacity) > 0.9;
+        }, null, { timeout: 12_000 }),
+        15_000,
+        '等「取景层已收场 + 原因可见」这个终态',
+      );
 
       const st = await page.evaluate(() => ({
         mask: document.querySelector('#scanMask') !== null,
@@ -299,6 +325,24 @@ test('SCAN-E 扫码配对全链路', async (t) => {
       //   记录 #scanMask 曾经被插入 —— 这比断言"此刻还在"更贴合真实用户能感知的东西。
       const seen = await page.evaluate(() => new Promise((resolve) => {
         const hits = [];
+        // 🔴🔴🔴 底栏文案必须**持续观察**，不能只在窗口末尾读一次当前值。
+        //
+        //   原写法：`foot: document.querySelector('#syncText')?.textContent`
+        //   ——在 1400ms 那个**单一瞬时点**读，于是变成一场三方赛跑：
+        //     相机探测失败 → `deps.onHint(reason)` 异步写入「未检测到可用摄像头…」
+        //     2 秒轮询 →把底栏回写成「已同步」
+        //   谁最后落地，取决于 getUserMedia 的拒绝时刻与轮询节拍谁靠后。
+        //   实测（同产物、同环境）连跑三轮：1 轮绿、2 轮红，红时读到
+        //   `{added:1, removed:1, nowInBody:false, foot:"已同步"}`。
+        //
+        //   🔴 这与 `18-qr-migrate` 的 QR-M01 是**同一个病**：
+        //     「判据读得太早 / 采样点选在了状态还在变化的窗口里」。
+        //     产品行为是对的（`layer.ts:400` 的 `deps.onHint(reason)` 确实给了可见原因，
+      //     文案见 `copy.ts` 的 `scanNoCamera`，逐字含「摄像头」），
+        //     变的只是判据恰好落在了提示被轮询覆盖之后的那一帧。
+        //   🔴 纪律：**等被断言的那个事实本身**。用户能感知的是
+        //     "那一刻屏幕上出现过原因"，不是"第1400 毫秒它还在不在"。
+        const foots = [];
         const mo = new MutationObserver((muts) => {
           for (const m of muts) {
             for (const n of m.addedNodes) {
@@ -308,13 +352,25 @@ test('SCAN-E 扫码配对全链路', async (t) => {
               if (n && n.id === 'scanMask') hits.push('removed');
             }
           }
+          // 每次 DOM 变化都把当前底栏文案留档一份（去重由调用方做）
+          const t = document.querySelector('#syncText')?.textContent ?? '';
+          if (foots[foots.length - 1] !== t) foots.push(t);
         });
-        mo.observe(document.body, { childList: true, subtree: true });
-        // 点三下（含重入锁验证）
+        mo.observe(document.body, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+        // 点三下（含重入锁验证）——必须在哨兵挂好**之后**点，否则观察不到挂载过程
         const btn = document.getElementById('scanBtn');
         for (let i = 0; i < 3; i += 1) btn.click();
+        // 🔴 采样窗口的**右界**取 2600ms：必须跨过一整轮 2 秒轮询节拍，
+        //   否则"提示出现过"这件事本身就可能被窗口切掉（采样窗口是 bug 的藏身处）。
         setTimeout(() => {
           mo.disconnect();
+          // 收尾时再补一帧，兜住"最后一次变化恰好在disconnect 之前"的情况
+          const t = document.querySelector('#syncText')?.textContent ?? '';
+          if (foots[foots.length - 1] !== t) foots.push(t);
           const added = hits.filter((x) => x === 'added').length;
           const removed = hits.filter((x) => x === 'removed').length;
           resolve({
@@ -322,17 +378,84 @@ test('SCAN-E 扫码配对全链路', async (t) => {
             removed,
             nowInBody: !!document.querySelector('#scanMask'),
             foot: document.querySelector('#syncText')?.textContent ?? '',
+            // 🔴 整个窗口内底栏出现过的**全部**文案（不只是最后一帧）
+            foots,
           });
-        }, 1400);
+        }, 2600);
       }));
       // 🔴 至少挂载过一次，且**最多一次**（重入锁不许叠层）
       assert.ok(seen.added >= 1, '取景层从未挂到 document.body（用户点扫一扫屏幕上什么都没有）：' + JSON.stringify(seen));
       assert.ok(seen.added <= 1, `叠出了多层取景框（挂载 ${seen.added} 次）：` + JSON.stringify(seen));
       // headless 无摄像头：层被拆掉是**正确降级**，但必须留下可见原因（老项目 v10.1.4）
-      if (!seen.nowInBody) {
+      //
+      // 🔴🔴🔴 分支条件必须由**结构事实**定，不能用"此刻层还在不在 body 里"。
+      //
+      //   原写法 `if (!seen.nowInBody)`：这是一个**采样瞬时值**，
+      //   于是变异 `deps.onHint(reason)` → `void reason`（真的不给可见原因了）
+      //   之后，层仍然会在某一刻被拆掉，但若那一刻采样还没走到，
+      //   整段"必须给可见原因"的断言就被**整段跳过** ⇒ 判据全绿。
+      //   实测：施加该变异后 SCAN-E06 转红，而本条 SCAN-E07 **照样全绿**。
+      //
+      //   🔴 纪律：**"条件跳过"型弱断言 = 没有断言**。
+      //     断言能不能执行，必须由被测系统自己产生的结构痕迹决定
+      //     （这里就是"层确实被拆过"），不能由"我采样那一刻的状态"决定。
+      //   🔴 与上面「等被断言的事实本身」同源：
+      //     要钉的是"用户看到过原因"这件已经发生的事，
+      //     而"层被拆过"就是它的充分条件，且不会随采样时刻漂移。
+      if (seen.removed >= 1) {
+        // 🔴🔴🔴 必须**逐字**比对相机失败的那几条文案，不能用宽正则。
+        //
+        //   原写法 `/摄像头|相机|扫码/.test(seen.foot)` ——「扫码」二字命中的是
+        //   `copy.ts` 的 `scanBusy: '扫码已在进行中'`（连点三下时的重入锁忙碌提示）。
+        //   那条**恰好也在本场景出现**，于是判据被一句与病因无关的文案顶住了。
+        //   取证实锤（变异 `deps.onHint(reason)` → `void reason`，即真的不给原因了）：
+        //     `foots: ["· 最后同步：扫码已在进行中","已同步","连接中…","已同步","连接中…","已同步"]`
+        //   六帧里**没有一帧**提到摄像头，但正则判true ⇒ 断言合法地放过了这个 bug。
+        //
+        //   🔴 纪律：**恒真断言 = 没有断言**。正则越宽，越可能命中一条"恰好也在"的无关文案。
+        //     要钉用户看到的那句话，就逐字写出来。
+        //   老项目 v10.1.4 同口径只有三条（`ui/copy.ts` 的 scanNeedHttps / scanDenied / scanNoCamera，
+        //   另有 scanCompFail「扫码组件加载失败」与 scanStartFail「扫码启动失败」——
+        //   后两条也只对"相机起不来"有意义，一并纳入，宁可多认不可漏认）。
+        const CAMERA_FAIL_HINTS = [
+          '当前环境无法调用摄像头',// scanNeedHttps
+          '相机权限被拒绝',                      // scanDenied
+          '未检测到可用摄像头',                  // scanNoCamera
+          '扫码组件加载失败',// scanCompFail
+          '扫码启动失败',                        // scanStartFail
+        ];
+        const everHinted = seen.foots.some((t) => CAMERA_FAIL_HINTS.some((h) => t.includes(h)));
         assert.ok(
-          /摄像头|相机|扫码/.test(seen.foot),
-          '相机不可用时层被拆了却没给可见原因，用户只看到"点了没反应"：' + JSON.stringify(seen),
+          everHinted,
+          '相机不可用时层被拆了却**从未**给过可见原因，用户只看到"点了没反应"。'
+          + `整个 ${2600}ms 窗口里底栏只出现过：${JSON.stringify(seen.foots)}`,
+        );
+        // 🔴 反向闸：光有"出现过"不够，得证明这不是句常驻文案在骗人——
+        //   窗口里必然同时出现过同步状态（那条一直在），所以要求两者并存。
+        assert.ok(
+          seen.foots.length >= 2,
+          '🔴 整个窗口底栏只出现过一帧文案，采样窗口窄到可能切掉提示：'
+          + JSON.stringify(seen.foots),
+        );
+        // 🔴🔴 为什么这里**不再**加一条"忙碌提示不算原因"的额外断言：
+        //   ·「忙碌提示一次都不许出现」是在钉一个不存在的行为（连点三下本就该出）
+        //     ⇒ 必然恒红或被迫放宽成恒真；
+        //   ·「原因出现过」与上面 `everHinted` 逐字同义 ⇒ 恒真。
+        //   🔴 纪律：**恒真断言 = 没有断言**；加断言前先问「它与已有断言是否同义」。
+        //
+        //   宽正则被忙碌提示骗过这件事，已经由**变异实验**钉住了（不是靠再加断言）：
+        //     `deps.onHint(reason)` → `void reason` 之后，`foots` 六帧全是
+        //     ["· 最后同步：扫码已在进行中","已同步","连接中…","已同步","连接中…","已同步"]，
+        //     宽正则判true、逐字判 false —— 差别正在于此处。
+        //   ⇒ 防回归靠的是「逐字比对这份清单」这件事本身，
+        //     日后有人把清单放宽回正则，本条的失败信息里会留着上面那段foots 可供对照。
+      } else {
+        // 🔴 走到这里说明层挂上去就没被拆过 —— 在 headless 无摄像头环境下这本身可疑。
+        //   钉住它，否则"removed 一直为 0"就能把上面整段断言静默绕过。
+        assert.ok(
+          seen.added === 0,
+          '🔴 层挂上了却从未被拆掉：headless 没有摄像头，getUserMedia 必失败，'
+          + `必然要走「立即收口 + 给可见原因」那条路（added=${seen.added} removed=${seen.removed}）`,
         );
       }
       // 收尾：关掉可能还开着的层

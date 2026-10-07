@@ -368,7 +368,7 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
     }
   });
 
-  await t.test('EXPORT-W02 🔴🔴🔴 剪贴板成功时也必须开预览层（否则用户永远进不了微信）', async () => {
+  await t.test('EXPORT-W02 🔴🔴🔴 触屏剪贴板成功后**不许**开预览层（A1：老项目零后续动作）', async () => {
     const page = await openEditorTouch(browser, h.baseUrl(), 'expW02', PASS);
     try {
       await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
@@ -382,59 +382,51 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
       // 🔴🔴 装一个**会成功**的剪贴板替身 —— 这正是用户手机上的真实情况
       //   （「可以正常复制到系统自带笔记app 里」⇒ 剪贴板档成功）。
       //   🔴 替身必须**忠实于外部规范**、绝不能忠实于我们的实现（判据纪律）：
-      //   这里模拟的是 WebClipboard 接口的契约（write 接受 ClipboardItem[] 并 resolve），
-      //   不是"我们希望它怎么表现"。
+      //   这里模拟的是 WebClipboard 接口的契约（write 接受 ClipboardItem[] 并 resolve）。
       await page.evaluate(() => {
         window.__W_CLIP_CALLS__ = [];
-        const blob = new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' });
-        // 真实内核的 write 是**立即 resolve**、内容在窗口内异步落地。
         Object.defineProperty(navigator, 'clipboard', {
           configurable: true,
           value: {
             write: async (items) => {
-              window.__W_CLIP_CALLS__.push(
-                items.map((it) => Object.keys(it.types || {})),
-              );
+              window.__W_CLIP_CALLS__.push(items.map((it) => Object.keys(it.types || {})));
             },
           },
         });
         window.ClipboardItem = class {
           constructor(types) { this.types = types; }
         };
-        void blob;
       });
 
       await page.tap('#exportImgBtn');
 
-      // 🔴🔴 核心判据：剪贴板**成功**之后，预览层也必须出现。
-      //   症状与用户原话一一对应：用户看到"已复制"，照着去微信粘贴，没反应，
-      //   而屏上根本没有一张可以长按的图。
+      // 前置自证：替身确实被调到了（否则"没开预览层"可能只是因为压根没走到剪贴板档）
       await withTimeout(
-        page.waitForSelector('#imgPreviewMask', { timeout: 30_000 }),
+        page.waitForFunction(() => (window.__W_CLIP_CALLS__ || []).length > 0, null, { timeout: 30_000 }),
         35_000,
-        '剪贴板成功后也必须开预览层（触屏长按转发是唯一真出口）',
+        '触屏剪贴板替身应被调用（前置自证）',
       );
-      const st = await page.evaluate(() => ({
-        clip: window.__W_CLIP_CALLS__,
-        img: !!document.querySelector('#imgPreviewMask img'),
-        tips: Array.from(document.querySelectorAll('#imgPreviewMask p')).map((p) => p.textContent),
-      }));
-      // 前置自证：替身确实被调到了（否则上面那条 waitForSelector 可能只是等到了别的东西）
-      assert.equal(st.clip.length, 1, '剪贴板替身必须被调用一次（前置自证），实际=' + JSON.stringify(st.clip));
-      assert.deepEqual(st.clip[0], [['image/png']], '剪贴板里必须装的是 PNG');
-      assert.equal(st.img, true, '预览层里必须有图（用户要长按的就是它）');
+      const clip = await page.evaluate(() => window.__W_CLIP_CALLS__);
+      assert.deepEqual(clip[0], [['image/png']], '剪贴板里必须装的是 PNG');
 
-      // 🔴 预览层里那行触屏指引必须在（老项目那句没点名"转发给微信"）
-      const joined = st.tips.join(' | ');
-      assert.ok(
-        joined.includes('转发给朋友'),
-        '预览层必须有触屏指引「转发给朋友」，否则用户不知道要长按，实际=' + joined,
+      // 🔴🔴 再等一段足够长的时间，覆盖"渲染完成后才开预览层"那条路径
+      //   （被删掉的那段代码正是 await blobP 之后再 showPreview，渲染要好几秒）。
+      await new Promise((r) => setTimeout(r, 6000));
+
+      const st = await page.evaluate(() => ({
+        mask: document.getElementById('imgPreviewMask') !== null,
+        // 屏上也不该有离屏卡残留（导出 finally 会 dispose；这里钉"没有第二次可见出口"）
+        strayCards: document.querySelectorAll('.ns-export').length,
+      }));
+      // 🔴 核心判据：剪贴板成功之后**不许**盖预览层。
+      //   症状与用户原话一一对应：「导出图片并复制我希望体验还是和老版本一样，
+      //   不要现在这样下载什么的」—— 用户看到的是点了复制后屏上盖来一层带下载按钮的图。
+      assert.equal(
+        st.mask,
+        false,
+        '🔴 触屏剪贴板成功后不许开预览层（老项目 index.html:2896-2963 剪贴板成功后直接 return）',
       );
-      // 老项目那句泛用指引也必须留着（逐字）
-      assert.ok(
-        joined.includes('长按图片可保存或发送'),
-        '老项目那句泛用指引必须留着，实际=' + joined,
-      );
+      assert.equal(st.strayCards, 0, '离屏导出卡必须已拆（老项目 v10.0.2 泄漏事故）');
     } finally {
       await closeTouch(page);
     }
@@ -550,6 +542,17 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
       assert.ok(
         !joined.includes('Ctrl+V'),
         '触屏成功文案里绝不许出现「Ctrl+V」（手机上没这个动作），实际=' + joined,
+      );
+      // 🔴🔴 A1 删掉触屏预览层之后，"长按下方图片"就成了谎报 —— 屏上根本没有图。
+      //   这条与上面那条互补：上面钉"不许给做不到的指引"，这条钉"不许谎报有图可长按"。
+      assert.ok(
+        !/下方图片|长按下方/.test(joined),
+        '触屏成功文案里绝不许出现「长按下方图片」（A1 下剪贴板成功后不开预览层，屏上没有图），实际=' + joined,
+      );
+      // 🔴 必须至少有一条**做得到**的指引（"可直接粘贴"），否则用户不知道该干嘛
+      assert.ok(
+        joined.includes('可直接粘贴'),
+        '触屏剪贴板成功必须给一句做得到的指引「可直接粘贴」，实际=' + joined,
       );
       assert.ok(seen.length > 0, '导出过程中必须至少有一条状态提示（否则是"点了没反应"），实际=' + JSON.stringify(seen));
     } finally {

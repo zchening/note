@@ -44,6 +44,23 @@ export interface EggHost {
   /** 打开图鉴后归还焦点的动作。 */
   refocus: () => void;
   /**
+   * 🔴🔴 **非游戏彩蛋的 replay 出口**（老项目 `NS_EGG_LIST` 里 `type` / `diag` 的 `replay`）。
+   *
+   *   为什么它们不在 `defs` 里：`defs` 的值类型是 `() => AnyGame`
+   *   （canvas 游戏或 DOM 游戏），而 `type`（打一声回车铃）与 `diag`（开诊断模态）
+   *   **都不是游戏** —— 它们没有游戏可开。硬塞进 `defs` 的后果是
+   *   `shell.launch()` 拿到一个不是游戏的对象，症状是"点再玩一次 → 画面变空白"，
+   *   而且**零报错**。
+   *
+   *   老项目把它们放在 `NS_EGG_LIST` 的 `replay` 字段里（`index.html:6886-6887`：
+   *   `type` → `nsTypeSound('enter', true)`、`diag` → `openDiagModal()`），
+   *   与门牌游戏那张表是**两张表**。bj 照抄这个形状。
+   *
+   *   @param id 彩蛋 id（`type` / `diag`）
+   * @returns 是否处理了（未注册的非游戏 id 返回 false，调用方据此提示"正在赶来的路上"）
+   */
+  replaySide: (id: string) => boolean;
+  /**
    * 游戏外壳拆干净后回调（门牌路径退出时用来重画落地页）。
    *
    * 🔴 独立于 refocus：归还焦点对**编辑器里开的游戏**（菜单→桌宠）是对的，
@@ -78,6 +95,16 @@ export interface EggLayer {
   wordAskOpen: () => boolean;
   /** 词表确认浮层当前展示的蛋 id（空串 = 没展示）。 */
   wordAskId: () => string;
+  /**
+   * 非游戏彩蛋的 replay（`type` / `diag`）。**图鉴「再玩一次」与门牌都走它。**
+   *
+   * 🔴 为什么要独立出口而不是塞进 `openByRoute`：`openByRoute` 的语义是
+   *   "开一个游戏外壳"，而 `type` / `diag` 不开外壳。若混进去，
+   *   映射缺失分支会 `history.pushState('/')` —— 而这两个压根不是门牌，
+   *   它们该留在原地。所以单独一张表、单独一个出口（老项目 `NS_EGG_LIST`
+   *   的 `replay` 字段与 `defs` 本来就是两张表）。
+   */
+  replaySide: (id: string) => boolean;
   shell: Shell;
   sound: Sound;
   /** 图鉴是否开着。codex 对象是模块私有的，外部要判只能走这里。 */
@@ -109,8 +136,23 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     pet: () => petGame(),
   };
 
+  /**
+   * 🔴🔴 非游戏彩蛋 id 全集。**必须与 `EggHost.replaySide` 的实现对齐。**
+   *
+   * 为什么要这张表而不是直接把 `replaySide` 塞进 `defs`：
+   * `defs` 的值类型是 `() => AnyGame`，而这两个不是游戏（见 EggHost.replaySide 注释）。
+   * 另立一张表后，`openByRoute` 的"映射缺失 ⇒ 提示 + 落地页"这条路径**不会**
+   * 被它们误触发 —— 它们 `door: false`，本来就不该走门牌路由。
+   */
+  const SIDE_EGGS = ['type', 'diag'] as const;
+
   const codex: Codex = buildCodex(host, store, {    onReplay: (id) => {
       codex.close();
+      // 🔴🔴 先试非游戏表再试门牌：`type` / `diag` 不开游戏外壳，
+      //   而 openByRoute 的映射缺失分支会 `pushState('/')` 把用户踢回落地页。
+      //   顺序反了的话图鉴里点「打字机音 / 诊断面板」的「再玩一次」
+      //   会把用户丢回落地页 —— 而这两个蛋恰恰**不是门牌**，它们该留在原地。
+      if (replaySide(id)) return;
       openByRoute(id);
     },
     onClosed: () => h.refocus(),
@@ -120,6 +162,28 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
       if (shell.isOpen()) shell.pause(true);
     },
   });
+
+  /**
+   * 非游戏彩蛋的 replay（老项目 `NS_EGG_LIST` 的 `replay` 字段）。
+   *
+   * 🔴 埋点放在**调用之后**：老项目 :8219 的 `nsEggUnlock('diag')` 是
+   *   openDiagModal 的第一行（同款），但 `type` 的 replay
+   *   （`nsTypeSound('enter', true)`）**不埋点** —— 它埋点在打字机音真正响的那一刻
+   *   （sound.ts 侧 `Sound.type()` 返回 true 时），因为图鉴点播这一次
+   *   不代表用户"在复古皮肤里敲了键盘"。
+   */
+  function replaySide(id: string): boolean {
+    const key = id.toLowerCase();
+    if ((SIDE_EGGS as readonly string[]).indexOf(key) < 0) return false;
+    // 🔴🔴 埋点必须在**确认处理成功之后**：宿主实现万一不认这个 id
+    //   （返回 false），用户点了「再玩一次」什么也没发生 ——
+    //   此时若已写进发现记录，图鉴就会把这枚蛋标成"已发现"，
+    //   而用户永远没见到过它。老项目是"解锁 + 执行"写在一起，
+    //   bj 把这两件事分开正是为了不让记录领先于事实。
+    if (!h.replaySide(key)) return false;
+    markDiscovered(store, key, true);
+    return true;
+  }
 
   function openByRoute(id: string): boolean {
     const key = id.toLowerCase();
@@ -207,6 +271,7 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     },
     wordAskOpen: () => wordBinding?.isOpen() ?? false,
     wordAskId: () => wordBinding?.showingId() ?? '',
+    replaySide,
     shell,
     sound,
     dispose: () => {

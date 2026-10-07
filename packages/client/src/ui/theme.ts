@@ -235,6 +235,31 @@ export const OVERLAY = {
    */
   zoomPriBg: '#FFFFFF',
   zoomPriInk: '#000000',
+  /* ---- 光标诊断浮层（老项目 index.html:2065-2068）---- */
+  /**
+   * 诊断浮层底色（老项目 :2066 `rgba(0,0,0,.82)`）。
+   * 🔴🔴 **必须与主题无关**：这是一层压在真机页面上的取证浮层，
+   *   它的唯一职责是「无论日间还是夜间都要能看清读数」。
+   *   若跟着主题走，日间模式下白底 + 浅色字 = 读数全糊在纸上，
+   *   而"看不清读数"恰好是这个功能存在的目的被自己废掉。
+   *   老项目是写死在 cssText 里的硬编码单值（无夜间分支），照实抄。
+   */
+  diagBg: 'rgba(0,0,0,.82)',
+  /**
+   * 诊断浮层字色（老项目 :2066 `color:#0f0`）。
+   * 🔴 纯荧光绿是**刻意的**：它与页面本身的配色（暖白/深灰）完全不同族，
+   *   所以截图发给开发者时，一眼就能分清"这行是诊断读数不是正文"。
+   *   换成 var(--fg) 的话浮层会融进页面，截图里根本认不出边界。
+   */
+  diagInk: '#0f0',
+  /**
+   * 诊断模态的**正文底色**（老项目 :8220 那张 `pre#diagContent` 用主题色板）。
+   * 🔴 与浮层底刻意分开：模态走 `.box`/主题令牌（与全站弹窗一致），
+   *   浮层才用固定黑底绿字。两者混成一个值就会出现
+   *   「模态在日间是白底黑字、浮层是黑底绿字，同一份读数两种脸色」。
+   */
+  diagModalBg: '#0F0F11',
+  diagModalInk: '#E9E8E3',
 } as const;
 
 /** 复古皮肤三态（老项目叫"三态环"，靠连点 logo 7 次前进）。 */
@@ -345,6 +370,13 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--scan-stage-b', OVERLAY.scanStageB);
   s.setProperty('--scan-stage-edge', OVERLAY.scanStageEdge);
   s.setProperty('--scan-stage-text', OVERLAY.scanStageText);
+  /* 🔴 诊断浮层两色（老项目 index.html:2066）。**与主题无关**，理由见 OVERLAY.diagBg 注释：
+     取证浮层的第一职责是"任何主题下都读得清"，跟主题走等于自己废掉这个功能。 */
+  s.setProperty('--diag-bg', OVERLAY.diagBg);
+  s.setProperty('--diag-ink', OVERLAY.diagInk);
+  /* 诊断模态走主题色板（与全站 .box 一致），刻意与浮层的固定黑底绿字分开。 */
+  s.setProperty('--diag-modal-bg', OVERLAY.diagModalBg);
+  s.setProperty('--diag-modal-ink', OVERLAY.diagModalInk);
   el.classList.toggle('dark', theme === 'dark');
 }
 

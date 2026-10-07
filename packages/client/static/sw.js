@@ -36,17 +36,26 @@ const CACHE = `notesync-bj-${VER}`;
 
 /**
  * 应用外壳清单。刻意短：能离线打开界面就够，笔记数据不在其中。
- * 🔴 三个静态资源必须列进来，否则离线时安装横幅拿不到 manifest 与图标
- *   （老项目 sw.js:6 的 ASSETS 同样列了 manifest.json 与三枚图标）。
+ * 🔴 静态资源必须列进来，否则离线时安装横幅拿不到 manifest 与图标
+ *   （老项目 sw.js:7 的 ASSETS 同样列了 manifest.json 与品牌三件）。
+ * 🔴 v1.12.0：补齐老项目的品牌三件 —— favicon.svg / apple-touch-icon.png
+ *   在老项目 ASSETS 里都有（注释写明「离线安装横幅/加桌面用」）。
+ *   漏了它们的症状是**离线时**加桌面拿不到图标（在线时 browser 直接取，不受影响）。
+ *
+ * 🔴 别往这里加 jsQR.js / html2canvas.min.js / qrcode-generator.js：
+ *   老项目 sw.js:35-37 是把它们走**运行时 cache-first**（懒加载，点到才拉），
+ *   不进安装期预缓存。塞进来会让 SW install 体积暴涨、且这些文件本就有 immutable
+ *   缓存头兜底。判据＝老项目 ASSETS 的六项，逐项对得上。
  */
 const SHELL = [
   './',
   './index.html',
   './app.js',
   './manifest.json',
+  './favicon.svg',
+  './apple-touch-icon.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/icon-512-maskable.png',
 ];
 
 self.addEventListener('install', (event) => {

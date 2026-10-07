@@ -19,6 +19,7 @@ import {
   newDiag,
   shouldDowngrade,
   tierFor,
+  tierLabel,
   visibleCrop,
   type ScanDiag,
 } from './engine.ts';
@@ -232,12 +233,17 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
       deps.onDiag({ ...diag, result: '命中', hits: diag.hits + 1 });
       done = true;
       clearTimers();
+      // 🔴 v1.12.0：原先此处有 `setTimeout(..., 160)`（"让人看见已识别再消失"），
+      //   用户拍板**去掉，且不加手动开关** —— 扫码的判断标准是"扫到就立刻开"，
+      //   这 160ms 是每次扫码都要付的纯延迟。
+      //
+      //   删它不会丢反馈：浮层的"已识别"仍由下面的 setHint(COPY.scanHit) 写入，
+      //   而真正收场（浮层拆掉）是**紧接着**同步发生的 —— 也就是说这一行提示
+      //   在旧代码里只是闪 160ms，用户绝大多数时候根本看不清。
+      //   用户若日后反悔要回来，改回setTimeout 即可，无需动别处。
       setHint(COPY.scanHit);
-      // 🔴 延迟 160ms 收场：让人看见"已识别"再消失，别凭空一闪就没了。
-      timer = window.setTimeout(() => {
-        cleanup();
-        deps.onResult(value);
-      }, 160);
+      cleanup();
+      deps.onResult(value);
     };
 
     const tick = async (): Promise<void> => {
@@ -268,7 +274,11 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
           ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, w, hh);
           const img = ctx.getImageData(0, 0, w, hh);
           const r = window.jsQR?.(img.data, w, hh, { inversionAttempts: 'attemptBoth' });
-          diag.dec = w + 'x' + hh + (tier > 560 ? '清' : '快');
+          //🔴 v1.12.0：这里原来硬编码 `tier > 560`，而 TIER_FAST 已在 engine.ts 调成640
+          //   ⇒ 一旦进清档，640 > 560 恒真，`dec` 会**永远**显示"清"，诊断标签彻底失效
+          //   （症状是「?diag 里 decode 尺寸后面的字一直是清」，而实际跑的是快档）。
+          //   改成与 tierFor 的分界同源：只认"是不是清档"这个事实，不再复制魔法数。
+          diag.dec = w + 'x' + hh + tierLabel(tier);
           if (r && r.data) {
             diag.hits++;
             hitVal = r.data;

@@ -369,3 +369,188 @@ test('FOLD-ENTER2 反向闸：展开态在正文里回车，字仍留在折叠�
     await page.close();
   }
 });
+
+/**
+ * 🔴🔴🔴 问题 8 + 9 的取证与判据（用户报障第 8/9 条）
+ *
+ * ── 实测（一次性探针量化，不推理）─────────────────────────────────────
+ *  场景：正文 BODY + 一个折叠块，标题改成 ABCDEF，点三角收起，光标按钩子落位后回车。
+ *
+ *  问题 9（光标在标题**中间**，第 3 字后）：
+ *    回车前真源order = ["p", "fold"]，foldIdx=1，title="ABCDEF"
+ *    回车后真源 order = ["p", "fold", "p", "fold"]   ←🔴 **fold 块变成了两个**
+ *            foldIdx=1 title="ABC"、索引 3 又一个 fold title="ABC"
+ *    ⇒ 用户看到的「折叠列表跳到了原先位置下方的第二行」是真实现象，
+ *      而且比描述更严重：**凭空多出一个内容重复的折叠块**。
+ *
+ *  问题 8（光标在标题**末尾**）：
+ *    回车后真源 order 完全不变（还是 ["p","fold"]，title 仍 "ABCDEF"）
+ *    紧接着打字 ZZZ ⇒ title 变成 **"ABCDEFZZZ"**
+ *    ⇒ **字落回折叠标题内部**。用户说「没反应」是对的：
+ *      回车既没换行、也没把光标挪出去，后续输入继续污染标题。
+ *
+ * ── 机制（behaviors.ts:586-590）─────────────────────────────────────────
+ *    const sel2 = $createRangeSelection();
+ *    sel2.anchor.set(fold.getKey(), 0, 'element');   // ← 选区指向 fold 自己
+ *    $insertNodes([out]);
+ *  Lexical 的 `RangeSelection.insertNodes` 会做
+ *    `firstBlock = $findMatchingParent(firstNode, INTERNAL_$isBlock)`
+ *  （Lexical.dev.js:13246）—— 这里 firstNode **就是 fold 自己**，
+ *  它 isBlock() 为真 ⇒ firstBlock = fold；`!firstBlock.isEmpty()` 为真
+ *  ⇒ shouldInsert=true ⇒ 先调 `this.insertParagraph()`（`:13360-13361`）
+ *  ⇒ 新段落插到 fold **前面**，块被顶到下一行。
+ *
+ * ── 🔴 为什么必须新写判据而不能修 FOLD-ENTER1 ──────────────────────────
+ *  FOLD-ENTER1（:303）只断言 `blocks.slice(fi+1)` 含不含 DEF/EF/F ——
+ *  上面实测里`["p","fold","p","fold"]` 的 fi+1 之后**确实**含 "DEF"，
+ *  **它照样绿**。它没钉「fold 块自己的索引不变」，于是给问题 9 发了免罪符。
+ *  判据钉的是**用户可见的最终结果**：折叠块所在行不动（索引不变、块数不变）。
+ */
+test('FOLD-ENTER3 🔴🔴🔴 标题中间回车：折叠块**留在原位**，后半段落到它下方一行（用户报障第 9 条）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fe3', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await withTimeout(page.waitForSelector('.ns-fold', { timeout: 10_000 }), 12_000, '等折叠块');
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
+    await new Promise((r) => setTimeout(r, 350));
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
+    await new Promise((r) => setTimeout(r, 200));
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Shift+End');
+    await page.keyboard.type('ABCDEF');
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 前置自证：回车前必须**只有一个** fold 块，且它在索引 1（否则下面全是恒真）
+    const before = await page.evaluate(() => (window.__NOTESYNC_DOC__().blocks || []).map((b) => b.t));
+    assert.deepEqual(before, ['p', 'fold'], `前置：回车前应是["p","fold"]，实际=${JSON.stringify(before)}`);
+
+    // 光标落标题第 3 字后（键盘方向键在无头下移不动 Lexical 内部选区，用钩子）
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__(3));
+    await new Promise((r) => setTimeout(r, 250));
+    await page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 700));
+
+    const blocks = await page.evaluate(() => window.__NOTESYNC_DOC__().blocks || []);
+    const order = blocks.map((b) => b.t);
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    const foldCount = order.filter((t) => t === 'fold').length;
+    const foldTitle = blocks[fi]?.title?.map((s) => s.t).join('') ?? '';
+
+    // 🔴 断言 1：折叠块**个数**不变。实测修前是 2 个（凭空多一个内容重复的块）。
+    assert.equal(
+      foldCount, 1,
+      `折叠块个数必须恒为 1（回车不该复制块）。实际=${foldCount}，order=${JSON.stringify(order)}`,
+    );
+
+    // 🔴🔴 断言 2：折叠块的**索引**不变 —— 这正是"折叠列表所在行不动"。
+    //   FOLD-ENTER1 缺的正是这条，所以它给这条报障发了免罪符。
+    assert.equal(
+      fi, before.lastIndexOf('fold'),
+      `折叠块索引必须不变（"折叠列表所在行不动"）。修前实测 order=${JSON.stringify(order)}`
+      + ` ⇒ 块被顶到第 2 行、还多出一个重复块`,
+    );
+
+    // 🔴 断言 3：后半段落在折叠块**紧邻的下一块**，且是该块（不是隔一段）。
+    assert.equal(
+      blocks[fi + 1]?.t, 'p',
+      `光标后面的文字应换到折叠块**下方一行**（紧邻的段落），实际 blocks[${fi + 1}]=`
+      + JSON.stringify(blocks[fi + 1] ?? null),
+    );
+    assert.ok(
+      JSON.stringify(blocks[fi + 1] || {}).includes('DEF'),
+      `下半段文字 DEF 应落在那个段落里，实际=${JSON.stringify(blocks[fi + 1] ?? null)}`,
+    );
+
+    // 🔴 断言 4：标题只剩前半段（这条 FOLD-ENTER1 已有，但必须在新判据里重复钉住 ——
+    //   它是用户能直接看见的结果，且"块被复制"时标题也会看着对）。
+    assert.equal(foldTitle, 'ABC', `标题应只剩前半段 ABC，实际=「${foldTitle}」`);
+
+    // 🔴 断言 5：正文 BODY 那一行也不许动（它排在 fold 前面，是"所在行不动"的另一半）
+    assert.ok(
+      JSON.stringify(blocks[0] || {}).includes('BODY'),
+      `回车前的正文块必须留在索引 0，实际=${JSON.stringify(blocks[0] ?? null)}`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * FOLD-ENTER4 🔴🔴🔴 标题**末尾**回车必须真的换行，随后的字不许落回标题
+ *   （用户报障第 8 条：「光标在折叠列表标题最后面输入回车，没反应」）
+ *
+ * 🔴 实测（修前）：回车后真源 order 完全不变（还是 ["p","fold"]，title 仍 ABCDEF），
+ *   紧接着打 ZZZ ⇒ title 变成 **"ABCDEFZZZ"** —— 字落回折叠标题内部。
+ *   用户说「没反应」是准确的：既没换行，也没把光标挪出去。
+ *
+ * 🔴🔴 老项目口径（index.html 的 foldCaretNormalize 同族思路）：
+ *   收起态的折叠标题末尾按回车，应当在**折叠块外面下方**给出一个可落点。
+ *   behaviors.ts:502-505 那条注释曾断言"空段落会被导出丢弃，所以不能插空段落" ——
+ *   **那条依据已过期**：`serialize.ts:668 trimTrailingEmptyParas` 现在是
+ *   **零调用死函数**，2026-10-06 方案 A 之后空段落是**进真源**的
+ *   （判据 `20-empty-para` EP-E01~03 钉着）。⇒ 技术障碍不存在。
+ */
+test('FOLD-ENTER4 🔴🔴🔴 标题末尾回车必须换到折叠块外，随后的字不许落回标题（用户报障第 8 条）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'fe4', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await withTimeout(page.waitForSelector('.ns-fold', { timeout: 10_000 }), 12_000, '等折叠块');
+    await page.click('.ns-fold > :first-child', { position: { x: 8, y: 10 } });
+    await new Promise((r) => setTimeout(r, 350));
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
+    await new Promise((r) => setTimeout(r, 200));
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Shift+End');
+    await page.keyboard.type('ABCDEF');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const before = await page.evaluate(() => (window.__NOTESYNC_DOC__().blocks || []).map((b) => b.t));
+    assert.deepEqual(before, ['p', 'fold'], `前置：回车前应是["p","fold"]，实际=${JSON.stringify(before)}`);
+
+    // 光标落标题**末尾**（不传 offset）
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_TITLE_END__());
+    await new Promise((r) => setTimeout(r, 250));
+    await page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 600));
+
+    // 🔴 关键动作：回车后立刻打字。看字落在哪 ——
+    //   落在标题里 = 没修好（这是用户真正在做的动作，比"真源有没有变"更贴近）。
+    await page.keyboard.type('ZZZ');
+    await new Promise((r) => setTimeout(r, 700));
+
+    const blocks = await page.evaluate(() => window.__NOTESYNC_DOC__().blocks || []);
+    const order = blocks.map((b) => b.t);
+    const fi = blocks.findIndex((b) => b.t === 'fold');
+    const foldTitle = blocks[fi]?.title?.map((s) => s.t).join('') ?? '';
+    const all = JSON.stringify(blocks);
+
+    // 🔴 断言 1：折叠块个数不变（末尾回车同样不许复制块）
+    assert.equal(
+      order.filter((t) => t === 'fold').length, 1,
+      `折叠块个数必须恒为 1，实际 order=${JSON.stringify(order)}`,
+    );
+
+    // 🔴🔴 断言 2（这条报障的核心）：字绝不许落进折叠标题。
+    //   修前实测 title 变成 "ABCDEFZZZ"。
+    assert.equal(
+      foldTitle, 'ABCDEF',
+      `回车后打的字必须落在折叠块**外面**，标题不该变。实际标题=「${foldTitle}」`
+      + `（字落回标题内部了）`,
+    );
+
+    // 🔴 断言 3：字必须出现在折叠块**之后**（下方一行），不是别处
+    assert.ok(
+      JSON.stringify(blocks.slice(fi + 1) || []).includes('ZZZ'),
+      `ZZZ 应出现在折叠块下方的块里，实际 foldIdx=${fi} order=${JSON.stringify(order)}`,
+    );
+
+    // 🔴 断言 4：正文 BODY 那行不许被动
+    assert.ok(all.includes('BODY'), `正文 BODY 块应仍在，实际=${JSON.stringify(order)}`);
+  } finally {
+    await page.close();
+  }
+});

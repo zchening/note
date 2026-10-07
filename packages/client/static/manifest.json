@@ -1,12 +1,18 @@
 {
-  "name": "NoteSync",
-  "short_name": "NoteSync",
+  "name": "NoteSyncX",
+  "short_name": "NoteSyncX",
   "description": "端到端加密的便签同步工具",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#FBFBF8",
   "theme_color": "#FBFBF8",
   "icons": [
+    {
+      "src": "/favicon.svg?v=7.9.0",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
     {
       "src": "/icons/icon-192.png",
       "sizes": "192x192",
@@ -17,13 +23,7 @@
       "src": "/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/icons/icon-512-maskable.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     }
   ]
 }

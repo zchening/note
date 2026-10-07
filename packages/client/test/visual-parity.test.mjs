@@ -350,7 +350,19 @@ test('VP-12 桌宠 SVG 逐字等于老项目 :11200，且默认不领养', () =>
   assert.doesNotMatch(PET_SVG, /[\u{1F980}\u{1F43E}]/u, '不许用 emoji 代替描边螃蟹');
 
   withStorage(() => {
-    assert.deepEqual(readPet(), { adopted: false, asleep: false, last: 0 }, '老项目：默认关（adopted 缺省 false）');
+    // 🔴🔴 这里原来断言的是**整个对象**等于 `{adopted,asleep,last}` 三字段。
+    //   桌宠补齐养成字段（stage/ate/days/shelf/born/retiredAt/talked，老项目 :11183）
+    //   之后那个 deepEqual 必然红 —— 但它要守的**意图**（默认关）一个字都没变，
+    //   所以改成逐字段断言意图，而不是把这条判据删掉或放宽成 `ok()`。
+    //   少字段/多字段的形状由 PET-02/PET-05 钉，不该由这条兜。
+    const blankState = readPet();
+    assert.equal(blankState.adopted, false, '老项目：默认关（adopted 缺省 false）');
+    assert.equal(blankState.asleep, false);
+    assert.equal(blankState.last, 0);
+    assert.equal(blankState.stage, 0, '新档：形态缺省幼体');
+    assert.equal(blankState.ate, 0, '新档：吃字计数缺省 0');
+    assert.deepEqual(blankState.shelf, [], '新档：柜子缺省空');
+    assert.equal(blankState.retiredAt, 0, '新档：没放归过');
     adoptPet();
     assert.equal(readPet().adopted, true, '访问 /pet 即领养');
     adoptPet();

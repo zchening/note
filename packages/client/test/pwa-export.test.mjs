@@ -25,6 +25,16 @@ const SRC = resolve(HERE, '..', 'src');
 const STATIC = resolve(HERE, '..', 'static');
 
 const readSrc = (rel) => readFileSync(resolve(SRC, rel), 'utf8');
+/**
+ * 去块注释与整行行注释。
+ *
+ * 🔴 判"某段代码不存在"时**必须**先去注释（判据纪律，已栽过两次）。
+ *   否则解释性注释里提一句被删的符号名，就把判据顶成恒红 ——
+ *   而"为什么删"恰恰必须写在注释里，否则下一个人会写回来。
+ *   （同款实现见 fav-backup.test.mjs:280 的同名函数。判据刻意各自自带，
+ *   不跨文件共享：共享工具一旦被改，两个文件的判据会同时漂。）
+ */
+const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const CSS_BODY = readFileSync(resolve(SRC, 'ui/styles.css'), 'utf8').replace(
   /\/\*[\s\S]*?\*\//g,
   '',
@@ -44,7 +54,12 @@ test('PWA-01 manifest 必须齐：文件 + link + 图标（老项目 index.html:
   assert.ok(existsSync(mf), 'manifest.json 不存在 ⇒ 浏览器不认为这是可安装应用（用户报障第 12 条）');
   const j = JSON.parse(readFileSync(mf, 'utf8'));
   assert.equal(j.display, 'standalone', '必须是 standalone（装完才有"像 App 一样"的窗口形态）');
-  assert.equal(j.name, 'NoteSync');
+  // 🔴 v1.13.0：原断言写死 'NoteSync'（抄老项目 manifest.json 的字面值），
+  //   但 v1.12.0 用户拍板把应用名统一改成 **NoteSyncX**（桌面图标与通知栏同名才分得开，
+  //   两版 App 同机共存）。产品口径以拍板为准 ⇒ 判据跟着改，不改实现。
+  //   ⚠️ 别把它改回 'NoteSync' —— 那会让"改回旧名"这条回归永远测不出来。
+  assert.equal(j.name, 'NoteSyncX', 'v1.12.0 起 manifest name 必须是 NoteSyncX（与 strings.xml / capacitor.config.json 同名）');
+  assert.equal(j.short_name, 'NoteSyncX', 'short_name 同样必须是 NoteSyncX（加桌面后图标下的名字）');
   assert.equal(j.theme_color, '#FBFBF8', '主题色是老项目的浅色底，不是随手挑的');
   assert.equal(j.background_color, '#FBFBF8');
   assert.ok(Array.isArray(j.icons) && j.icons.length >= 2, '至少两枚图标（192 + 512）');
@@ -56,9 +71,15 @@ test('PWA-01 manifest 必须齐：文件 + link + 图标（老项目 index.html:
     '至少一枚 maskable（安卓自适应图标裁切时不能留白）',
   );
   // 🔴 反向：icon 的 src 必须**真实存在**，否则装完是空白方块
+  //   🔴 v1.13.0：必须先剥查询串。manifest 里 src 形如 `/favicon.svg?v=7.9.0`
+  //   （v1.12.0 起照老项目口径给 svg 带缓存版本号，SW 预缓存要用同一串），
+  //   而 `resolve(STATIC, '/favicon.svg?v=7.9.0')` 拼出来是**带问号的文件名**，
+  //   existsSync 恒 false ⇒ 这条判据会假红（错报成"图标缺失"，而构建产物里它好端端的）。
+  //   真源是 src 的 path 部分，query 只影响 HTTP 缓存命中，判文件存在时必须丢掉。
   for (const i of j.icons) {
-    const p = resolve(STATIC, i.src.replace(/^\//, ''));
-    assert.ok(existsSync(p), `manifest 引用的图标不存在：${i.src}（症状：装完是浏览器默认图标）`);
+    const rel = i.src.replace(/^\//, '').split('?')[0];
+    const p = resolve(STATIC, rel);
+    assert.ok(existsSync(p), `manifest 引用的图标不存在：${i.src} → 解析成 ${rel}（症状：装完是浏览器默认图标）`);
   }
 });
 
@@ -166,11 +187,23 @@ test('PWA-05 安装引导条：解锁后才弹、iOS 如实说明、两个按钮
 
 /* ---------------- 第 13 条：移动端导出到微信 ---------------- */
 
-test('EXP-W01 剪贴板档提示必须按平台分：手机没有 Ctrl+V 这个动作', () => {
+test('EXP-W01 🔴🔴 剪贴板档提示不许谎报「下方图片」（A1：剪贴板成功后不开预览层）', () => {
   assert.equal(COPY.exportOkMsg('clipboard'), '图片已复制，可直接 Ctrl+V 粘贴');
-  assert.equal(COPY.exportOkMsgTouch('clipboard'), '图片已复制，长按下方图片可发给微信');
-  // 🔴 反向：触屏文案里**不许**出现 Ctrl+V —— 给一句做不到的指引等于没说
+  // 🔴🔴 用户报障第 4 条：「导出图片并复制我希望体验还是和老版本一样，不要现在这样下载什么的」。
+  //   老项目 index.html:2896-2963 的 exportImage() **零平台分支** —— 剪贴板成功后只
+  //   showUploadStatus + setTimeout(hideUploadStatus, 3000) + return，没有任何后续动作。
+  //   ⇒ 触屏剪贴板成功时屏上**没有预览层、没有图**，「长按下方图片」就是谎报。
+  //   （谎报比给一句泛用指引更糟：用户真去长按，发现根本没有图。）
+  assert.ok(
+    !/下方图片|长按下方/.test(COPY.exportOkMsgTouch('clipboard')),
+    '触屏剪贴板档不许说「长按下方图片」—— A1 下剪贴板成功后不开预览层，屏上没有图可长按，' +
+      `实际「${COPY.exportOkMsgTouch('clipboard')}」`,
+  );
+  // 🔴 反向：触屏文案里也不许出现 Ctrl+V —— 给一句做不到的指引等于没说
   assert.doesNotMatch(COPY.exportOkMsgTouch('clipboard'), /Ctrl\+V/);
+  // 🔴 触屏剪贴板档必须给一句**做得到**的指引：复用原生桥档的「可直接粘贴」口径
+  //   （老项目 index.html:2943 同一句）。
+  assert.equal(COPY.exportOkMsgTouch('clipboard'), '图片已复制，可直接粘贴');
   // 另外两档两边一致
   assert.equal(COPY.exportOkMsgTouch('native'), COPY.exportOkMsg('native'));
   assert.equal(COPY.exportOkMsgTouch('share'), COPY.exportOkMsg('share'));
@@ -258,6 +291,50 @@ test('EXP-W02 全屏预览层必须给触屏一条"怎么进微信"的指引', (
   assert.ok(
     appendIndent > gateIndent,
     `wechatTip 追加必须缩进在 isTouchDevice() 块内（门控缩进 ${gateIndent}，追加缩进 ${appendIndent}）`,
+  );
+});
+
+test('EXP-W02b 🔴🔴 A1：剪贴板档成功后**零后续动作**（老项目 exportImage 内零平台分支）', () => {
+  const render = readSrc('export/render.ts');
+  // 🔴🔴 判"代码不存在"必须**先去注释**（判据纪律，已栽过）。
+  //   否则解释性注释里提一句那个被删的函数名，就会把判据顶成恒红 ——
+  //   而这里恰恰**必须**在注释里写清"此前有过、为什么删"，否则下一个人会写回来。
+  const renderCode = stripComments(render);
+  // 🔴🔴 这是本批的**核心不变量**：用户报障第 4 条「不要现在这样下载什么的」。
+  //   老项目 index.html:2896-2963 的 exportImage() 里剪贴板成功后是
+  //   showUploadStatus(...) + setTimeout(hideUploadStatus, 3000) + return，**零后续动作**。
+  //   bj 此前在第①档与第②档剪贴板成功之后各调了一次 openTouchPreviewOnClipboard(...)
+  //   ⇒ 屏上多出一层遮罩，用户看到的是「像下载的流程」。
+  //   ⇒ 现在那个函数必须**整个不存在**。
+  assert.doesNotMatch(
+    renderCode,
+    /openTouchPreviewOnClipboard/,
+    '🔴 剪贴板成功后不许再开预览层（openTouchPreviewOnClipboard 必须整个删掉）',
+  );
+  // 🔴 两个剪贴板档的 return 之前都只剩 `return 'clipboard'`，中间不许夹任何调用。
+  //   用"剪贴板成功分支里最后一次 return 'clipboard' 之前不许出现 showPreview"来钉，
+  //   比逐个函数体切片更抗改写（判据纪律：钉行为，不钉命名）。
+  const retIdx = [...renderCode.matchAll(/return 'clipboard';/g)].map((m) => m.index);
+  assert.equal(retIdx.length, 2, '应有两处剪贴板成功收场（Promise 形态 + Blob 重试），实际 ' + retIdx.length);
+  for (const i of retIdx) {
+    const win = renderCode.slice(Math.max(0, i - 400), i);
+    assert.doesNotMatch(
+      win,
+      /showPreview/,
+      '🔴 剪贴板成功到 return 之间不许出现 showPreview（那就是要多开预览层），上下文：\n' + win.slice(-260),
+    );
+  }
+  // 🔴 反向闸 A：第⑤档全屏预览兜底必须**仍然存在**（剪贴板全拒时它是唯一出口，
+  //   删掉它等于把"导不出图"变成"什么都拿不到"）。
+  assert.match(renderCode, /deps\.showPreview\(blob\);/, '第⑤档全屏预览兜底必须保留');
+  assert.match(renderCode, /return 'preview';/, '第⑤档必须仍返回 preview');
+  // 🔴 反向闸 B：DeliverDeps 的 isTouch 注入口必须一并删掉。
+  //   那个字段是"触屏补开预览层"的唯一入口；逻辑删了字段留着就是死字段，
+  //   而死字段会骗下一个人以为"触屏还有地方需要平台分支"，从而把行为原样写回来。
+  assert.doesNotMatch(
+    renderCode,
+    /isTouch/,
+    'DeliverDeps.isTouch 必须一并删掉（逻辑已删，字段留着是死字段）',
   );
 });
 

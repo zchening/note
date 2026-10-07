@@ -170,6 +170,31 @@ test('QR-M 扫码换机', async (t) => {
       );
       // 🔴 老项目 :9186 那行「备份笔记：nsbak-xxxxxx」是**独立一行**（#bakBakId），
       //   不是拼进指引句。屏上用户要靠它对号/手输，混在一句里就找不到了。
+      //
+      // 🔴🔴🔴 这里**必须等它可见**，不能"等出码信号成立就读"（2026-10-07 修正）：
+      //   上面那个 waitForFunction 等的是 `__NOTESYNC_BAK_ID__()`（全局变量），
+      //   而它在 `onMake` 里是**同步**赋的（main.ts:3222 `lastMigrateBakId = r.bakId`）——
+      //   此刻 `run()` 随后才 `await renderCode(r.code)`，而 renderCode 第一件事是
+      //   `await loadQrcode()`（动态插 <script src="/qrcode-generator.js">）。
+      //   ⇒ 那个信号与"这一行已显示"**没有因果关系**，两者之间隔着一个网络往返。
+      //
+      //   实测（取证判据与本条逐字等价、同一 build、同一篇名口令）：
+      //     少等一个协议往返 ⇒ hidden=true（本条红）    tWait≈150ms
+      //     多等一个 `page.$` 往返 ⇒ hidden=false（本条绿）qrcodeReady=true
+      //   症状：**单跑红、并发红、探针绿**，看起来像产品 bug，其实一个字节都没坏。
+      //
+      //   ⇒ 判据纪律：**等被断言的那个事实本身**，不要等一个恰好先于它的信号。
+      //     这与"先让测试证明 bug 存在"不冲突——产品行为（这一行最终会显示）是对的，
+      //     错的只是判据读得太早。
+      await withTimeout(
+        page.waitForFunction(
+          () =>
+            document.getElementById('migrateBakId')?.classList.contains('hidden') === false,
+          { timeout: 10_000 },
+        ),
+        12_000,
+        '「备份笔记：」那一行必须变得可见（老项目 :9186）',
+      );
       const bakIdLine = await page.evaluate(() => {
         const el = document.getElementById('migrateBakId');
         return { text: el?.textContent ?? '', hidden: el ? el.classList.contains('hidden') : true };
@@ -721,6 +746,94 @@ test('QR-M 扫码换机', async (t) => {
 
       assert.deepEqual(errs, [], `出现页面异常：${errs.join(' | ')}`);
       assert.deepEqual(cerrs, [], `出现 console.error：${cerrs.join(' | ')}`);
+    } finally {
+      await page.close();
+    }
+  });
+
+  /**
+   * QR-M13 🔴🔴🔴 免口令出码时，旧口令弹窗**一帧都不许出现**（用户报障第 2 条）
+   *
+   * 用户原话：「点击扫码换机 → 在弹出真正的扫码换机弹出框之前**一闪而过**以前那个需要输入口令的弹窗」。
+   *
+   * 🔴🔴🔴 为什么这条判据必须采样**时间序列**，而不是断言终态：
+   *   闪的是**中间帧**。修好之后终态是「弹窗在 + 口令框 hidden」，
+   *   没修好时终态**也是**「弹窗在 + 口令框 hidden」（`panel.ts:523` 会补上 hidden）——
+   *   ⇒ 任何只查终态的断言（`#migratePass` isVisible()===false、
+   *   `passWrap.classList.contains('hidden')`）在**两种实现下都通过**，
+   *   是恒真断言，钉不住任何东西。这正是本仓记忆里那条
+   *   「判据钉的是用户可见最终结果」的反面：这里必须钉**过程**。
+   *
+   * 🔴 老项目的纪律就在这段注释里（index.html:9126-9129，原话）：
+   *   「也不能『先 show stage1 再 await 密钥』：那会闪一框空口令给人看，
+   *     与『不再要口令』的口径自相矛盾。所以先取密钥定好态，再一次性开弹窗，
+   *     并且『开弹窗』在全函数里只写这一处。」
+   * ⇒ bj 现在的写法是「先 appendChild 入 DOM（panel.ts:325）、
+   *   后 add('hidden')（panel.ts:523）」，正好是老项目明文否决的那个顺序。
+   *
+   * 采样方式：`requestAnimationFrame` 逐帧读 `#migratePassWrap` 的可见性。
+   * 不用 MutationObserver：MutationObserver 只在 DOM 变更时回调，
+   * 若 mask 插入与 hidden 在**同一个同步任务**内完成，它只会收到一条记录，
+   * 量不出"插入后、隐藏前"这个窗口的真实可见性。
+   */
+  await t.test('QR-M13 🔴🔴🔴 免口令出码时旧口令弹窗一帧都不许闪（用户报障第 2 条）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qm13', PASS);
+    try {
+      await waitEditor(page);
+      await typeBody(page, ['免口令直出码闪烁验证']);
+      await favCurrent(page);
+
+      // 🔴 前置：收藏夹非空是 precheck 的过闸条件。空收藏夹会走 err 分支，
+      //   那样就测不到"免口令直出码"这条路径（空收藏夹由 BAK-M09 单独钉）。
+      const favs = await readFavs(page);
+      assert.deepEqual(favs, ['qm13'], '前置：本机收藏夹应有这一篇');
+
+      // 🔴 采样器在**点菜单之前**装好。探针函数被序列化进页面 ⇒ 不能引用外部作用域。
+      await page.evaluate(() => {
+        window.__QRM13_FRAMES__ = [];
+        const tick = () => {
+          const w = document.getElementById('migratePassWrap');
+          window.__QRM13_FRAMES__.push({
+            t: performance.now(),
+            visible: w ? w.offsetParent !== null && getComputedStyle(w).display !== 'none' : false,
+            maskUp: !!document.getElementById('migrateMask'),
+          });
+          if (window.__QRM13_FRAMES__.length < 2000) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+
+      // 走真实用户路径：点菜单 → 点「扫码换机」
+      await page.click('#menuBtn');
+      await withTimeout(page.waitForSelector('#menuBackup', { timeout: 8000 }), 10_000, '等菜单项');
+      await page.click('#menuBackup');
+      await withTimeout(page.waitForSelector('#migrateMask', { timeout: 8000 }), 10_000, '等换机浮层');
+
+      // 等免口令直出码走完
+      await withTimeout(
+        page.waitForFunction(() => {
+          const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
+          return /^nsbak-[a-z0-9]{6}$/.test(window.__NOTESYNC_BAK_ID__?.() ?? '') &&
+            (window.__NOTESYNC_PARSE_PAIR__?.(c)?.ok === true);
+        }, { timeout: 20_000 }),
+        25_000,
+        '免口令直出码应走完',
+      );
+
+      const frames = await page.evaluate(() => window.__QRM13_FRAMES__ || []);
+
+      // 🔴 只看「浮层已经插进 DOM 之后」的帧—— 插之前浮层不存在、口令框自然不可见，
+      //   把它们算进来这条判据就恒绿了。
+      const afterMount = frames.filter((f) => f.maskUp);
+      assert.ok(afterMount.length > 0, `浮层插入后应至少采到一帧，实际 frames=${frames.length}`);
+
+      // 🔴 核心断言：浮层在 DOM 里之后，**任何一帧**口令框都不得可见。
+      const flashed = afterMount.filter((f) => f.visible);
+      assert.deepEqual(
+        flashed.map((f) => Math.round(f.t)),
+        [],
+        `旧口令弹窗闪了：浮层在 DOM 里之后有 ${flashed.length} 帧口令框可见（用户报障第 2 条）`,
+      );
     } finally {
       await page.close();
     }

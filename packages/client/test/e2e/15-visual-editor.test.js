@@ -1315,3 +1315,146 @@ test('VED-19 🔴 折叠窄屏（≤560px）把手有 44×44 命中区 + 三角�
     await page.close();
   }
 });
+
+test('VED-20 🔴🔴🔴 空态占位符不得独占第一行（absolute + 对齐 padding，宽/窄屏各量一次）', async () => {
+  // 用户报：**新建一篇笔记时光标落在第二行**，期望第一行。
+  //
+  // 🔴🔴 真根因（不是"少了个样式"，是行盒结构）：
+  //   老项目编辑器是**裸 contenteditable div**，空了就是真空，
+  //   `#editor:empty:before` 的占位符是**行内**内容，与光标自然同行。
+  //   本项目是 Lexical，**永远**至少有一个 `<p class="ns-p"><br></p>`
+  //   （VED-07 已把`:empty` 恒不成立钉成事实）。
+  //   行内 ::before 会被后面的**块级** <p> 挤进匿名块、独占第1 行
+  //   ⇒ 承载光标的空段落被顶到第 2 行。
+  //   正解 = 占位符改 `position:absolute`，不参与行盒计算，第一行还给正文与光标。
+  //
+  // 🔴🔴 为什么本条必须真浏览器量行盒，**不能匹配 CSS 字符串**：
+  //   窄屏覆盖曾经挂在 560px 那段 @media 里、位置排在主规则**前面**，
+  //   正则匹配 "top: 24px" 恒绿，但真浏览器量出 top 对齐差 16px、left 差 10px
+  //   （同specificity 时后写的赢，:has()/:not() 都不贡献额外权重）。
+  //   ⇒ 判据钉的是**量出来的对齐关系**（top 偏移 == padding-top），不是文本。
+  //
+  // 🔴 承重的是第4 条断言（段落顶 == 编辑器顶 + padding-top）：
+  //   它才是"光标在第一行"的直接证据 —— 一旦占位符退回行内，
+  //   段落顶会掉到 padding-top + 行高，那条立刻红。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'ved20', 'pw');
+
+  /** 在真实页面里挂一个离屏 fixture 并量行盒。:has() 必须真命中，所以自己造最小结构。 */
+  const measure = async (width) => {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(150);
+    return page.evaluate(() => {
+      const ed = document.createElement('div');
+      ed.className = 'ns-editor';
+      ed.setAttribute('data-ph', '开始输入，自动同步到所有设备…');
+      ed.contentEditable = 'true';
+      const p = document.createElement('p');
+      p.className = 'ns-p';
+      p.appendChild(document.createElement('br'));
+      ed.appendChild(p);
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-9999px;top:0;width:600px';
+      host.appendChild(ed);
+      document.body.appendChild(host);
+
+      const before = getComputedStyle(ed, '::before');
+      const edCs = getComputedStyle(ed);
+      const edRect = ed.getBoundingClientRect();
+      const paraRect = p.getBoundingClientRect();
+      const lineH = parseFloat(before.lineHeight) || 32;
+      const phTop = edRect.top + parseFloat(before.top || '0');
+      const snap = {
+        // 真实编辑器（生产路径）上的同一条声明，双保险
+        liveBeforePosition: getComputedStyle(
+          document.querySelector('.ns-editor'),
+          '::before',
+        ).position,
+        beforePosition: before.position,
+        editorPosition: edCs.position,
+        topOff: parseFloat(before.top || '0'),
+        leftOff: parseFloat(before.left || '0'),
+        padTop: parseFloat(edCs.paddingTop),
+        padLeft: parseFloat(edCs.paddingLeft),
+        // 段落顶相对编辑器顶（含 border）—— 0 说明贴着 padding 起步，没被挤下去
+        paraTopDelta: Math.round(paraRect.top - edRect.top),
+        // 占位符行盒与空段落行盒是否重叠（重叠 = 同一行 = 光标在第一行）
+        overlap: phTop < paraRect.bottom - 1 && phTop + lineH > paraRect.top + 1,
+      };
+      host.remove();
+      return snap;
+    });
+  };
+
+  try {
+    const wide = await measure(900);
+    const narrow = await measure(400);
+
+    // 1) 绝对定位：脱离行盒，这是本条修复的承重声明
+    assert.equal(
+      wide.beforePosition,
+      'absolute',
+      `占位符必须 absolute（行内会被块级 p 挤进匿名块独占第一行 ⇒ 光标落到第二行），实际 ${wide.beforePosition}`,
+    );
+    assert.equal(
+      narrow.beforePosition,
+      'absolute',
+      `窄屏占位符也必须 absolute，实际 ${narrow.beforePosition}`,
+    );
+    assert.equal(
+      wide.liveBeforePosition,
+      'absolute',
+      `真实编辑器上的占位符也必须 absolute，实际 ${wide.liveBeforePosition}`,
+    );
+
+    // 2) 坐标系：.ns-editor 必须 relative，否则 absolute 的 top/left 参照错对象
+    assert.equal(
+      wide.editorPosition,
+      'relative',
+      `.ns-editor 必须 position:relative 作为占位符坐标系，实际 ${wide.editorPosition}`,
+    );
+
+    // 3) 宽屏 top/left 与 padding 逐字对齐（钉住"偏移量 == padding"这个关系，不钉死 40/28）
+    assert.ok(
+      Math.abs(wide.topOff - wide.padTop) < 0.5,
+      `宽屏占位符 top 应等于 padding-top（否则占位符与正文第一行错开），差 ${wide.topOff - wide.padTop}px`,
+    );
+    assert.ok(
+      Math.abs(wide.leftOff - wide.padLeft) < 0.5,
+      `宽屏占位符 left 应等于 padding-left，差 ${wide.leftOff - wide.padLeft}px`,
+    );
+
+    // 🔴 4) 承重断言：空段落顶 == 编辑器顶 + padding-top。
+    //    占位符一旦退回行内，段落会被顶到第二行 ⇒ 这里出现一个行高的差值。
+    assert.ok(
+      Math.abs(wide.paraTopDelta - wide.padTop) < 1,
+      `宽屏空段落顶应贴着 padding-top（光标在第一行），实际比 padding-top 低/高 ${wide.paraTopDelta - wide.padTop}px`,
+    );
+
+    // 5) 窄屏同三项 —— 这一组是「源码顺序」的唯一守卫。
+    //    把窄屏覆盖挪回主规则之前（即560px 那段 @media 里），第 3/4 组立刻红。
+    assert.ok(
+      Math.abs(narrow.topOff - narrow.padTop) < 0.5,
+      `窄屏占位符 top 应等于窄屏 padding-top，差 ${narrow.topOff - narrow.padTop}px（检查 @media 覆盖是否被主规则按源码顺序压掉）`,
+    );
+    assert.ok(
+      Math.abs(narrow.leftOff - narrow.padLeft) < 0.5,
+      `窄屏占位符 left 应等于窄屏 padding-left，差 ${narrow.leftOff - narrow.padLeft}px`,
+    );
+    assert.ok(
+      Math.abs(narrow.paraTopDelta - narrow.padTop) < 1,
+      `窄屏空段落顶应贴着 padding-top，实际差 ${narrow.paraTopDelta - narrow.padTop}px`,
+    );
+
+    // 6) 反向断言：占位符行盒必须与空段落行盒重叠（"同一行"的直接几何证据）
+    assert.ok(
+      wide.overlap,
+      '宽屏占位符行盒应与空段落行盒重叠（占位符独占一行会把光标顶到第二行）',
+    );
+    assert.ok(
+      narrow.overlap,
+      '窄屏占位符行盒应与空段落行盒重叠',
+    );
+  } finally {
+    await page.close();
+  }
+});

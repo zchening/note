@@ -44,7 +44,7 @@ import { registerBehaviors } from './behaviors.ts';
 import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
 import { $isFoldNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
-import { docToLexical, lexicalToDoc, nodesToSpans } from './serialize.ts';
+import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
 import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
 import { SyncClient } from './sync/client.ts';
 import {
@@ -63,8 +63,10 @@ import { COPY } from './ui/copy.ts';
 import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
 import { sanitizeNoteName } from './ui/landing-logic.ts';
+import { blockFingerprintsOf, chooseRewritePath, planLocalMarkRewrite } from './reminder/local-mark.ts';
 import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
-import { ReminderUI } from './reminder/ui.ts';
+import { ensureExactAlarmPermission } from './reminder/native-rem.ts';
+import { ReminderUI, lastNativeSyncOutcome } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
 import { bindImageViewer } from './image/viewer.ts';
 import { browserStore, favListOf, mergeFavs, readFavs, toggleFav, writeFavs, FAVS_MAX } from './fav/favs.ts';
@@ -72,7 +74,17 @@ import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
 import { dayGreet } from './egg/fx.ts';
 import { mountPet, unmountPet } from './egg/pet.ts';
-import { eggBrowserStore, isEggRoute } from './egg/registry.ts';
+import { eggBrowserStore, isEggRoute, markDiscovered } from './egg/registry.ts';
+import { bindTypewriterSound } from './egg/typewriter.ts';
+import {
+  buildDiagPanel,
+  hasDiagFlag,
+  diagFlagStored,
+  rememberDiagFlag,
+  type DiagPanel,
+} from './diag/panel.ts';
+import { collectDiagLines, type DiagDeps } from './diag/collect.ts';
+import { buildEggDraw } from './egg/draw.ts';
 import { exportNotePng } from './export/index.ts';
 import { copyNoteToClipboard, docToClipboardPayload } from './export/copy.ts';
 import { buildPairPanel, closePairPanel } from './scan/panel.ts';
@@ -109,7 +121,10 @@ import {
   readBakManifest,
   readBakSlot,
   writeBakSlot,
+  type BakMaterial,
 } from './migrate/bak-note.ts';
+import { collectBakMaterials, proveBakMaterials } from './migrate/bak-materials.ts';
+import { createImeGate, type ImeGate } from './sync/ime-gate.ts';
 import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
@@ -118,17 +133,40 @@ import {
   isTouchDevice as isTouch,
   restoreEditorFocus,
 } from './platform/touch.ts';
+// 🔴 v1.13.0：原生判据统一出口。原来 4 处各读一遍 `window.__NOTESYNC_NATIVE__`，
+//   而那个标志全仓从无赋值（6 处读、0 处写）⇒ 恒 undefined ⇒ 真机 APK 里也判不出来。
+import { isNativeApp } from './platform/native-detect.ts';
+// 🔴 v1.13.0：APK 冷启动自动进入上次笔记（五部件）。见 route/last-note.ts 文件头。
+import { lastNoteToResume, markJumped, rememberLastNote } from './route/last-note.ts';
+// 🔴 v1.12.0：值导入（不是type）——boot() 要用它做空闲预拉jsQR。
+import { prefetchJsQrIdle } from './scan/engine.ts';
 import type { ScanDiag } from './scan/engine.ts';
 
 declare global {
   interface Window {
-    __NOTESYNC_NATIVE__?: boolean;
+    // 🔴🔴 v1.13.0 删除了 `__NOTESYNC_NATIVE__?: boolean`。它是个**从无赋值的幽灵标志**：
+    //   6 处读、0 处写，恒undefined ⇒ 任何 `=== true` 都恒假。
+    //   而这条类型声明让它"看起来像个正常开关" —— 类型系统在这里帮了倒忙：
+    //   它让 `window.__NOTESYNC_NATIVE__ === true` 编得过、读得顺，却永远不成立。
+    //   原生判据改用 platform/native-detect.ts 的 isNativeApp()
+    //   （window.Capacitor.isNativePlatform()，老项目 index.html:10125 口径）。
+    //   判据见test/native-detect.test.mjs 的 NAT-3（禁止再读这个标志）。
     __NOTESYNC_BUILD__?: { version: string; date: string; sha: string };
     __NOTESYNC_EDITOR__?: LexicalEditor;
     /** 读取最近一次提交的真源快照（深拷贝）。正式接口，非调试后门。 */
     __NOTESYNC_DOC__?: () => Doc;
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
+    /**
+     * 采一份诊断读数并回**文本**（老项目 `window.collectDiagLines()` 同名同义）。
+     * 正式接口，不是调试后门：光标类问题只能在真机上确认（老项目 :1927），
+     * 而真机把 10 组读数交给用户的方式就是复制这段文本发出来。
+     *
+     * 🔴🔴 只回文本、**不回 DOM 句柄**：钩子挂在 window 上，回一个能改的节点
+     *   等于开后门（改了节点，"读数是纯只读的"这条纪律就破了）。
+     *   采集失败返回 `null`（明确表示"这次没采到"），不返回半份读数。
+     */
+    __NOTESYNC_DIAG__?: () => string | null;
     /**
      * 在光标处插入折叠块。**正式接口**，不是调试后门：
      * 折叠块是纯编辑器内结构，菜单/快捷键/未来的 MCP 都要走它，
@@ -199,8 +237,12 @@ declare global {
     /**
      * 最近一次扫码自检（引擎/帧数/错误摘要）。正式接口。
      * 🔴 只含元信息，**不含扫码内容** —— 码里带着口令。
+     *
+     * 🔴 类型用生产侧的 `ScanDiag`（scan/engine.ts）而不是就地写一份结构字面量：
+     *   就地写窄了，诊断面板那行 `scan …` 就会在引擎加字段后**编译期失配**，
+     *   而失配的表现是"面板少显示几个字段"——正是这类面板最容易被当成正常。
      */
-    __NOTESYNC_SCAN_DIAG__?: () => { engine: string; frames: number; errs: number; result: string } | null;
+    __NOTESYNC_SCAN_DIAG__?: () => ScanDiag | null;
     /**
      * 解析一个配对链接（生产解析器本体）。正式接口。
      *
@@ -530,6 +572,25 @@ let editor: LexicalEditor | undefined;
  *   本项目用这一个函数把那些散点收成同一处。
  */
 let linkifyNowRef: (() => void) | undefined;
+
+// 🔴🔴 IME 门控的模块级出口（用户报障第 7 条）。
+//   两个变量各管一件事，别合并：
+//     imeGateRef   = 门控本体⇒ 三条回灌路径判canApply()
+//     detachImeRef = 解绑函数 ⇒ 下次 mountEditor 时撤掉上一篇的监听
+//   🔴🔴 都**必须**有 `undefined` 初值而不是就地 new 一个：
+//   mountEditor 之外（落地页/口令页/备份恢复卡）没有编辑器，
+//   那时读它必须是 undefined 而不是一个"永不组字、恒放行"的假门控 ——
+//   后者会让回灌守卫在无编辑器时形同虚设，看着有闸实际没闸。
+// 🔴 本次挂载的真源快照（B-① 的initialDoc 来源）。
+//   🔴🔴 为什么必须是模块级而不是 startSyncFor 的参数：
+//   startSyncFor 是**独立函数**，而真源 `initial` 是 mountEditor 的局部变量。
+//   两者之间隔着一次路由跳转（route() → showPass/memory unlock → startSyncFor），
+//   把它做成参数要改一串调用点，而那些调用点里**有的路径根本没有这个值**
+//   （比如扫码落地那条）。模块级快照是"最近一次挂载的真源"，语义正好对上
+//   "解锁时解出来的那一版"。
+let mountDocSnapshot: Doc | undefined;
+let imeGateRef: ImeGate | undefined;
+let detachImeRef: (() => void) | undefined;
 /** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
 let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
@@ -980,6 +1041,25 @@ function ensureEggLayer(): EggLayer | undefined {
         showLanding();
         goto('landing');
       },
+      // 🔴 非游戏彩蛋的 replay（老项目 NS_EGG_LIST 的 replay 字段，:6886-6887）。
+      //   `type` → 点播一声回车铃（force=true 绕开静音门，但仍走 ctx running 检查）；
+      //   `diag` → 直接开诊断模态。
+      //   🔴 未知 id 返回 false —— layer.ts 据此**不埋点**（见那里的注释：
+      //   不能让"用户点了没反应"变成"图鉴里已发现"）。
+      replaySide: (id: string): boolean => {
+        if (id === 'type') {
+          const s = eggLayer?.sound;
+          if (!s) return false;
+          const rang = s.type('enter', true);
+          if (rang) markDiscovered(eggBrowserStore(), 'type', true);
+          return true;
+        }
+        if (id === 'diag') {
+          openDiagModal();
+          return true;
+        }
+        return false;
+      },
     });
     eggLayer.bindTriggers();
     return eggLayer;
@@ -1006,6 +1086,83 @@ window.__NOTESYNC_EGG_CODEX_OPEN__ = (): void => {
 //   这里只回答「弹了没有 / 弹的是谁」，避免测试为了方便去开后门。
 window.__NOTESYNC_EGG_ASK__ = (): boolean => eggLayer?.wordAskOpen() ?? false;
 window.__NOTESYNC_EGG_ASK_ID__ = (): string => eggLayer?.wordAskId() ?? '';
+
+/* ------------------------------------------------------------------ *
+ * 诊断面板（老项目 index.html:1926-2082 + :8204-8215）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 🔴 当前真源的模块级只读引用（给诊断面板数提醒用）。
+ *
+ * `latestDoc` 是 `mountEditor` 的闭包局部变量，诊断面板在模块作用域拿不到它。
+ * 这里另存一份引用，**在 update 监听里赋值**（`latestDoc` 的每一次真变更都会
+ * 经过那个监听，见 mountEditor 的对账收口），所以它不会与真源漂移。
+ *
+ * 🔴 为什么不复用 `window.__NOTESYNC_DOC__`：那个钩子每次调用都
+ * `structuredClone(latestDoc)`，而诊断浮层**每 250ms 采一次** ——
+ * 全文深拷贝 4 次/秒，在一个长笔记上是白给的主线程开销。
+ * 诊断要的是 reminders 的条数与时间，不是深拷贝。
+ */
+let latestDocRef: Doc | undefined;
+
+/** 诊断读数的采集依赖。**每次取快照时重新组装**（里面的闭包读的都是当下的值）。 */
+function diagDeps(): DiagDeps {
+  return {
+    version: APP_VERSION,
+    editorHost: () => editor?.getRootElement() ?? document.getElementById('editor-host'),
+    // 🔴 Lexical 自带组字态。老项目的 `isComposing` 是它自己维护的全局变量，
+    //   bj 不复制那套全局态，直接问编辑器 —— 少一个可能与真实状态不同步的影子变量。
+    composing: () => editor?.isComposing() ?? null,
+    // 🔴 v1.13.0：原来读 `window.__NOTESYNC_NATIVE__ === true`，而那个标志**全仓从无赋值**
+    //   ⇒ 恒 undefined ⇒ 诊断面板在真机 APK 里也显示 `web`。改用统一判据（platform/native-detect.ts）。
+    isNative: () => isNativeApp(),
+    sync: () => syncRef?.diagState() ?? null,
+    doc: () => latestDocRef ?? null,
+    scan: () => window.__NOTESYNC_SCAN_DIAG__?.() ?? null,
+    // 🔴 留存放在 reminder/ui.ts（真正产出 SyncOutcome 的地方，见那里的注释）
+    lastNativeSync: lastNativeSyncOutcome,
+  };
+}
+
+/** 诊断面板。懒建于第一次真需要时（连点 / ?diag / 图鉴 replay 三条路共用）。 */
+let diagPanel: DiagPanel | undefined;
+
+function ensureDiagPanel(): DiagPanel {
+  if (diagPanel) return diagPanel;
+  diagPanel = buildDiagPanel(app, diagDeps(), {
+    // 🔴 埋点：老项目 :8219 是 openDiagModal 的第一行 `nsEggUnlock('diag')`。
+    //   走 markDiscovered（幂等，见 registry.ts）而不是自己写 storage ——
+    //   自己写就会绕过"未注册 id 拒收"与"按注册表过滤"两条口径。
+    onUnlock: () => {
+      markDiscovered(eggBrowserStore(), 'diag', true);
+    },
+    onClosed: () => {
+      restoreEditorFocusOnClose();
+    },
+  });
+  return diagPanel;
+}
+
+/** 打开诊断模态。连点 / 图鉴 replay / e2e 三条路共用这一个入口。 */
+function openDiagModal(): void {
+  ensureDiagPanel().open();
+}
+
+/**
+ * e2e / 控制台钩子。
+ *
+ * 🔴 只回**文本**，不回 DOM 句柄：钩子挂在 window 上，回一个能改的节点等于开后门。
+ *   判"诊断面板弹了没有"看返回值有没有 10 组（见 test/diag-panel.test.mjs）。
+ */
+window.__NOTESYNC_DIAG__ = (): string | null => {
+  try {
+    return collectDiagLines(diagDeps(), Date.now()).join('\n');
+  } catch (e) {
+    // 🔴 采读数失败绝不让调用方拿到半个对象：返回 null 明确表示"这次没采到"
+    console.warn('[notesync] 诊断读数采集失败', e);
+    return null;
+  }
+};
 
 let menuRef: ReturnType<typeof buildMenu> | undefined;
 
@@ -1087,7 +1244,9 @@ function onTopbar(act: TopbarAction): void {
           //   拿来显示"正在生成图片"会让用户以为同步坏了（老项目同款口径）。
           showUploadNote(kind, text, autoHideMs);
         },
-        isNativeApp: window.__NOTESYNC_NATIVE__ === true,
+        // 🔴 v1.13.0：同 diagDeps —— 原读那个从无赋值的 __NOTESYNC_NATIVE__，
+        //   恒false ⇒ APK 里导出长图走不到原生复制那一档（降级到 html2canvas，慢且可能失败）。
+        isNativeApp: isNativeApp(),
         nativeCopyImage,
         okMs: COPY.exportOkMs,
         failMs: COPY.exportFailMs,
@@ -1171,6 +1330,15 @@ function greetThisNote(noteId: string): void {
   }, 1000);
 }
 
+/**
+ * 刷新开奖卡句柄（老项目 v9.2.0）。
+ *
+ * 🔴 抽卡必须落在 `location.reload()` **之前**（老项目 index.html:5765 注释：
+ *   「reload 一执行后面就是死代码」）。写在 reload 之后 ⇒ 永远抽不到卡，
+ *   而症状是"刷新了但从不开奖"——**零报错**，因为 reload 本身工作正常。
+ */
+const eggDraw = buildEggDraw();
+
 function mountEditor(name: string, initialDoc?: Doc): void {
   currentNote = name;
   // 🔴 收藏态与收藏夹列表必须在**挂菜单之前**算好：菜单是打开时读这两个值的，
@@ -1193,10 +1361,23 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       menuState.favList = favListOf(favStore);
       menuRef?.open();
     },
-    onRefresh: () => location.reload(),
+    // 🔴🔴 「刷新 + 掉一张卡」（老项目 index.html:5758-5767）。
+    //   `roll()` 必须在 `location.reload()` **之前**：reload 一执行后面就是死代码，
+    //   写在后面 ⇒ 券永远抽不到，症状是"刷新了但从不开奖"，且**零报错**。
+    //   抽卡失败（隐私模式写不进 storage 等）绝不挡住刷新本身 ——
+    //   drawRoll 内部整段 try/catch，异常路径返回 null。
+    onRefresh: () => {
+      eggDraw.roll();
+      location.reload();
+    },
     onSkin: (skin) => {
       currentSkin = skin;
       shellRef?.setSkin(skin, currentTheme === 'dark');
+      // 🔴 复古皮肤蛋埋点（老项目 index.html:1744-1759 `nsSetSkin`：
+      //   `if (nsSkin !== 0) nsEggUnlock('skin')`）。**只有离开默认档才埋**——
+      //   七连点转一圈回到默认档时那次不算"体验过复古皮肤"。
+      //   走 markDiscovered（幂等 + 按注册表过滤），不自己写 storage。
+      if (skin !== 'default') markDiscovered(eggBrowserStore(), 'skin', true);
     },
   });
   shellRef = shell;
@@ -1228,6 +1409,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       restoreEditorFocusOnClose();
     },
     onHome: () => {
+      // 🔴 v1.13.0（老项目 index.html:8036-8040逐字同款）：主动回首页必须打
+      //   "已跳转"标记 —— 否则 APK 里 route() 的冷启动自动跳转会把用户又弹回
+      //   last note（手动输名/扫码/收藏夹进入时那条路径从未设过标记）。
+      markJumped();
       history.pushState({}, '', '/');
       route();
     },
@@ -1369,6 +1554,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       const about = buildAboutOverlay(root || app, {
         native: nativeDepsFromWindow(window),
         webVersion: APP_VERSION,
+        // 🔴 彩蛋：标题 800ms 内连点 4 次 ⇒ 关关于页 + 开诊断模态
+        //   （老项目 index.html:8204-8215）。计数状态机在 diag/tap.ts。
+        onTitleQuadTap: () => {
+          openDiagModal();
+        },
       });
       void about.open();
     },
@@ -1409,6 +1599,24 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   });
 
   ed.setRootElement(editorHost);
+
+  // 🔴🔴🔴 IME 门控（用户报障第 7 条）：**按挂载实例独立**，不做模块级单例。
+  //
+  //   为什么必须挂到 editorHost 而不是 document：Lexical 的 composition 事件
+  //   冒泡到宿主，挂在 document 上会同时收到别的元素（弹窗里的输入框）的组字事件
+  //   ⇒ 在弹窗里打字会把这个编辑器也锁成"组字中" ⇒ 回灌全停。
+  //
+  //   为什么必须解绑（off()）：bj 是多页 SPA，会反复 mountEditor。
+  //   旧监听不撤⇒ 状态跨挂载残留（新编辑器继承上一篇的组字态 / 活跃期），
+  //   症状是"换一篇笔记后同步功能坏了"，而本机一切正常。
+  const imeGate: ImeGate = createImeGate();
+  // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
+  //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
+  detachImeRef?.();
+  detachImeRef = imeGate.attach(editorHost);
+  // 挂到模块级：三条回灌路径（setDoc / 对账回灌 / 提醒回灌）都要判它。
+  imeGateRef = imeGate;
+
   // 🔴🔴🔴 链接可点：必须装官方 `registerClickableLink`（0.52 新增，@lexical/link）。
   //
   //   症状（探针 probe-link-nav-cause 实锤，零报错）：链接识别得好好的
@@ -1489,6 +1697,33 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   （数字梗/烟花，跑在 update 真源文本上），与光标位置无关（见 layer.ts 注释）。
   ensureEggLayer()?.bindWordTrigger(editorHost);
 
+  // 🔴🔴 打字机音（老项目 index.html:6783-6878）。复古皮肤内才发声。
+  //
+  //   为什么挂在**这里**而不是 buildShell 那一段：三条输入通道必须绑在
+  //   编辑器 root 就绪的**同一拍**（与词表触发同理）。挂晚了用户已经敲完字了，
+  //   而症状是"复古皮肤里打字一点声音都没有"—— 零报错。
+  //
+  //   🔴 皮肤守卫做在 typewriter.ts 的**纯逻辑层**（三个闸门函数的第一行），
+  //   这里传的 `skin` 只是那个判定的数据源；出环即静默是纪律，不是这里的 if。
+  //
+  //   🔴 发声复用 eggLayer.sound（唯一 AudioContext）。另造 ctx 会被浏览器限制，
+  //   症状是"进游戏有音、打字没音"（见 sound.ts 的 Sound.type 注释）。
+  const tyLayer = ensureEggLayer();
+  if (tyLayer) {
+    const tySound = tyLayer.sound;
+    bindTypewriterSound(editorHost, {
+      skin: () => currentSkin,
+      play: (kind, force) => {
+        const rang = tySound.type(kind, force);
+        // 🔴 埋点只在**真的响了**时记：老项目是在 nsTypeSound 成功发声后
+        //   nsEggUnlock('type')，静音/ctx 未解锁都不算"体验过打字机音"。
+        //   反过来（先埋点后发声）会让图鉴在用户从没听见过声音时就解锁它。
+        if (rang) markDiscovered(eggBrowserStore(), 'type', true);
+        return rang;
+      },
+    });
+  }
+
   // 🔴🔴 正文图片查看器 / 长按菜单接线（用户报障第 7 条后半段「移动端图片显示异常」）。
   //   漏掉的表现与"没实现"一模一样：样式表里 #nsZoom / #nsImgMenu 的规则全在
   //   （styles.css:1607-1670），但**没有一行 JS 建它们** ⇒ 死 CSS，
@@ -1527,6 +1762,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //   所以它天然是「树外」的数据：改它不需要动树。
       //   正确做法：先把新 reminders 记进 latestDoc，再让**下划线标记**由对账写回树里。
       latestDoc = d;
+      // 🔴🔴 **这里刻意不挂 IME 门控**（曾挂过，随后撤掉 —— 记下来防止后人加回来）：
+      //   这条 setDoc 是**用户主动**点提醒面板触发的（不是远端回灌），
+      //   而用户点面板那一刻输入法组字必然已结束（点走本身就会blur）⇒ 门控恒放行。
+      //   反过来，若在这里挂门控，一旦判定不放行就会**跳过 rem 标记回灌**，
+      //   症状是"提醒加上了但正文没有下划线"，而真源是对的 ⇒ 用户反复点、反复不见。
+      //   **门控只许挂在"用户没请求"的异步回灌路径上**（见 setDoc 与 poll 守卫）。
       // 立刻把 rem 标记铺到正文（对账只改标记，不动用户输入）
       const marked = reconcileReminders(d);
       latestDoc = marked.doc;
@@ -1536,6 +1777,23 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         },
         { discrete: true },
       );
+      // 🔴🔴🔴 远端合并/ 采纳远端 / 采纳本机之后，必须重排原生闹钟。
+      //
+      //   对应老项目三处调用点：
+      //     index.html:5901（拍板「保留本机」后并入草稿）
+      //     index.html:5939（拍板「使用远端」后并入草稿）
+      //     index.html:7287（mergeRemoteReminders 合并远端提醒后）
+      //   bj 没有那三个独立函数（草稿挂起机制是老项目特有的），
+      //   但三者的**共同收口**就是 SyncDeps.setDoc —— 拉取、合并、
+      //   冲突裁决后写回，全走它（sync/client.ts:284 / :422 / :440）。
+      //
+      //   🔴 为什么不能指望下面 1646 那行`rec.added/removed` 顺带覆盖：
+      //   `reconcileReminders` 的 `added` **恒为 []**（reconcile.ts:162 写死），
+      //   所以那行的判据实际只看 `removed`。**远端新增一条提醒时 removed 为空
+      //   ⇒ schedule() 不被调用 ⇒ 原生闹钟停在旧列表**，
+      //   而他端到点照响、这边不响，且界面上零报错。
+      //   这正是"看起来正常、实际静默失效"那一类，必须在这里显式补。
+      reminderRef?.schedule();
     },
     onPanelToggle: () => reminderRef?.togglePanel(),
     insertLine: (text) => insertRemLineToEditor(text),
@@ -1547,6 +1805,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   });
 
   let latestDoc: Doc = initial;
+  // 🔴 供 startSyncFor 的 initialDoc 用（见 mountDocSnapshot 的注释）。
+  //   必须在 latestDoc 之后的**首屏内容**上取，不能等用户编辑过再取。
+  mountDocSnapshot = initial;
 
   // 🔴 必须在 docToLexical 之前挂监听：initial 那一次 update 也要留下快照，
   //   否则首次 commit 之前 latestDoc 停在空文档，e2e 读到的是"从未提交过"的假象。
@@ -1610,16 +1871,68 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
+    // 🔴 诊断面板的真源引用（见 latestDocRef 的注释）。必须在对账**之后**赋值：
+    //   对账可能增删提醒，赋早了会让诊断第 8 组的 rem/future 少算刚变动的那几条。
+    latestDocRef = rec.doc;
     shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);
 
     // 对账可能改了 rem 标记（正文没变但标记变了）→ 此时必须把结果写回编辑器，
     //   否则下划线永远不显示。判据是 canonical 不等：写回自身不会引起无限循环，
     //   因为第二次对账拿到已带标记的文档，算出的结果与自身相同。
+    // 🔴🔴🔴 回灌守卫③：IME 门控（用户报障第 7 条的第二半）。
+    //
+    //   这一处是**用户报障原文「打字的时候换行被吞」最直接的那条路径**：
+    //   registerUpdateListener 每一次 update 都跑（零 debounce），跑完立刻对账，
+    //   只要对账算出标记有变化就`docToLexical` **整篇重建**。
+    //   而 update 的来源包括：用户自己在打字 ⇒ 对账与用户输入**夹在同一帧**，
+    //   组字中的拼音串会被 root.clear() 连同选区一起冲掉。
+    //
+    //   🔴🔴 判据是 `canonicalize(rec.doc) !== canonicalize(exported)`
+    //     （正文真变了）而不是"标记变了"：
+    //     用户自己敲的字变了正文⇒ 门控拦下的是**回灌**，不是他刚敲的字
+    //     （latestDoc 已经写好了，见上面那行），所以他的输入**一个字都不会丢**，
+    //     只是标记这次不铺，等下一次允许回灌时补上。
+    //     这条区分极其重要：判据放宽成"标记变了也拦"会把用户正常打字也拦掉。
     if (canonicalize(rec.doc) !== canonicalize(exported)) {
-      const snapshot = latestDoc;
-      ed.update(() => {
-        docToLexical(snapshot);
-      }, { discrete: true });
+      if (imeGateRef && !imeGateRef.canApply()) {
+        // 🔴 跳过铺标记，**但 schedule() 与 noteEdit() 照旧要走**
+        //   （它们在下面）：提醒的增删是真源事实，不该被门控拦住。
+      } else {
+        // 🔴🔴🔴 **局部重写**（用户拍板 B 的后半段），替掉原来的整篇 docToLexical。
+        //
+        //   `exported` 是**对账前**的形态（直接从当前 Lexical 树导出），
+        //   `rec.doc` 是对账后 —— 两者纯文本逐字相等，只有 span.rem 不同
+        //   （reconcile 的 markAll 只写 span.rem，见 reminder/reconcile.ts:191）。
+        //   ⇒ 指纹不同的块就是"标记真的需要重铺"的块，其余块**一个节点都不碰**。
+        //
+        //   为什么必须局部：docToLexical 是 root.clear() + 整篇重建，
+        //   而 updateListener 零 debounce ⇒ 用户每敲一个字就可能销毁全文 DOM。
+        //   长文档里加一条提醒，原本要重建全文，现在只碰 1 个块。
+        //   这与 ime-gate 是**串联**的两道闸：门控挡"组字中"，局部挡"改动面积"。
+        const before = blockFingerprintsOf(exported);
+        const after = blockFingerprintsOf(rec.doc);
+        const plan = planLocalMarkRewrite(before, after);
+        const path = chooseRewritePath(plan, before.length);
+        if (path === 'full') {
+          // 🔴 块数变了 / 或者**每一块都要改**（短文档上局部并不划算，
+          //   而且此时下标对齐也失去意义）⇒ 老老实实整篇重建。
+          //   这是性能回退，不是正确性回退。
+          const snapshot = latestDoc;
+          ed.update(() => {
+            docToLexical(snapshot);
+          }, { discrete: true });
+        } else if (path === 'local') {
+          const snapshot = latestDoc;
+          const idx = plan.rebuild;
+          ed.update(() => {
+            // 🔴 逐块 replace：Lexical 会复用未变的兄弟节点，
+            //   光标/选区/折叠状态在**别的块**上原封不动。
+            //   replaceBlocksAt 越界会抛（不静默跳过），异常会冒到
+            //   update listener 外 —— 由 ed 自己的错误处理兜住，不会静默失败。
+            replaceBlocksAt(snapshot, idx);
+          }, { discrete: true });
+        }
+      }
     }
 
     // 对账报出的增删要通知 UI：新增的排进调度，删掉的从调度里消失
@@ -1719,7 +2032,14 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     window.setTimeout(() => reminderRef?.showCard(missed, true), 500);
   }
   // 起调度。到点由 schedule() 自己算下一条并重排。
+  // 🔴 schedule() 内含「同步提醒列表到原生闹钟层」，所以这一句同时覆盖了
+  //   老项目 index.html:7050 `loadReminder` 里的 syncRemindersToNative() ——
+  //   bj 的入口是 mountEditor（解锁后进编辑器），老项目是 loadReminder，同一件事。
   reminderRef?.schedule();
+  // 🔴 Android 12+ 的 SCHEDULE_EXACT_ALARM 默认不开，不开则原生闹钟退化为非精确档
+  //   （深睡晚到，被 sync 的 60s 容差吞掉⇒ 到点不响）。引导一次，localStorage 记标记。
+  //   老项目 index.html:7051 `ensureExactAlarmPermission()` 同款，只引导一次。
+  void ensureExactAlarmPermission();
 
   // 🔴🔴 同步在首次 update **之后**才启动。
   //   顺序反了会怎样：start() 立刻 pull → setDoc(远端) → 触发 update → noteEdit()
@@ -1795,10 +2115,32 @@ async function startSyncFor(name: string): Promise<void> {
   currentDk = dk;
   const c = new SyncClient({
     noteId: name,
+    // 🔴🔤🔤 base 播种（用户报障第 1 条，B-①）：
+    //   base 必须以"解锁时解出来的那一版"为起点，而不是空文档。
+    //   否则每次刚开篇就是"本地有内容、base 是空、远端有内容"
+    //   ⇒ 第一个分支与第二个分支都不成立 ⇒ 直接掉进三方合并 ⇒ 必弹冲突。
+    //   老项目 index.html:3450 在解锁时就把 lastHtml 设成服务端内容，同款。
+    // 🔴🔴 `mountDocSnapshot` 是 `Doc | undefined`（还没 mount 过就是 undefined），
+    //   而 `SyncDeps.initialDoc?: Doc` 在 exactOptionalPropertyTypes 下**不允许显式传
+    //   undefined**。这里显式判一次：拿不到就不带这个键，让 SyncClient 走
+    //   `emptyDoc()` 兜底 —— 语义与"传 undefined"完全一致，但不违反该开关。
+    ...(mountDocSnapshot ? { initialDoc: mountDocSnapshot } : {}),
     key: dk.key,
     dk,
     getDoc: () => window.__NOTESYNC_DOC__?.() ?? emptyDoc(),
     setDoc: (d) => {
+      // 🔴🔴🔴 回灌守卫①：IME 门控（用户报障第 7 条）。
+      //
+      //   这是**三条回灌路径里最危险的一条** —— 它承载「远端合并结果 / 采纳远端 /
+      //   采纳本机」三种写回，全部走 `docToLexical` 的 `root.clear()` + 整篇重建。
+      //   而这条路径的触发时机**不受用户控制**：他在打字（组字中）或刚打完字
+      //   （活跃期 1.5s 内），远端恰好有变更 ⇒ 整篇重建落在他的拼音串上
+      //   ⇒ 吞字、吞回车，且**界面零报错**（内容确实"同步了"，只是少了他刚打的）。
+      //
+      //   🔴 为什么是「跳过」而不是「排队」：排队就得存一份待写回的 doc，
+      //   而下一轮 poll（2 秒后）会自己拉到最新内容 ⇒ 跳过即可，不需要额外状态机。
+      //   老项目同款：index.html:9883 的 applyRemoteBody 首行就return。
+      if (imeGateRef && !imeGateRef.canApply()) return;
       // 远端/合并结果写回编辑器。**必须包在 update 里**，
       // 直接改 Lexical 内部状态会在渲染之外改文档，症状是"内容变了但重绘没跟上"。
       editor?.update(() => {
@@ -1852,12 +2194,27 @@ async function startSyncFor(name: string): Promise<void> {
   //   用 once:true 的话只在第一次生效，切笔记后就失联了。
   //   正确做法是：先把**模块级**那个 listener 摘掉（它持有的是上一份 syncRef），
   //   再挂新的。
+  // 🔴🔴 v1.13.0 修：原来这三行的顺序是「先赋值 → 再 remove(新值) → 再 add」，
+//   也就是**从来没摘掉过上一份 listener**（remove 拿到的是刚赋的那个）。
+//   而上面那段注释要的正是"摘掉持有旧 syncRef 的那一份"。
+//   后果是每次 startSyncFor（切一次笔记调一次）都**多挂一个** listener：
+//   旧闭包继续持有已被 stop 的 SyncClient 实例，pagehide 时重复 flushPending。
+//   症状隐蔽到极点 —— 内容全都对，只是离开页面时多几次无用的网络请求。
+//   正解：先摘旧的（可能为 null，DOM 签名接受），再赋新的，再挂。
+  const prevPagehide = pagehideHandler;
+  if (prevPagehide) window.removeEventListener('pagehide', prevPagehide);
   pagehideHandler = () => {
     // 🔴 同步读一次 localStorage 不做，push 本身已是 fire-and-forget；
     //   本地那份在 writeCache 里是同步写的，所以最坏只丢"上云"这一步。
     syncRef?.flushPending();
+    // 🔴 v1.13.0 抑制标记（老项目 index.html:10084 逐字同款）：
+    //   离开笔记页（Android 返回键/手势回首页）前打"已跳转"——
+    //   扫码/深链/收藏夹进入的笔记从未设过该标记，返回键落回首页时
+    //   route() 的冷启动自动跳转会再把用户弹回本笔记（"返回首页有时没反应"的现场）。
+    //   等价性：老项目是 `if (noteId) addEventListener(...)`（仅笔记页注册），
+    //   bj 这个 handler 本身就只在 startSyncFor（进编辑器）里挂，天然满足。
+    markJumped();
   };
-  window.removeEventListener('pagehide', pagehideHandler);
   window.addEventListener('pagehide', pagehideHandler);
   await c.start();
   // 🔴 新笔记：解锁时拿到的是空文档且云端也没有，必须立刻推一次，
@@ -2074,6 +2431,9 @@ async function handleScanRaw(raw: string): Promise<void> {
   }
   sessionPass = passphrase;
   pendingFresh = r.fresh;
+  // 🔴 v1.13.0 写入②（配对落地是 bj 的**第三条**解锁路径，老项目没有单独一段）：
+  //   换手机后第一次扫码进来，也必须被记住，否则这台新机杀进程后重进仍停在落地页。
+  rememberLastNote(noteId);
   // 🔴 落地后把地址栏拉正：扫码时用户可能停在任意页（落地页/别的笔记），
   //   挂载编辑器却不改 URL，刷新一下会回到原来那页 —— 看着像"内容自己跑了"。
   history.replaceState({}, '', '/' + encodeURIComponent(noteId));
@@ -2344,20 +2704,51 @@ const SCAN_BUSY_MS = 90_000;
  *   症状是"错误信息闪一下就没了"，用户根本来不及读。
  */
 let scanMsgTimer: number | null = null;
+
+/**
+ * 扫码提示在底栏上的**最短占有时长**。
+ * `scanFeedback(msg)` 不传 autoHideMs 时是"常驻"，但常驻不等于永久 ——
+ * 底栏那一行同时是同步状态的位置，永久占位等于让同步永远不可见。
+ */
+const SCAN_HINT_HOLD_MS = 5_000;
+
 function scanFeedback(msg: string, autoHideMs = 0): void {
   if (scanMsgTimer !== null) {
     clearTimeout(scanMsgTimer);
     scanMsgTimer = null;
   }
   if (currentPage === 'editor') {
-    // 底栏那一行是同步状态的位置，借它显示会让用户以为同步坏了
+    // 🔴🔴🔴 必须走**占有窗口**，绝不能裸 `setFootStatus`（v1.13.0 实锤，e2e SCAN-E07）。
+    //
+    //   病态：裸写只改了那一行的文字，却没告诉"同步状态回写口"这里有人占着。
+    //   ⇒ 紧接着到达的 `onSnapshot`（打开笔记后首推完成、编辑落盘…）
+    //     走 `footStatus()` 时见到 `footHoldUntil` 仍是 0，判定无人占用
+    //     ⇒ 直接写「已同步」，把刚写进去的失败原因**无声覆盖**。
+    //     用户视角：点「扫一扫」→ 屏幕上什么都没有 → 底栏闪回「已同步」
+    //     ⇒ 只剩一个"点了没反应"的印象，完全没有"为什么"。
+    //
+    //   🔴 这个洞一直都在，只是被另一个 bug 盖住了：
+    //     v1.13.0 之前同步状态会永久停在 pushing（pull 的 merge-clean 分支漏了 push），
+    //     底栏于是**不再被刷新**，恰好把这条提示"保住"了。
+    //     修好状态机之后同步正常回 idle ⇒ 提示立刻被冲掉 ⇒ SCAN-E07 才红。
+    //     ⇒ 教训：**两个 bug 互相掩盖时，修好其中一个会暴露另一个，
+    //       所以修完必须跑全量，不能只跑自己那一块。**
+    //
+    //   🔴 保持 offline（红点）：相机起不来是"这件事没做成"，
+    //     不是"同步坏了"——红点只表示这一行当前不是同步状态，与 footFlash 的绿点不同。
+    const hold = autoHideMs > 0 ? autoHideMs : SCAN_HINT_HOLD_MS;
+    footHoldText = msg;
+    footHoldUntil = Date.now() + hold;
     setFootStatus?.('offline', msg);
-    if (autoHideMs > 0) {
-      scanMsgTimer = window.setTimeout(() => {
-        scanMsgTimer = null;
-        setFootStatus?.('synced');
-      }, autoHideMs);
-    }
+    scanMsgTimer = window.setTimeout(() => {
+      scanMsgTimer = null;
+      // 🔴 期间又来了更新的提示 ⇒ 交给它收，别把新的收掉
+      if (footHoldText !== msg) return;
+      footHoldUntil = 0;
+      footHoldText = '';
+      const f = footFor(lastSyncState);
+      footStatus(f.s, f.d);
+    }, hold);
     return;
   }
   const w = document.getElementById('landingScanMsg');
@@ -2553,7 +2944,14 @@ export async function makeBakBackup(
     return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
   }
 
-  const doc = buildBakDoc(entries, now);
+  // 🔴🔴 为每篇装「解锁材料」（用户报障第 3 条）。
+  //   出码这台机器上每篇的钥匙早就躺在 keystore 里了，所以这里只做**签名**
+  //   （拿真钥匙加密一段定长常量），**不重新派生** ——
+  //   600,000 次 PBKDF2 单次 62ms，100 篇重新派生就是 6 秒白等。
+  //   本机没钥匙的那篇给 null（恢复后那篇照常要口令，不假装成功）。
+  const mats = await collectBakMaterials(entries, deriveKeyFor);
+
+  const doc = buildBakDoc(entries, now, mats);
   if (doc === null) return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
 
   const id = slot ? slot.id : newBakId();
@@ -2649,7 +3047,11 @@ export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey): boolean
   //   恢复卡是唯一呈现。老项目 enterBackupMode 还要先 contentEditable=false，
   //   bj 直接不挂 —— 那比"挂了再锁"少一整条漏锁的路径。
   history.replaceState({}, '', '/' + encodeURIComponent(noteId));
-  showBakRestoreCard(manifest.ids, manifest.ts, dk);
+  // 🔴🔴 传的是**清单的材料**，不是备份笔记自己的钥匙。
+  //   `dk` 是解开这篇备份笔记的那把钥匙（用来解密清单正文），
+  //   而各篇的钥匙必须用**口令 + 各篇 salt** 重新派生再自证 ——
+  //   备份笔记的钥匙与收藏夹里那些钥匙毫无关系，拿它去开收藏夹是错的。
+  showBakRestoreCard(manifest.ids, manifest.ts, manifest.mats);
   return true;
 }
 
@@ -2691,12 +3093,17 @@ export async function tryEnterBakMode(noteId: string, passphrase: string, f: typ
 }
 
 /** 开只读恢复卡，并把「恢复这 N 篇」接到生产合并链路。 */
-function showBakRestoreCard(ids: readonly string[], ts: number, _dk: DerivedKey): void {
+function showBakRestoreCard(ids: readonly string[], ts: number, mats: readonly (BakMaterial | null)[]): void {
   buildBakRestoreCard({
     ids,
     ts,
     onGo: async () => {
-      const r = applyBakRestore(ids);
+      // 🔴🔴 先自证 + 写钥匙，**再**合并收藏夹。
+      //   顺序不能反：自证要 100 篇次 PBKDF2（单次 62ms ⇒ 最坏 6 秒多），
+      //   而恢复卡按钮已经先置灰成「正在恢复…」，用户看得见进度（老项目 :9242 同款）。
+      //   先合并后自证的话，用户已经"恢复成功"跳走了，钥匙才在后台慢慢写 ——
+      //   而 route() 早就跑完了，命中的是"没钥匙"分支，照样弹口令框。
+      const r = await applyBakRestore(ids, mats);
       if (!r.ok) throw new Error(r.message);
       // 🔴 与老项目 :9274-9278 同款：恢复完整页跳第一篇。
       //   理由与老项目一致 —— 只 setStatus 的话，首页页脚会被落地页盖住，
@@ -2727,9 +3134,25 @@ interface BakRestoreOutcome {
  *   600,000 次 PBKDF2 白跑一次，而且形状不合还会直接判 not-migrate。
  *   ⇒ 复用的是它**之后**那一段（合并 + 覆盖统计 + 写盘 + 如实报数），
  *     抽成本函数，两条路共用，绝不各写一份合并逻辑。
+ *
+ * 🔴🔴🔴 用户报障第 3 条在这里落地：**自证通过才写钥匙**（`onPutKey`）。
+ *   口令来自扫码那一下拿到的 `sessionPass`（配对链接 `#p=` 里那个）——
+ *   它就是全部收藏夹的通行证，与老项目"扫到即拿到全部钥匙"对用户是同一种体验，
+ *   只是底下走的路不同（老项目装 raw key，这里口令现派生）。
+ *   `sessionPass` 为空（记忆解锁进来、保险箱里没口令）⇒ 一篇都不豁免，
+ *   全部照常走正常口令框。**宁可多问一次，也不给错钥匙。**
  */
-function applyBakRestore(ids: readonly string[]): BakRestoreOutcome {
+async function applyBakRestore(
+  ids: readonly string[],
+  mats: readonly (BakMaterial | null)[],
+): Promise<BakRestoreOutcome> {
   if (ids.length === 0) return { ok: false, message: COPY.migrateNothingRestored };
+
+  const pre = await proveBakMaterials(ids, mats, sessionPass, async (id, dk) => {
+    // 🔴 `savedAt` 用固定 0：那不是"解锁时间"，是"这次恢复顺手记住的"，
+    //   与 unlock.ts:191 的写入同口径（走的是同一条 key-store 通路）。
+    await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+  });
 
   // 🔴 hadBefore 必须在**写入前**取（老项目 :9262 v7.7.0「对抗审」）。
   //   写完再查就永远是 true ⇒ renewed 恒等于条数 ⇒
@@ -2754,7 +3177,10 @@ function applyBakRestore(ids: readonly string[]): BakRestoreOutcome {
   return {
     ok: true,
     first: merged[0] as string,
-    message: favRestoreTip(count, renewed, capped, FAVS_MAX),
+    // 🔴 如实报数：免输几篇、还要口令几篇（用户报障第 3 条）。
+    //   收藏夹那套口径（favRestoreTip，含覆盖/截断统计）也一起留着 ——
+    //   用户真正要知道的是"我的收藏夹现在对不对"，免输只是附带的好消息。
+    message: favRestoreTip(count, renewed, capped, FAVS_MAX) + COPY.bakRestExemptTip(pre.exempt.length, pre.needPass.length),
   };
 }
 
@@ -3086,6 +3512,9 @@ function showPass(name: string): void {
       // 🔴 会话口令在**解锁成功之后**才记：失败的尝试不该把口令留在内存里。
       sessionPass = pass;
       pendingFresh = r.fresh;
+      // 🔴 v1.13.0 写入①（老项目 index.html:3437 applyUnlocked 逐字同款）：
+      //   解锁成功即记住这一篇，供 APK 冷启动自动进入。
+      rememberLastNote(name);
       // 🔴🔴 甲案分流（老项目 applyUnlocked:3464 同款）：手输口令打开一篇
       //   `nsbak-xxxxxx` 时，看到的必须是只读恢复卡而不是可编辑的清单。
       //   漏这条的症状：在旧设备上敲 URL 打开备份笔记 → 清单进 contenteditable
@@ -3095,10 +3524,14 @@ function showPass(name: string): void {
       // 🔴 解锁成功才弹 PWA 安装引导（老项目 index.html:3476 同位置）：
       //   落地页就弹 = 一进门先推安装广告，是最招人烦的那种。
       tryShowInstallBar();
+      eggDraw.consume();
       greetThisNote(name);
       return null;
     },
     onClose: () => {
+      // 🔴 v1.13.0（老项目 index.html:10104 逐字同款）：同样打"已跳转"标记，
+      //   防 APK 冷启动自动跳转把用户弹回原笔记。
+      markJumped();
       history.pushState({}, '', '/');
       showLanding();
     },
@@ -3142,6 +3575,13 @@ async function doChangePassphrase(): Promise<void> {
       setFootStatus?.('synced', COPY.cpDoneMsg);
       // 换完密钥必须重建同步实例：它持有的是旧密钥
       await startSyncFor(currentNote);
+      // 🔴 改口令 = 换 AES 密钥。老项目 index.html:8338-8339 在 cpRotate 成功后
+      //   专门重排一次 `scheduleReminders(); syncRemindersToNative();`。
+      //   bj 这里同理：`schedule()` 会把当前提醒列表重新交给原生排程。
+      //   为什么不能省：原生侧那份密文是**独立**存的（RemPlugin 自己一把 Keystore 钥，
+      //   与笔记密钥无关），但换口令后 sync 实例重建、文档可能被重拉，
+      //   不重排就可能停在旧列表上。漏挂的症状是"改完口令后提醒不响"，且零报错。
+      reminderRef?.schedule();
       return null;
     },
     onClose: () => {
@@ -3157,15 +3597,38 @@ async function doChangePassphrase(): Promise<void> {
   });
 }
 
+/**
+ * 冷启动落在空路径时，APK 里自动进入上次打开的笔记（老项目 index.html:10148-10159）。
+ *
+ * @returns true = 已发起跳转，调用方必须**立刻 return**，别再 showLanding()
+ *   （两个分支都 return 之后首页才真的进不去；少一个 return 的症状是
+ *   "落地页闪一下又被跳走"，闪的那一下用户能看见）。
+ *
+ * 🔴 为什么不head 里内联抢跳：见 route/last-note.ts 文件头的竞速实证
+ *   （老项目自己记的 "v6.3 P1 根治「点通知有时进错笔记」"）。
+ */
+function tryResumeLastNote(): boolean {
+  const last = lastNoteToResume(isNativeApp());
+  if (last === null) return false;
+  // assign 而非 replace：留历史，用户按返回键可退回首页换笔记（老项目 :10156 注释逐字）。
+  location.assign('/' + encodeURIComponent(last));
+  return true;
+}
+
 function route(): void {
   const raw = noteNameFromPath();
   if (raw === '') {
+    if (tryResumeLastNote()) return;
     showLanding();
     return;
   }
   const name = sanitizeNoteName(raw);
   if (name === '') {
     // 路径里只有非法字符（如 /中文）→净化后为空，回落地页而不是报错
+    // 🔴 v1.13.0：这个分支**也要**试恢复末篇。老项目只有一个「无 noteId」分支，
+    //   bj 拆成了两个（多一个 sanitize 后为空的兜底）；漏掉这个分支的症状是
+    //   "杀进程重进后停在落地页"，但用户手动输名字能进 ⇒ 极难自查。
+    if (tryResumeLastNote()) return;
     showLanding();
     return;
   }
@@ -3203,6 +3666,10 @@ function route(): void {
       //   口令来自本机保险箱（./sync/pass-vault.ts），与密钥同生共死、锁定即失效。
       if (rec.passphrase) sessionPass = rec.passphrase;
       pendingFresh = false;
+      // 🔴 v1.13.0 写入③（老项目 index.html:10298 的 v5.57 教训**正是这条**）：
+      //   记住密钥进来的设备此前从不更新 last note ⇒ 冷启动自动跳转形同虚设。
+      //   本条路径不经过任何用户动作，只在刷新时悄悄发生，最容易被漏。
+      rememberLastNote(name);
       // 🔴🔴 甲案分流（同 showPass 那条）：记忆解锁也要在挂编辑器之前判。
       //   这条路径**最容易被漏** —— 它不经过任何用户动作，
       //   只要在旧设备上刷新一下 `/nsbak-xxxxxx` 就会走到。
@@ -3210,6 +3677,7 @@ function route(): void {
       mountEditor(name, rec.doc);
       // 🔴 同上：记忆解锁也是"解锁成功"，同样该弹安装引导
       tryShowInstallBar();
+      eggDraw.consume();
       greetThisNote(name);
       return;
     }
@@ -3236,6 +3704,31 @@ function boot(): void {
   if (location.search.indexOf('eggs') >= 0 && !eggLayer?.shell.isOpen()) {
     ensureEggLayer()?.openCodex();
   }
+  // 🔴 ?diag 直开常驻诊断浮层（老项目 :2079-2081：`location.search.indexOf('diag') !== -1`）。
+  //   为什么放 boot 末尾而不是 route() 之前：门牌路径下 route 会进游戏，
+  //   那里再叠一层浮层毫无意义（用户想看的是游戏）。
+  //
+  //   🔴 老项目同时支持 localStorage('notesync_diag')='1' 让浮层跨重载保持
+  //   （:2080，理由是"真机反复取证"）。bj 同样支持，但**键名用 bj 前缀**
+  //   （与 registry.EGG_KEY / favs 同款纪律，见 rem-native.test.mjs REMN-15）。
+  //
+  //   🔴 用精确的查询参数解析而不是 indexOf：后者会让
+  //   `/note-diagnostic` 这类**笔记名**顺带把诊断浮层打开 ——
+  //   老项目就有这个缺陷（`indexOf('diag')` 命中路径里的任意 diag），
+  //   而症状是"打开某篇笔记后右下角莫名多一块黑底绿字"，用户完全无法自查。
+  if (hasDiagFlag(location.search) || diagFlagStored()) {
+    // 🔴 页URL 带来的也要记（老项目 :2080 同款）：否则用户先用 ?diag 取一次证，
+    //   下次进来没带参数就浮层消失了——老项目里这两条路径共用同一个 if。
+    rememberDiagFlag();
+    ensureDiagPanel().boot();
+  }
+  // 🔴 v1.12.0：空闲时预拉扫码解码器（jsQR 127KB）。
+  //   用户报障「老版本扫描识别更快」的根因之一：老项目有 prefetchHtml2CanvasIdle
+  //   （index.html:2877），页面空闲即预热，所以点扫码是热的；bj 此前一次都没预热，
+  //   loadJsQr 只在打开扫码浮层时才被调 ⇒ 打开扫码先干等一次网络往返。
+  //   放在 boot 末尾：route() 之后，首屏该做的都做了，才让出主线程。
+  //   内部自带 requestIdleCallback + setTimeout 双保险与去重，失败静默（见 engine.ts 注释）。
+  prefetchJsQrIdle();
   document.getElementById('boot')?.remove();
 }
 
@@ -3250,7 +3743,9 @@ function boot(): void {
  * 🔴 APK 内不注册（见文件头）。
  */
 function registerSW(): void {
-  if (window.__NOTESYNC_NATIVE__) return;
+  // 🔴 v1.13.0：原来判`window.__NOTESYNC_NATIVE__`，那个标志从无赋值 ⇒ 这道早退**从未生效**，
+  //   于是 APK 里也在注册 SW（缓存的是线上壳，与 MainActivity 的三段首载兜底叠加）。
+  if (isNativeApp()) return;
   if (!('serviceWorker' in navigator)) return;
   const url = new URL('sw.js?v=' + encodeURIComponent(APP_VERSION), location.href);
   navigator.serviceWorker.register(url).catch((e: unknown) => {

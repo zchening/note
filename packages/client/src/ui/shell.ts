@@ -31,11 +31,28 @@ import {
   LOGO_SM,
 } from './icons.ts';
 import { bodyClassFor, nextSkin, SKIN_LABELS, SKIN_WORDS, skinOverlayStyle, type SkinName } from './theme.ts';
+import { isNativeApp } from '../platform/native-detect.ts';
 
 /** 连点多少下才切皮肤（老项目原文：7 下） */
 const SKIN_TAP_TARGET = 7;
 /** 两次点击间隔上限：超过就算重新开始数。防止"隔几分钟点一下"误触 */
 const SKIN_TAP_WINDOW_MS = 1200;
+/**
+ * 切档反馈气泡驻留毫秒数 —— 老项目 index.html:1742 的 1500。
+ *
+ * 🔴 这是**气泡**的时长，不是每日一句的 4.2 秒（fx.ts `COPY.greetMs`）。
+ *   两者同屏同位但节奏不同：一句问候要读得完，一个档位名只需"看见过"。
+ */
+const SKIN_TOAST_MS = 1500;
+/**
+ * 切档反馈气泡的挂点 id。
+ *
+ * 🔴 老项目用的是 `versionToast`（:1739 注释明写"原版本气泡位废物利用"），
+ *   bj **没有** OTA 版本气泡，沿用那个 id 会让人以为这里还有一套更新提示，
+ *   所以另立 `skinToast`；**位置与样式与 `#nsDayToast` 共用同一条规则**
+ *   （styles.css 里两个选择器并列，改一处必须改两处）。
+ */
+export const SKIN_TOAST_ID = 'skinToast';
 
 export type TopbarAction =
   | 'strike'
@@ -126,7 +143,9 @@ export function footText(state: FootState, detail?: string): string {
  *
  * @param noteId 当前笔记名；空串 = 首页（老项目首页维持字标，不显示笔记名）
  * @param hoverFine `matchMedia('(hover: hover) and (pointer: fine)').matches` 的结果
- * @param isNativeApp 是否在 App 壳内（`window.__NOTESYNC_NATIVE__ === true`）
+ * @param isNativeApp 是否在 App 壳内（`platform/native-detect.ts` 的 `isNativeApp()`，
+ *   判据是 `window.Capacitor.isNativePlatform()`；🔴 v1.13.0 前这里读的是
+ *   `window.__NOTESYNC_NATIVE__`，而那个标志全仓从无赋值 ⇒ 恒假）
  */
 export function shouldShowBrandNote(noteId: string, hoverFine: boolean, isNativeApp: boolean): boolean {
   return noteId !== '' && (isNativeApp || !hoverFine);
@@ -210,7 +229,10 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
    * 那样「窄窗桌面」会既显示笔记名又被媒体查询藏掉字标，或反之。
    */
   const noteId = cb.noteId ?? '';
-  if (shouldShowBrandNote(noteId, isHoverFine(), window.__NOTESYNC_NATIVE__ === true)) {
+  // 🔴 v1.13.0：原读 `window.__NOTESYNC_NATIVE__`（全仓从无赋值，恒 undefined），
+  //   ⇒ 这一整条顶栏笔记名在 APK 里**从未显示过**。改用 platform/native-detect.ts 的统一判据。
+  //   （platform/ 层零 import，ui/ 引它不会成环—— 与 touch.ts 同一纪律的同款理由。）
+  if (shouldShowBrandNote(noteId, isHoverFine(), isNativeApp())) {
     brandNote.textContent = brandNoteText(noteId);
     brandNote.classList.remove('hidden');
     // 老项目 :10142-10143 `document.querySelector('header .brand b').style.display='none'`
@@ -248,6 +270,49 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
   let taps = 0;
   let tapTimer: ReturnType<typeof setTimeout> | undefined;
   let skin: SkinName = 'default';
+
+  /**
+   * 切档反馈气泡 —— 老项目 index.html:1737-1743 `say()` + :1758 `say(LABELS[nsSkin])`。
+   *
+   * 🔴🔴 **没有它就是"点了七下什么都没发生"**。字标会从 `NoteSync` 变成
+   *   `NOTE-SYNC.EXE`/`N O T E S Y N C`，但那行字在左上角本来就小；
+   *   而 `brand.title`（原生 tooltip）在**触屏上根本没有 hover 这回事** ——
+   *   手机用户连点七下后唯一能看到的只有"配色变了"，说不出变成了哪一档。
+   *   这正是老项目专门留 1.5s 标签的原因：切皮肤是隐蔽彩蛋，反馈必须显式。
+   *
+   * 🔴 只由 **七连点** 触发，**绝不**由 `setSkin()` 触发：
+   *   `setSkin` 在首屏就要调一次（main.ts 里"default 档也要调一次：清空残留纹路"），
+   *   挂在里面 ⇒ 每次打开笔记都先弹 1.5s 气泡，那是把彩蛋变成骚扰。
+   *   （老项目同款分工：`nsSetSkin` 只管切，`say()` 只由七连点那一行调。）
+   *
+   * 🔴 文案取 `SKIN_LABELS`（theme.ts，与老项目 `LABELS` 三句逐字相同），
+   *   不在这里另写字面量 —— 可见文案另立一份必然与 tooltip 漂移。
+   */
+  let toastEl: HTMLElement | null = null;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  const saySkin = (next: SkinName): void => {
+    try {
+      if (!toastEl) {
+        toastEl = document.createElement('div');
+        toastEl.id = SKIN_TOAST_ID;
+        document.body.appendChild(toastEl);
+      }
+      toastEl.textContent = SKIN_LABELS[next];
+      // 重启入场动画（fx.ts 的每日一句同款：摘 show → 强制回流 → 加 show）。
+      // 少了"强制回流"这一步，连续切档时第二句会**没有淡入**（浏览器把两次
+      // class 变更合并了）——症状是"再点七下没反应"，与气泡根本没弹难以区分。
+      toastEl.classList.remove('show');
+      void toastEl.offsetWidth;
+      toastEl.classList.add('show');
+      if (toastTimer !== undefined) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toastEl?.classList.remove('show');
+      }, SKIN_TOAST_MS);
+    } catch {
+      /* 气泡是氛围，抛了也不许把切皮肤这件事带崩（老项目整段同款 try/catch） */
+    }
+  };
+
   const countTap = (): void => {
     taps += 1;
     if (tapTimer !== undefined) clearTimeout(tapTimer);
@@ -258,6 +323,8 @@ export function buildShell(host: HTMLElement, cb: ShellCallbacks): Shell {
     taps = 0;
     skin = nextSkin(skin);
     cb.onSkin?.(skin);
+    // 🔴 顺序与老项目一致：**先切档、后报**。反过来会在气泡里显示旧档名。
+    saySkin(skin);
   };
   brand.addEventListener('click', countTap);
   brand.addEventListener('keydown', (e) => {

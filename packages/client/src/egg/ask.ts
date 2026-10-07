@@ -32,6 +32,7 @@
  */
 
 import { EGG_DOORS } from './registry.ts';
+import { DRAW_CARD_ID } from './draw.ts';
 
 /** 浮层 DOM id。与 styles.css `#eggAsk` 严格对应。 */
 const ASK_ID = 'eggAsk';
@@ -130,9 +131,12 @@ export function buildEggAsk(host: EggAskHost, askLatch: { arm: (id: string) => v
     //   这是innerHTML 唯一入口的兜底，删掉它就等于开出 XSS 口子。
     if (EGG_DOORS.indexOf(id) < 0) return;
 
-    // 🔴 同泳道让位（老项目 :11004）：先撤掉 #nsDraw —— 确认层是用户刚敲出来的，
+    // 🔴 同泳道让位（老项目 :11004）：先撤掉开奖卡—— 确认层是用户刚敲出来的，
     //   优先级高于桌宠/镜像那类自绘层。
-    const draw = document.getElementById('nsDraw');
+    //   id 用 `DRAW_CARD_ID`（= `eggDraw`）而不是硬编码字符串：开奖卡是
+    //   egg/draw.ts 建的，id 写死两处就会分叉，分叉的后果是「确认层弹出来
+    //   底下压着一张开奖卡」，两层同泳道重叠，且**不报错**。
+    const draw = document.getElementById(DRAW_CARD_ID);
     if (draw && draw.parentNode) draw.parentNode.removeChild(draw);
 
     // 同 id 已在展示：不重复建（老项目先remove 旧的再 append 新的是同款效果，

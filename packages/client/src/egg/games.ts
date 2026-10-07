@@ -15,6 +15,20 @@
 
 import { COPY } from '../ui/copy.ts';
 import { eggBrowserStore, type EggStore } from './registry.ts';
+import {
+  PET_SVG,
+  PET_TRINKET,
+  SHELF_SIZE,
+  adoptArchiveCode,
+  petArchiveCode,
+  petArchiveLine,
+  readPet,
+  retirePet,
+  sleepPet,
+  stageName,
+  unmountPet,
+  writePet,
+} from './pet.ts';
 import type { DomGameDef, GameCtx, GameDef } from './shell.ts';
 
 /**
@@ -1678,32 +1692,208 @@ export function petGame(): DomGameDef {
     //   身体弧线 + 三条腿 + 两只金色眼睛，是"螃蟹"，而脚爪字形在 emoji 字体里
     //   会被渲染成一个巨大的爪印，与老项目那种"顶栏下沿骑线的小螃蟹"完全不是一回事。
     //   🔴 而且老项目那只 pet 是**常驻顶栏下沿**（`petMount()` 挂 header，0 占宽，
-    //   `petBlank().adopted` 默认 false ⇒ 不访问 /pet 就不出现）；
+    //   `petBlank().adopted` 默认 false ⇒ 不访问 /pet 就出现不了）；
     //   bj 这里是 /pet 彩蛋页内的独立 stage，属**形态差异**，本轮先对齐宠物本体，
     //   常驻挂载那条属于"要不要做"的设计决策，留待用户拍板（不做隐式移植）。
+    //
+    // 🔴🔴🔴 本轮补齐的是**养成档案面板**（老项目 :11323-11338 那一整块）：
+    //   形态名 + 「吃了 N 字 · 醒着 N 天 · 柜子 N / 16」+ 16 格柜子 + 三个按钮。
+    //   之前这里只有一只孤零零的大螃蟹，所有养成数据读不到也看不见。
     dom: (mount, g) => {
-      mount.className = 'ns-pet-stage';
-      const pet = document.createElement('div');
-      pet.className = 'ns-pet';
-      // 🦀 老项目 index.html:11202 逐字（aria-hidden 同款）
-      pet.innerHTML =
-        '<svg viewBox="0 0 26 26" aria-hidden="true">' +
-        '<g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">' +
-        '<path d="M4 18c0-5 3.6-8.6 8.6-8.6S21 13 21 18"/>' +
-        '<path d="M4 18h17"/>' +
-        '<path d="M8 18v2.6M13 18v2.6M18 18v2.6"/>' +
-        '</g>' +
-        '<circle cx="9.6" cy="13.4" r="1.2" fill="var(--accent)" stroke="none"/>' +
-        '<circle cx="15.6" cy="13.4" r="1.2" fill="var(--accent)" stroke="none"/>' +
-        '</svg>';
-      mount.appendChild(pet);
-      pet.addEventListener('click', () => {
+      // 🔴 舞台不再 fixed inset:0 —— 面板要占满一屏并自己滚动。
+      //   老项目 :10397 `.ns-dom .ns-pet-panel{margin:0 auto;max-width:420px;flex:1;min-height:0;display:flex;flex-direction:column}`
+      //   配 :10398 `.ns-pet-scroll{flex:1;min-height:0;overflow-y:auto}` 与
+      //   :10399 `.ns-pet-dock{flex:none;…}`：内容区滚、按钮区钉底。
+      //   沿用旧类名 ns-pet-stage（CSS 与 EGG-17 判据都按它定位），只把布局改成列。
+      mount.className = 'ns-pet-stage ns-pet-stage-panel';
+
+      const s = readPet();
+
+      /* ---- 档案头：头像 + 形态名 + 档案行（老项目 :11325-11326 逐字） ---- */
+      const top = document.createElement('div');
+      top.className = 'ns-pet-top';
+      const av = document.createElement('div');
+      // 🔴 `ns-pet` 也要挂上：e2e EGG-E11 按 `.ns-pet` 定位本体并数 path/circle，
+      //   只给老项目的 `ns-pet-av` 会让那条判据找不到元素（判据红在假的地方）。
+      //   两个类都留着：`.ns-pet` 供既有判据，`.ns-pet-av` 供老项目 44px 尺寸。
+      av.className = 'ns-pet ns-pet-av';
+      av.innerHTML = PET_SVG;
+      const meta = document.createElement('div');
+      meta.className = 'ns-pet-meta';
+      const nm = document.createElement('b');
+      nm.textContent = stageName(s.stage);
+      const ln = document.createElement('span');
+      ln.textContent = petArchiveLine(s);
+      meta.appendChild(nm);
+      meta.appendChild(ln);
+      top.appendChild(av);
+      top.appendChild(meta);
+      mount.appendChild(top);
+      // 🔴 点大螃蟹跳一下：bj 原有行为（`ns-pet.jump`），老项目面板的头像是静态的。
+      //   本轮是**补**面板不是重做页面，所以不把这个已有交互顺手删掉。
+      av.addEventListener('click', () => {
         g.fx('burp');
-        pet.classList.add('jump');
-        window.setTimeout(() => pet.classList.remove('jump'), 420);
+        av.classList.add('jump');
+        window.setTimeout(() => av.classList.remove('jump'), 420);
       });
+
+      /* ---- 16 格柜子（老项目 :11343-11347 逐字：`ns-sh` / `ns-sh empty`，未集齐显示 `?`） ---- */
+      const shelf = document.createElement('div');
+      shelf.className = 'ns-shelf';
+      for (let i = 0; i < SHELF_SIZE; i++) {
+        const got = s.shelf.indexOf(i) >= 0;
+        const c = document.createElement('div');
+        c.className = 'ns-sh' + (got ? '' : ' empty');
+        c.textContent = got ? (PET_TRINKET[i] ?? '') : '?';
+        shelf.appendChild(c);
+      }
+      mount.appendChild(shelf);
+
+      /* ---- 档案串（换养用）+ 说明（老项目 :11328-11329 逐字） ---- */
+      const pass = document.createElement('div');
+      pass.className = 'ns-pass';
+      pass.textContent = petArchiveCode(s);
+      mount.appendChild(pass);
+
+      const note = document.createElement('p');
+      note.className = 'ns-pnote';
+      note.textContent = COPY.petNote;
+      mount.appendChild(note);
+
+      /* ---- 换养区（老项目 :11330-11334 逐字结构） ---- */
+      const swap = document.createElement('div');
+      swap.className = 'ns-swap';
+      const swIn = document.createElement('input');
+      swIn.className = 'ns-swap-in';
+      swIn.type = 'text';
+      swIn.autocomplete = 'off';
+      swIn.spellcheck = false;
+      swIn.placeholder = COPY.petSwapPlaceholder;
+      const swGo = document.createElement('button');
+      swGo.className = 'ns-swap-go';
+      swGo.textContent = COPY.petSwapGo;
+      swGo.disabled = true;
+      const swMsg = document.createElement('p');
+      swMsg.className = 'ns-swap-msg';
+      swMsg.hidden = true;
+      swap.appendChild(swIn);
+      swap.appendChild(swGo);
+      swap.appendChild(swMsg);
+      mount.appendChild(swap);
+
+      const syncMsg = (bad: boolean, msg: string): void => {
+        swMsg.hidden = false;
+        swMsg.textContent = msg;
+        swMsg.className = 'ns-swap-msg' + (bad ? ' bad' : '');
+        swIn.classList.toggle('bad', bad);
+        swGo.textContent = COPY.petSwapGo;
+        swGo.disabled = !String(swIn.value || '').trim();
+      };
+      swIn.addEventListener('input', () => {
+        swGo.disabled = !String(swIn.value || '').trim();
+        swMsg.hidden = true;
+        swMsg.classList.remove('bad');
+        swIn.classList.remove('bad');
+      });
+      swGo.addEventListener('click', () => {
+        const r = adoptArchiveCode(String(swIn.value || ''));
+        if (!r.state) {
+          g.fx('burp');
+          syncMsg(true, r.err === 'empty' ? COPY.petSwapEmpty : COPY.petSwapBad);
+          return;
+        }
+        // 🔴 老项目这里写 `fx('wake')`，但 bj 的 FxName（shell.ts:40）**没有 wake** ——
+        //   老项目那套 fx 名（wake/purr/grow/snatch）没被照搬，bj 是另一套
+        //   tap/start/eat/coin/shot/brk/thrust/die/up/burp/enter。
+        //   写 'wake' 会被 tsc 挡住（这正是把 fx 名做成 union 的价值）。
+        //   换养成功取 `up`（上行音，最接近「叫醒」），换养失败取 `burp`。
+        g.fx('up');
+        // 🔴🔴 顺序承重：**先重画、后写反馈**。
+        //   `renderPanel` 会 `mount.textContent = ''` 把整棵子树连同 `swMsg` 一起丢掉 ——
+        //   反过来写的话，那句「换养成功」写在一个已脱树的节点上，
+        //   屏幕上什么都看不到（症状是"点了没反应"，而数据其实已经换了）。
+        //   重画后 `swMsg`/`swIn`/`swGo` 都是新节点，必须重新 query。
+        renderPanel(mount, g);
+        const msg2 = mount.querySelector<HTMLElement>('.ns-swap-msg');
+        const in2 = mount.querySelector<HTMLInputElement>('.ns-swap-in');
+        const go2 = mount.querySelector<HTMLButtonElement>('.ns-swap-go');
+        if (msg2 && in2 && go2) {
+          msg2.hidden = false;
+          msg2.className = 'ns-swap-msg';
+          msg2.textContent = COPY.petSwapOk;
+          go2.disabled = true;
+        }
+      });
+
+      /* ---- 底部操作区（老项目 :11336-11338 逐字） ---- */
+      const dock = document.createElement('div');
+      dock.className = 'ns-pet-dock';
+      const btns = document.createElement('div');
+      btns.className = 'ns-pet-btns';
+
+      const sleep = document.createElement('button');
+      sleep.className = 'ns-pet-sleep';
+      sleep.textContent = COPY.petSleep;
+      sleep.addEventListener('click', () => {
+        // 🔴🔴 `sleepPet()` **必须刷 last**（老项目 :11352 注释：否则
+        //   petMount 的 3 天守卫会把它当场叫回来）。这条在 pet.ts 里有断言。
+        sleepPet();
+        g.fx('burp');
+        document.getElementById('nsPet')?.classList.add('asleep');
+        renderPanel(mount, g);
+      });
+
+      const free = document.createElement('button');
+      free.className = 'ns-pet-free';
+      free.textContent = COPY.petFree;
+      free.addEventListener('click', () => {
+        // 放归 = 收起并打 retiredAt，**不删任何数据**（老项目 :11381-11386）
+        retirePet();
+        g.fx('burp');
+        unmountPet();
+        // 退出面板：与老项目 `closeShell()` 同款
+        const x = document.querySelector<HTMLElement>('.ns-game .ns-x');
+        x?.click();
+      });
+
+      const copy = document.createElement('button');
+      copy.className = 'ns-pet-copy';
+      copy.textContent = COPY.petCopyPassport;
+      copy.addEventListener('click', () => {
+        try {
+          void navigator.clipboard.writeText(petArchiveCode(readPet()));
+          copy.textContent = COPY.petPassportCopied;
+          window.setTimeout(() => {
+            copy.textContent = COPY.petCopyPassport;
+          }, 2200);
+        } catch {
+          /* 剪贴板不可用（非 https / 无权限）：按钮文字不变，不谎报已复制 */
+        }
+      });
+
+      btns.appendChild(sleep);
+      btns.appendChild(free);
+      btns.appendChild(copy);
+      dock.appendChild(btns);
+      mount.appendChild(dock);
     },
   };
+}
+
+/**
+ * 重画整个档案面板。
+ *
+ * 🔴 为什么要「拆了重建」而不是逐个改数字：形态名、档案行、16 格柜子、
+ *   档案串四处的派生规则各不相同（`stageName` / `petArchiveLine` / `normShelf` /
+ *   `petArchiveCode`），逐处同步是漏一处就显形的经典写法。
+ *   重建的成本是几十个 DOM 节点，而漏更新的代价是「数字对不上且没人知道为什么」。
+ *
+ * 🔴 重建后 `mount.className` 会被 `dom()` 重设成同一个值，所以这里只清内容即可；
+ *   **不重建定时器/监听器**（`dom()` 每次都新建监听器，重建即丢弃旧的，没有泄漏）。
+ */
+function renderPanel(mount: HTMLElement, g: GameCtx): void {
+  mount.textContent = '';
+  petGame().dom(mount, g);
 }
 
 /* ------------------------------------------------------------------ *

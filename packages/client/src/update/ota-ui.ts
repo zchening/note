@@ -17,6 +17,7 @@
 
 import { COPY } from '../ui/copy.ts';
 import { ICON_X } from '../ui/icons.ts';
+import { REAL_SCHED, aboutTapHit, createAboutTapper } from '../diag/tap.ts';
 import type { LatestRelease } from './ota.ts';
 import type { CheckResult, NativeDeps, ProgressFn } from './ota-native.ts';
 import { appVersionLine, checkUpdate, runUpdate } from './ota-native.ts';
@@ -25,6 +26,18 @@ export interface AboutDeps {
   native: NativeDeps;
   /** 网页版版本（构建期注入的 APP_VERSION） */
   webVersion: string;
+  /**
+   * 🔴 彩蛋：标题 800ms 内连点 4 次 ⇒ 关关于页 + 开诊断模态（老项目 index.html:8204-8215）。
+   *
+   *   **为什么做成注入而不是本文件自己实现**：连点判定是纯状态机
+   *   （滑动窗口，见 diag/panel.ts 的 `aboutTapHit` 注释），把它放在这里
+   *   就等于让 ota-ui 也持有一份计数态，而这份状态**只有诊断用**。
+   *   注入后本文件只负责"点击了标题 ⇒ 问一声要不要开诊断"，
+   *   判据也能在 node 里直接测那套状态机而不必拉起整个关于页。
+   *
+   *   缺省则不响应连点（不传就是没接这功能，不留半个实现）。
+   */
+  onTitleQuadTap?: () => void;
 }
 
 export interface AboutOverlay {
@@ -183,6 +196,21 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   const closeUpd = () => um.classList.add('hidden');
 
   x.onclick = closeAbout;
+  // 🔴 彩蛋连点（老项目 :8206-8215）。计数状态机在 diag/panel.ts 的 aboutTapHit，
+  //   本文件**只挂标题这一个入口**。
+  if (deps.onTitleQuadTap) {
+    const tapper = createAboutTapper();
+    h1.onclick = () => {
+      // 🔴 必须先关关于页再开诊断模态（老项目 :8212-8213 的顺序）：
+      //   两个都是全屏遮罩（`.mask` z40），不关的话诊断模态盖在关于页下面，
+      //   现象是"点了没反应" —— 而 z 值相同，谁后 remove('hidden') 谁在上面，
+      //   顺序反了就会出现两层遮罩叠着、关掉诊断后关于页又露出来。
+      if (aboutTapHit(tapper, REAL_SCHED)) {
+        closeAbout();
+        deps.onTitleQuadTap?.();
+      }
+    };
+  }
   um.onclick = (e) => { if (e.target === um) closeUpd(); };
   uno.onclick = closeUpd;
 

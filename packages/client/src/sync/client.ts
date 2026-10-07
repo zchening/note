@@ -44,6 +44,21 @@ export interface SyncDeps {
   dk: DerivedKey;
   /** 拿当前真源（编辑器侧维护） */
   getDoc: () => Doc;
+  /**
+   * 🔴🔴🔴 **解锁时那一刻的真源**，用来给三方合并的 base 播种（用户报障第 1 条）。
+   *
+   * 🔴 病态：`base` 的初值曾是 `emptyDoc()` 且**从未**被初始化过。
+   *   于是每次刚打开一篇笔记，本机是"有内容"、base 是"空"、远端也是"有内容"
+   *   ⇒ 第一个分支（远端 == base）不成立、第二个分支（本机 == base）不成立
+   *   ⇒ 直接掉进三方合并 ⇒ 判出一堆冲突。
+   *   **用户看到的就是"每次开篇都弹同步冲突"**，而两台设备其实一致。
+   *
+   * 🔴 老项目依据：`index.html:3450` 在解锁时就把 `lastHtml` 设成服务端内容 ——
+   *   base 一开始就是"上次同步成功的那一版"，而不是"空文档"。
+   *
+   * 🔴 不传 ⇒ 退回 `emptyDoc()`（旧行为）。判据 SYNC-BASE-02 钉这条。
+   */
+  initialDoc?: Doc;
   /** 把远端/合并结果写回编辑器 */
   setDoc: (d: Doc) => void;
   /** 状态变化通知（驱动底栏） */
@@ -96,12 +111,62 @@ export interface SyncDeps {
 
 /** 去抖：停止输入多久后推送 */
 const PUSH_DEBOUNCE_MS = 700;
+/**
+ * 🔴 轮询基线间隔（老项目 `POLL_INTERVAL = 2000`）。
+ * 2 秒是老项目在 v10 之后定稿的值，本项目照抄**不做"优化"**——
+ * 调小只会增加服务端压力与移动端耗电，而 SSE 已经承担了"有变化立刻到"的职责。
+ *
+ * 🔴 导出是为了让判据**按真实周期等**而不是在测试里另写一个 2000 ——
+ *   "测试里那个数字"与"实现里那个数字"一旦不一致，判据就在测另一个东西，
+ *   而且会以"测试全绿"的形式骗过去（本项目栽过：判据写死 600 字符采样窗口，
+ *   而实现注释一变长就恒红）。
+ */
+export const POLL_INTERVAL_MS = 2_000;
 /** SSE 重连退避上限 */
 const SSE_BACKOFF_MAX_MS = 30_000;
 
 function isDocEmpty(d: Doc): boolean {
   return (d.blocks === undefined || d.blocks.length === 0) &&
          (d.reminders === undefined || d.reminders.length === 0);
+}
+
+/**
+ * 🔴 判两份文档"实质相同"（用户报障第 1 条，B-④ 装饰等价豁免）。
+ *
+ * 两层：
+ *   ① `canonicalize(normalize(x))` —— 压掉"同一内容多种表示"：
+ *      相邻同格式 span 合并、相邻同类型列表合并、空段落剔除（见 canonical.ts:179-196）。
+ *      **裸 canonicalize 做不到这些**，而客户端导出的一定是合并后的形态。
+ *   ② 剥离提醒下划线/删除线标记（`span.rem`）——
+ *      标记是**渲染层**的产物，由 `reconcileReminders` 本地算出，
+ *      两台设备算出不同的标记是**正常的**（用户可能只在一台上加了提醒）。
+ *      把它们算进等价性，等于"提醒标记差异 = 冲突"，而正文一个字没动。
+ *
+ * 🔴🔴 为什么 ② 不能省（老项目没有这一层，但老项目也没有提醒标记）：
+ *   提醒标记不进加密正文的语义、却进 blockSig 的计算 ⇒ 不剥离的话，
+ *   「他端新增一条提醒」会被判成"两台设备同时改了同一处"。
+ */
+function eq(a: Doc, b: Doc): boolean {
+  return canonicalize(stripRemMarks(normalize(a))) === canonicalize(stripRemMarks(normalize(b)));
+}
+
+/** 深拷贝并剥掉所有 span 上的 `rem` 标记。不可变输入，不改调用方的东西。 */
+function stripRemMarks(d: Doc): Doc {
+  const clone = JSON.parse(JSON.stringify(d)) as Doc;
+  const walk = (x: unknown): void => {
+    if (Array.isArray(x)) {
+      for (const it of x) walk(it);
+      return;
+    }
+    if (typeof x !== 'object' || x === null) return;
+    const o = x as Record<string, unknown>;
+    //🔴 只删 span 上的 rem：字段名恰好也是 'rem' 的其它结构（本版没有）不受影响，
+    //   而放宽成"删所有叫 rem 的键"会在将来引入 reminders 时误伤真源字段。
+    if (typeof o.t === 'string' && 'rem' in o) delete o.rem;
+    for (const k of Object.keys(o)) walk(o[k]);
+  };
+  walk(clone.blocks);
+  return clone;
 }
 
 export class SyncClient {
@@ -120,17 +185,26 @@ export class SyncClient {
   private es: EventSource | undefined;
   private retry = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 🔴 轮询定时器。必须在 stop() 里 clearInterval（见 stop 的注释）。 */
+  private pollTimer: ReturnType<typeof setInterval> | undefined;
+  /** 🔴🔴 重入锁：上一次 pull 还没 await 完时为 true（见 pull() 的守卫注释）。 */
+  private pulling = false;
   /**
    * 上次同步成功时的文档 = 三方合并的 **base**。
    * 🔴 没有它就无法区分"对方新增"与"我删除"，合并会把用户的删除还原回去。
    */
-  private base: Doc = emptyDoc();
+  private base: Doc;
   private stopped = false;
   /** 冲突详情，供UI 展示 */
   private conflicts: MergeResultLike['conflicts'] = [];
 
   constructor(deps: SyncDeps) {
     this.d = deps;
+    // 🔴 base 播种（B-①，见 SyncDeps.initialDoc 的注释）。
+    //   放在构造器而不是 start()：start() 之前 getDoc() 可能还没绑上编辑器
+    //   （main.ts 的 startSyncFor 在 mountEditor 之后调，但换笔记的时序不保证），
+    //   而 initialDoc 是调用方**显式**传进来的，不依赖任何时序。
+    this.base = deps.initialDoc ?? emptyDoc();
   }
 
   /* ---------------- 状态 ---------------- */
@@ -187,13 +261,38 @@ export class SyncClient {
     return this.conflicts;
   }
 
+  /**
+   * 诊断只读读数（老项目 `index.html:1970` 的 `sse=open|closed` 同款）。
+   *
+   * 🔴 为什么需要这个口：SSE 的 `es` 是private 的，而"事件流到底开没开"
+   *   是「对方改了但我收不到」这类问题**唯一**能一眼定生死的信息。
+   *   老项目把它挂在 `window.sseSource` 上（`collectDiagLines` 直读），
+   *   bj 不做全局挂载，所以给类加一个只读出口。
+   *
+   * 🔴 `lastSyncAt` / `skip` **故意返回 null**（不编读数）：
+   *   老项目的 `lastSyncAt` 挂在每次 poll 成功处、`__pollSkipCount` 数的是
+   *   「轮询被连续打字推迟」的次数。bj 的同步是 SSE 推送 + 显式 pull，
+   *   **没有轮询、也就没有"推迟"这个概念** —— 编一个假计数器上去，
+   *   诊断面板就成了"看着有读数其实没这回事"的骗人东西。
+   */
+  diagState(): { sse: 'open' | 'closed'; state: SyncState; lastSyncAt: number | null; skip: number | null } {
+    return { sse: this.es ? 'open' : 'closed', state: this.state, lastSyncAt: null, skip: null };
+  }
+
   /* ---------------- 生命周期 ---------------- */
 
   /** 解锁后调用：立刻拉一次并开 SSE。 */
   async start(): Promise<void> {
     this.send('unlock');
-    await this.pull();
+    // 🔴🔴 base 也要在这里同步一次（B-① 的补充）：
+    //   initialDoc 是"解锁那一刻"的快照，而 start() 之前用户可能已经编辑过
+    //   （例如扫码落地时 mountEditor 先跑、startSyncFor 后跑）。
+    //   只在构造器播种一次的话，base 会比真源旧 ⇒ 第一个 pull 立刻判冲突。
+    //   口径与老项目 index.html:3450 一致：base = 上次同步成功的那一版。
+    if (this.d.initialDoc) this.base = this.d.initialDoc;
+    await this.pull('syncing');
     this.openStream();
+    this.startPoll();
     // 🔴 浏览器从离线切回在线时立刻重拉。不监听的话"断网期间对方的改动"
     //   要等到下一次手动刷新才同步，用户会以为同步坏了。
     if (typeof window !== 'undefined') {
@@ -203,10 +302,129 @@ export class SyncClient {
     }
   }
 
+  /**
+   * 🔴🔴 2 秒轮询基线（老项目 `POLL_INTERVAL = 2000`，index.html:10040/10045/10066）。
+   *
+   * 🔴🔴🔴 **SSE 只是加速器，轮询才是基线** —— 这是老项目与bj 的关键结构差异，
+   *   也是用户报障第 1 条"不管怎么刷新都没法取到"的另一面：
+   *   SSE 会因为代理断开、EventSource 在某些移动端浏览器上根本连不上等原因静默失效，
+   *   而老项目**即便 SSE 全挂，2 秒轮询仍然保证最终一致**。bj 此前只有 SSE，
+   *   ⇒ SSE 一挂就变成"永远不同步"，且界面毫无提示。
+   *
+   * 🔴 轮询回调**先发 `remote-arrived` 再 pull**，理由见方法体里的三条注释
+   *   （`send('pulled')` 在 idle 态是非法转移 + `remote-arrived` 正是
+   *   "有人告诉我该拉了"这个语义）。`pull()` 自己会在 decryptAndMerge 里
+   *   按需 send('pulled') / send('merge-clean')。
+   */
+  private startPoll(): void {
+    if (this.stopped) return;
+    if (this.pollTimer !== undefined) return;
+    this.pollTimer = setInterval(() => {
+      // 🔴🔴🔴 必须先发`remote-arrived`，不能直接 pull()。
+      //
+      //   病态（探针probe4 实锤）：直接 pull() 时decryptAndMerge 结尾会
+      //   `send('pulled')`，而此刻状态是 **idle** —— fsm 里 idle 只接受
+      //   remote-arrived / refresh / edit / lock（见 fsm.ts:232-235）
+      //   ⇒ 每 2 秒抛一条 IllegalTransitionError。
+      //   症状：**每 2 秒一条 console.warn**，日志被刷满、CPU 空转，
+      //   而同步**其实不工作**（因为抛异常那条路的用户可见分支不执行合并）。
+      //
+      //   🔴 而且 `send('remote-arrived')` 正是"有人告诉我该拉了"这个语义：
+      //   fsm 有一条 `idle --remote-arrived--> syncing`（fsm.ts:233），
+      //   于是 pull 拿到的是 syncing 态，守卫也认得（用 fromStateEntry 放行）。
+      //
+      //   老项目同款：index.html:10047 的 `sseSource.onmessage = () => { poll(); }`
+      //   走的是同一条路（先更新 lastRemoteNote 再进poll）。
+      if (this.state === 'conflict' || this.state === 'pushing' || this.state === 'syncing') return;
+      this.send('remote-arrived');
+      this.pullFromTimer('syncing');
+    }, POLL_INTERVAL_MS);
+    // 🔴 Node/单测环境下 setInterval 会吊住进程；真浏览器不需要 unref，
+    //   但加上它在任何环境都无害（浏览器忽略这个方法）。
+    (this.pollTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * 🔴🔴🔴 定时器/SSE 回调里发起的拉，**必须自带错误边界**。
+   *
+   * 老项目依据：`poll()` 整个函数体包在 try 里（index.html:9933），
+   *   catch 分三类报状态（:10026-10030）—— locked / 离线 / 其余"同步中断"。
+   *   也就是说老项目明确规定：**轮询里出的任何问题都只降级成状态文案，绝不许逃出去**。
+   *
+   * 不加会怎样（探针 probe8 实锤）：
+   *   `setInterval` 回调里的 rejected promise 是**未捕获异常**，
+   *   在浏览器里变成 `unhandledrejection`，在 Node/单测里直接终止进程。
+   *   症状是"同步毫无征兆地死了"——不弹任何提示、不进底栏状态、
+   *   而且**每 2 秒复发一次**（拉一次炸一次）。
+   *
+   * 🔴 为什么走 onInternalError 而不是 onError：
+   *   底栏文案是老项目 30 句白名单里的东西（见 FSM-xxxx 判据文件头），
+   *   "同步中断"那类降级由 `pullInner` 内部的 network-fail 分支自己报，
+   *   轮询的兜底 catch 只该留给**没被任何分支接住的意外**——
+   *   那属于内部/编程错误，走内部通道可观测、不入 UI（FSM-13 钉的就是这条纪律）。
+   */
+  private pullFromTimer(fromStateEntry: SyncState): void {
+    void this.pull(fromStateEntry).catch((e: unknown) => {
+      // 🔴 v1.13.0 修正：reportInternal 的签名是 (msg: string, err: unknown)，
+      //   此前这里只传了一个 Error —— TS 报 TS2554，且真正想报的"这条轮询拉失败了"
+      //   这句话整个丢掉了（只留了一个异常对象，控制台看不出是哪条路径炸的）。
+      this.reportInternal('轮询拉取失败（已被降级，不影响其他功能）', e);
+    });
+  }
+
+  /**
+   * 推的fire-and-forget 收口。与 `pullFromTimer` 同款理由：
+   * `void this.push()` 的 rejected promise 是**未捕获异常**（浏览器 `unhandledrejection`、
+   * Node 直接终止进程），而 `push()` 里有两处会在 try 之外抛：
+   * `normalize(this.d.getDoc())`（用户文档读不出来时）与 `send()` 的IllegalTransitionError。
+   *
+   * 🔴 为什么必须现在就收口，而不是"等 push 自己补catch"：
+   *   独立复核实测（把 `deps.getDoc` 换成抛异常的桩）：
+   *   `void this.push()` 一次改动就产出 2 条 `unhandledRejection`
+   *   （一次走 `noteEdit` 的去抖窗口、一次走 `flushPending`），
+   *   而 `onError` / `onInternalError` **都是空的** ——
+   *   也就是说 `pullFromTimer` 修掉的"每 2 秒复发一次的未捕获异常"，
+   *   在推这条路上**原样存在**。收口不彻底等于没修。
+   *
+   * 🔴 与 pullFromTimer 同款：走 `reportInternal`（可观测、不入 UI 底栏）。
+   *   推失败的用户可见口径由 `pushInner` 自己的分支报（network-fail 等），
+   *   这里只是兜底那些没被任何分支接住的意外。
+   */
+  private pushFromTimer(): void {
+    void this.push().catch((e: unknown) => {
+      this.reportInternal('推送调度失败（已被降级，不影响其他功能）', e);
+    });
+  }
+
+  /**
+   * 信封构造的 fire-and-forget 收口。
+   *
+   * 🔴 `stageEnv` 的 `try` **只包住 `encryptString`**，`normalize(this.d.getDoc())`
+   *   在它之前（`stageEnv` 开头）⇒ `getDoc` 抛异常时整个 promise 直接 reject。
+   *   它由 `noteEdit` 用 `void`发起，且**每次编辑都发一次** ——
+   *   也就是"用户每敲一个字就有一次未捕获异常"的可能。
+   *
+   * 🔴 与 pushFromTimer 的区别：**它失败是静默的、且是设计内的**。
+   *   `stageEnv` 的 catch 分支已经明确"不写 pendingEnv，让下次 push 重走一遍"；
+   *   所以这里同样只走内部通道记一笔，不改状态、不报 UI。
+   */
+  private stageEnvFromTimer(): void {
+    void this.stageEnv().catch((e: unknown) => {
+      this.reportInternal('信封构造失败（下次编辑会重试，不影响其他功能）', e);
+    });
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
     if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
+    // 🔴🔴 必须清轮询。不清的话换笔记后**旧实例仍在每 2 秒拉一次**，
+    //   症状是"明明只有一篇笔记在编辑，底栏的同步时间却一直在跳"，
+    //   而且流量翻倍。这条由 SYNC-POLL-01 的 clearInterval 断言钉住。
+    if (this.pollTimer !== undefined) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = undefined;
+    }
     this.es?.close();
     this.es = undefined;
   }
@@ -217,23 +435,58 @@ export class SyncClient {
 
   private async retryPull(): Promise<void> {
     this.send('online');
-    await this.pull();
+    await this.pull(this.state);
   }
 
   /* ---------------- 编辑器侧调用 ---------------- */
 
   /** 本地有改动。去抖后推送。 */
   noteEdit(): void {
-    this.send('edit');
+    // 🔴🔴🔴 conflict 态下的编辑**必须显式处理**（用户报障第 1 条的病灶 B）。
+    //
+    //   病态：`this.send('edit')` 在 conflict 态会抛 IllegalTransitionError
+    //   （fsm 故意不给这条边，因为"用户没拍板就改文档"是危险的），
+    //   而 `send` 的 catch 把它降级成 `reportInternal` ⇒ **只 console.warn，
+    //   用户零感知**。紧接着 `setTimeout` 里 `if (this.state === 'dirty')`
+    //   恒不成立（状态还是 conflict）⇒ **push 永不执行**。
+    //   净效果：用户在冲突挂起期间打的字，一个字都推不出去，且没有任何提示。
+    //
+    //   🔴 用户拍板：**只修「推不上去」，不改可编辑性**。
+    //   ⇒ 不放开 fsm 的 conflict→edit 边（那是"要不要在挂起期允许编辑"的产品决定，
+    //     放开它会让未拍板的文档被改，比推不上去更糟）。
+    //   ⇒ 只做一件事：让这次编辑**有出路** —— 走 `resolve-local`
+    //     （"以本机为准重新推"），语义与用户点「保留本机」完全一致，
+    //     但不需要用户先意识到"我卡住了"再点一次。
+    if (this.state === 'conflict') {
+      this.pendingEnv = undefined;
+      if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
+      this.pushTimer = undefined;
+      // send('resolve-local') 是 conflict 态**有**的边（见 fsm.ts），
+      // 它会把状态带回 dirty，于是下面这条去抖就能真的推。
+      this.send('resolve-local');
+      // 🔴 TS 收窄修正：上面 `if (this.state === 'conflict')` 已把 this.state 收窄成
+      //   字面量 'conflict'，而 TS 不知道 send() 会改状态 ⇒ 直接比 'dirty' 报 TS2367。
+      //   运行时语义与原意完全一致（只是"防御性不可达检查"），故用局部变量重读，
+      //   不加 any、不改判据。
+      const afterResolve = this.state as SyncState;
+      if (afterResolve !== 'dirty') {
+        // 理论上不可达（fsm 有这条边）。真不可达时必须让用户看见，
+        // 而不是继续静默 —— 判据 SYNC-PUSH-02 钉的就是"不许只上报不处理"。
+        this.d.onError('本地改动推不上去，请先处理同步冲突');
+        return;
+      }
+    } else {
+      this.send('edit');
+    }
     // 🔴🔴 同时**立刻**启动一次信封构造挂到 pendingEnv —— 不等去抖窗口。
     //   理由见 flushPending() 的注释：700ms 窗口内卸载时，数据必须已经能落到本地。
     //   加密是异步且很贵的（PBKDF2 600,000 次），所以这里是"发起"而不是"等结果"；
     //   pendingEnv 会被**后一次**编辑的结果覆盖（后写的版本才是要存的那一版）。
-    void this.stageEnv();
+    this.stageEnvFromTimer();
     if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
     this.pushTimer = setTimeout(() => {
       this.pushTimer = undefined;
-      if (this.state === 'dirty') void this.push();
+      if (this.state === 'dirty') this.pushFromTimer();
     }, PUSH_DEBOUNCE_MS);
   }
 
@@ -268,21 +521,26 @@ export class SyncClient {
   /** 手动刷新。 */
   async refresh(): Promise<void> {
     this.send('refresh');
-    await this.pull();
+    // 🔴 同 resolveKeepRemote：refresh 的目标态通常也是 syncing，
+    //   不传就会被守卫挡掉 ⇒ 用户点"手动刷新"完全没反应（而按钮点是有效动画）。
+    await this.pull(this.state);
   }
 
   /** 冲突裁决：保留本地。 */
   resolveKeepLocal(): void {
     this.send('resolve-local');
     if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
-    void this.push();
+    this.pushFromTimer();
   }
 
   /** 冲突裁决：保留远端。 */
   resolveKeepRemote(): void {
     this.send('resolve-remote');
     this.d.setDoc(this.base);
-    void this.pull();
+    // 🔴 必须传 fromStateEntry：fsm 里 resolve-remote 的目标态是 syncing，
+    //   不传的话这次拉会被 syncing 守卫挡掉 ⇒ "保留远端"点了没反应。
+    //   走 pullFromTimer 是因为这里同样是 `void`（fire-and-forget）⇒ 同样必须有边界。
+    this.pullFromTimer('syncing');
   }
 
   /**
@@ -331,12 +589,54 @@ export class SyncClient {
       this.pendingEnv = undefined;
     }
     if (this.state !== 'dirty') return;
-    void this.push();
+    this.pushFromTimer();
   }
 
   /* ---------------- 拉 ---------------- */
 
-  private async pull(): Promise<void> {
+  private async pull(fromStateEntry?: SyncState): Promise<void> {
+    // 🔴🔴🔴 三道守卫，**每一条都是轮询上线的前提**（缺任一条，2 秒轮询就是故障放大器）：
+    //
+    //   ① conflict —— `pull()` 里原本**没有**这层守卫（只有 SSE 回调里有，
+    //      见 openStream）。轮询是主动调用，不经过 SSE 那条路 ⇒
+    //      冲突挂起期间每 2 秒进一次 decryptAndMerge ⇒ 撞上 `send('merge-conflict')`
+    //      ⇒ 每 2 秒抛一条 IllegalTransitionError（被 reportInternal 吞成 console.warn）。
+    //      语义上是"挂起期不消费版本、不应用"（与老项目 index.html:9947 的
+    //      pendingRemoteNote 守卫同款），SSE 那条守卫的注释已经写明理由。
+    //
+    //   ②/③ pushing / syncing —— 老项目有等价物 `inflightWrites`，
+    //      bj 此前只在 SSE 回调里有（client.ts 的 `state === 'pushing' || 'syncing'`）。
+    //      轮询撞进去的震荡形态：推 → 拉到自己的回声 → 合并 → 又触发推 …
+    //      SSE 那条注释实测过"能把服务端打满"，轮询的触发频率更高。
+    //
+    // 🔴🔴🔴 **`fromStateEntry` 这条参数是必需的，不是可选的洁癖** ——
+    //   fsm 里 `unlock` 的**唯一合法结果就是 `syncing`**（fsm.ts:230），
+    //   而 `start()` 是 `send('unlock')` 之后紧接着 `await this.pull()`。
+    //   ⇒ 守卫若只看"当前是不是 syncing"，**start() 自己的第一次拉会被自己挡死**，
+    //     状态永远停在 syncing，整条同步链路一次都不跑。
+    //   症状极隐蔽：**没有报错、没有异常**，只是底栏时间永远不更新，
+    //   而所有"同步内容"的判据都还能过（它们测的是 pull 拉到了什么，不是 pull 有没有被调）。
+    //   这个 bug 是探针（probe1）先抓到的、判据当时尚未覆盖 ——
+    //   教训：**守卫必须区分「这次拉是我自己发起的」与「那次拉是别人发起的」**，
+    //   不能笼统地按状态挡。
+    //
+    // 🔴 语义：`fromStateEntry` 是"调用方刚刚 send 出来的目标状态"。
+    //   它等于当前状态 ⇒ 说明这次拉就是那次状态转移的一部分，放行。
+    const mine = fromStateEntry !== undefined && fromStateEntry === this.state;
+    if (!mine) {
+      if (this.state === 'conflict' || this.state === 'pushing' || this.state === 'syncing') return;
+    }
+    // 🔴 `pulling` 自守卫防的是**重入**（上一次还没 await 完，轮询又敲进来）。
+    if (this.pulling) return;
+    this.pulling = true;
+    try {
+      await this.pullInner();
+    } finally {
+      this.pulling = false;
+    }
+  }
+
+  private async pullInner(): Promise<void> {
     if (!this.online()) {
       this.send('network-fail');
       return;
@@ -409,16 +709,45 @@ export class SyncClient {
     const local = this.d.getDoc();
     const base = this.base;
 
-    // 远端 == base：远端没动过，本地是什么就是什么，不需要合并
-    if (canonicalize(remoteDoc) === canonicalize(base)) {
+    // 🔴🔴🔴 三个比较**全部**改用 `eq`（= canonicalize(normalize(·))）——
+    //   病态是它们原本用裸 `canonicalize`，而 canonicalize **不做**"相邻同格式
+    //   span 合并"与"相邻同类型列表合并"（那是 normalize 的活，见 canonical.ts:179-196）。
+    //   后果：客户端导出的 doc 一定是被 Lexical 合并过的形态，
+    //   而 base 里存的是上一轮远端原样 —— 两端字节不同但**内容完全一样**，
+    //   于是每次 pull 都判"本地和 base 不同、远端和 base 不同" ⇒ 掉进三方合并。
+    //   这是用户报障第 1 条"老版本不会这么频繁提醒冲突"的主因之一。
+    //
+    //   老项目有五处比 bj 少冲突，第一处就是这个（index.html:9616-9619 的
+    //   isDecorativelyEqual / :9704-9706 的 backfillLastHtmlIfDecorativelyEqual）。
+    if (eq(remoteDoc, base)) {
       this.conflicts = [];
-      if (canonicalize(local) !== canonicalize(base)) this.send('merge-clean');
-      else this.send('pulled');
+      // 🔴🔴🔴 `merge-clean` 之后**必须真的推一次**，不能 send 完就 return。
+      //
+      //   病态（e2e E2E-S2/E2E-S3 实锤，诊断脚本采样 26 秒）：
+      //     `merge-clean` 的语义是"合并干净、**本地确有改动要推上去**"，
+      //     它把状态从 syncing/dirty 推进 **pushing** —— 于是必须由谁来发那次 POST。
+      //     而 `noteEdit()` 的 700ms 去抖定时器只认 `state === 'dirty'` 才推，
+      //     此刻状态已经是 pushing ⇒ **定时器永不触发** ⇒ 状态永久停在 pushing。
+      //     实测：服务端其实收到了密文（`serverHas=true`、密文里没有明文），
+      //     但底栏永远停在"推送中…"，换设备也取不回（E2E-S3 那条直接红）。
+      //     —— 典型"不报错但结果是错的"：用户以为同步坏了，且没有任何提示。
+      //
+      //   🔴 为什么 v1.13.0 之前不发作：这三处比较原本用裸 `canonicalize`，
+      //     本地（Lexical 合并过）与 base（远端原样）字节常不相等 ⇒
+      //     掉进函数末尾三方合并那条分支，而那条分支**有** `await this.push()`。
+      //     改成 `eq`（normalize 后比较）之后本分支命中率大增 ⇒ 打字后必然卡住。
+      //   ⇒ 凡新增 `send('merge-clean')` 的调用点，必须逐个确认后面真有一次 push。
+      if (!eq(local, base)) {
+        this.send('merge-clean');
+        await this.push();
+      } else {
+        this.send('pulled');
+      }
       return;
     }
 
     // 本地 == base：只有远端变了，直接采纳
-    if (canonicalize(local) === canonicalize(base)) {
+    if (eq(local, base)) {
       this.d.setDoc(remoteDoc);
       this.base = remoteDoc;
       this.conflicts = [];
@@ -427,7 +756,7 @@ export class SyncClient {
     }
 
     // 本地 == 远端：已经一致
-    if (canonicalize(local) === canonicalize(remoteDoc)) {
+    if (eq(local, remoteDoc)) {
       this.base = remoteDoc;
       this.conflicts = [];
       this.send('pulled');
@@ -576,7 +905,17 @@ export class SyncClient {
       //   注意 fsm.ts 里 conflict 态**故意没有** remote-arrived 边，两处是配套的。
       if (this.state === 'conflict') return;
       this.send('remote-arrived');
-      void this.pull();
+      // 🔴🔴🔴 必须传 'syncing'，与 startPoll 回调同款 —— 这是探针 probe7 实锤的
+      //   一个真 bug：`send('remote-arrived')` 刚把状态推进 `syncing`，
+      //   而 `pull()` 的守卫写着「syncing 不许拉」⇒ **SSE 自己发起的拉被自己挡死**。
+      //   症状：收得到推送、状态显示 syncing、但一个 GET 都不发（探针里
+      //   `FETCH GET` 只出现一次，deliverSse 之后再无网络请求，1200ms 后卡在 syncing）。
+      //   也就是说：SSE 这条路在改动前能拉，改动后彻底哑火 —— 而用户看到的是
+      //   "同步偶尔不更新"，没有任何报错。
+      //   与 probe1 同一个根因（守卫必须区分「这次拉是我发起的」与「那次拉是别人发起的」），
+      //   上一轮只改了 startPoll 那一处，漏了这里。**凡新增 pull() 调用点，
+      //   必须逐个核对自己是不是刚刚 send 过状态机事件。**
+      this.pullFromTimer('syncing');
     };
     es.onerror = () => {
       // 🔴🔴 EventSource 断开后浏览器不会自动重连。自己写退避重连。

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- v7.9.0 品牌 3A 定稿：纸白底 #F7F2E9（与 App 图标背景同值）+ 双弧同步环 + 衬线 N。
+       本文件是 16px 档 = F2 形态：保环弃尖（箭头尖在 16px 只剩 1 像素存在感，摘掉），
+       描边 4.6/48 加粗抗糊。≥40px 场景（首页 hero）用 index.html 内联全细节版（带尖）。 -->
+  <rect x="1" y="1" width="46" height="46" rx="11" fill="#F7F2E9"/>
+  <g fill="none" stroke="#8F7126" stroke-width="4.6" stroke-linecap="round">
+    <path d="M40.5 14.5A19 19 0 0 1 14.5 40.5"/>
+    <path d="M7.5 33.5A19 19 0 0 1 33.5 7.5"/>
+  </g>
+  <path d="M18.72 16.96h2.2l6.16 11V16.96h2.2v14.08h-2.2l-6.16-11V31.04h-2.2Z" fill="#8F7126"/>
+</svg>

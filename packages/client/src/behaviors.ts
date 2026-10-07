@@ -499,17 +499,25 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
  *      **Lexical #55 `insertAfter: cannot be called on root nodes`**。
  *      抛错发生在 handler 内 ⇒ Lexical 认为命令未处理、回落richText ⇒ 症状与"没拦"一样。
  *      ⇒ 必须用 `$insertNodes([...])`。
- *   ③ 🔴 **就算插进去了也不生效**：新段落是**空的**，而空段落会被导出丢弃
- *      （`serialize.ts`：`if (spans.length === 0 && n.getType() === 'paragraph') return null`，
- *      设计如此——空段落是真源里不存在的形态）。
- *      空占位活不过一轮 update 往返 ⇒ 用户随后打的字又落回标题。
+ *   ③ 🔴 **这条已作废（2026-10-07 核实）**。原文写：
+ *      「就算插进去了也不生效：新段落是空的，而空段落会被导出丢弃
+ *        （serialize.ts 的 `if (spans.length === 0 && n.getType() === 'paragraph') return null`）」
+ *      ——**那个丢弃函数 `trimTrailingEmptyParas`（serialize.ts:668）现在是零调用死函数**，
+ *      2026-10-06 方案 A 之后空段落**是进真源的**（判据 `20-empty-para` EP-E01~03 钉着）。
+ *      ⇒ 「末尾回车不给可落点」这个技术障碍**不存在**，
+ *        用户报障第 8 条「末尾回车没反应」就是照着这条过期依据写的。
+ *      🔴 教训：**注释里引用了某条不变量 ≠ 该不变量仍成立**。
  *
- * ⇒ **正解不是"插一个空段落"，而是把标题切开**：光标后的文字搬成一个**非空**的
- *   段落放到折叠块**外面**，标题只保留前半段。非空段落不会被丢弃，于是：
+ * ⇒ **正解不是"插一个空段落"，而是把标题切开**：光标后的文字搬成一个段落
+ *   放到折叠块**外面**，标题只保留前半段。于是：
  *     - 光标在中间 ⇒ 后半段出现在外部下方一行（用户第 2 小条）
- *     - 光标在末尾 ⇒ 后半段为空，此时**不留段落**（留了也会被丢），
- *       光标停在标题末尾，让用户直接打字落在标题末尾之外——
- *       ⚠️ 这一支需要在 title 末尾之外**没有**可落点时另想办法，本轮只实现"有可落点"的主路径。
+ *     - 光标在末尾 ⇒ 后半段为空，插一个**空段落**作可落点
+ *       （空段落现在合法，见上面 ③），光标落进去，用户接着打的字在折叠块**外面**。
+ *
+ * 🔴🔴 挂在折叠块外面**必须用 `node.insertAfter()`**（节点自己算 parent，父级为 root 不抛）；
+ *   **不要**用"把 element 选区指向 fold 再 `$insertNodes`"——
+ *   Lexical 会把它理解成"在**这个块里面**"、先 `insertParagraph()` 插到块**前面**
+ *   （实测：折叠块直接**变成两个**）。详见函数体内注释。
  */
 function registerFoldEnter(editor: LexicalEditor): () => void {
   return editor.registerCommand(
@@ -568,31 +576,49 @@ function registerFoldEnter(editor: LexicalEditor): () => void {
       const headText = headSpans.map((s) => s.t).join('');
       const tailText = tailSpans.map((s) => s.t).join('');
 
-      // 标题侧：改写为前半段（非空才写，空则保留原标题）
+      // 标题侧：改写为前半段（空则保留原标题 —— 切点就在最前面时不该把标题清空）
       if (headText !== '') {
         headPara.clear();
         headPara.append(...spansToNodes(headSpans, new Set()));
         fold.setTitle(headSpans);
       }
 
-      // 块外侧：只在**后半段非空**时建段落（空段落会被导出丢弃，留了也白留）
-      if (tailText !== '') {
-        const out = $createParagraphNode();
-        out.append(...spansToNodes(tailSpans, new Set()));
-        // 🔴🔴 `$insertNodes` 是**在当前选区处**插入，而此刻选区在折叠标题里
-        //   ⇒ 直接调会把新段落塞进**折叠块内部**（= 块外没拿到东西，内部又多一块）。
-        //   必须先把选区移到"折叠块这个节点本身"（元素选区），
-        //   `$insertNodes` 才会把它插成**折叠块的后继兄弟**。
-        const sel2 = $createRangeSelection();
-        sel2.anchor.set(fold.getKey(), 0, 'element');
-        sel2.focus.set(fold.getKey(), 0, 'element');
-        $setSelection(sel2);
-        $insertNodes([out]);
-        out.selectEnd();
-      } else {
-        // 光标在末尾：停在标题末尾，不额外造会被丢弃的空段落
-        headPara.selectEnd();
-      }
+      // 🔴🔴🔴 块外侧：建一个段落挂到折叠块**后面**，光标落进去。
+      //
+      // 这里**必须用 `fold.insertAfter(out)`，不能再用 `$insertNodes`**（2026-10-07 修，问题 9）。
+      //   旧写法（已删）：
+      //     const sel2 = $createRangeSelection();
+      //     sel2.anchor.set(fold.getKey(), 0, 'element');
+      //     $setSelection(sel2);
+      //     $insertNodes([out]);
+      //   那个写法走的是 `RangeSelection.insertNodes` 的"块前插"分支：
+      //     firstBlock = $findMatchingParent(firstNode, INTERNAL_$isBlock)（Lexical.dev.js:13246）
+      //   而选区的 firstNode **就是 fold 自己**，它 `isBlock()` 为真 ⇒ firstBlock = fold；
+      //   `!firstBlock.isEmpty()` 为真 ⇒ shouldInsert=true ⇒ 先 `this.insertParagraph()`
+      //   （`:13360-13361`）⇒ 新段落插到 fold **前面**。
+      //
+      //   🔴 实测症状（判据 FOLD-ENTER3 抓到的，不是推理）：
+      //     回车前 order = ["p","fold"]
+      //     回车后 order = **["p","fold","p","fold"]** —— 折叠块**变成两个**（索引 3多一个
+      //     内容重复的 fold）。用户看到的正是"折叠列表跳到了原先位置下方的第二行"。
+      //   ⇒ "把选区指向 fold 就能插成兄弟"这个假设是**错的**：
+      //     element 选区指到 ElementNode 自己时，Lexical 认的是"在**这个块里面**"，
+      //     不是"在**这个块后面**"。
+      //
+      //   `node.insertAfter()` 由节点自己算 parent，父级是 root 时**不抛**
+      //   （对比 `parent.insertAfter()` 父级为 root 会抛 Lexical #55，见 :498-499 注释）。
+      const out = $createParagraphNode();
+      // 🔴 tailText 为空（光标在标题**末尾**）时 append 的是空列表 = 空段落。
+      //   **空段落现在是允许的**（2026-10-06 方案 A：空段落进真源，判据
+      //   `20-empty-para` EP-E01~03 钉着）—— 这一支以前被 :502-505 那条注释
+      //   以"空段落会被导出丢弃"为由直接跳过、只 `headPara.selectEnd()`，
+      //   那条依据**已过期**：`serialize.ts:668 trimTrailingEmptyParas` 现在是
+      //   **零调用死函数**。用户报障第 8 条「末尾回车没反应」正是这一支，
+      //   实测回车后真源**完全没变**，接着打的字拼成了标题 "ABCDEFZZZ"。
+      out.append(...spansToNodes(tailSpans, new Set()));
+      fold.insertAfter(out);
+      // 选区落到新段落末尾：用户紧接着打的字才会落在折叠块**外面**（而不是回标题）。
+      out.selectEnd();
 
       event?.preventDefault();
       return true;

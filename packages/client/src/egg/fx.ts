@@ -478,6 +478,12 @@ export function dayGreet(noteId: string, now: Date = new Date()): string | null 
     const blocked =
       !!document.querySelector('#nsGreet.show') ||
       !!document.querySelector('#versionToast.show') ||
+      // 🔴 v1.13.0：切档气泡与每日一句**同一个位置**（styles.css 里两个 id 共用一条规则），
+      //   同时出现就是两层胶囊叠在一起。老项目 :8433 的让位规则适用于所有同位浮层，
+      //   而它的切档气泡用的正是 `#versionToast` —— 所以"切完皮肤不让问候弹"
+      //   是老项目的既有行为，bj 换了 id 就得把它补进这张清单。
+      //   🔴 也让位**不消耗**当天记账（老项目同条注释：下次开笔记再试）。
+      !!document.querySelector('#skinToast.show') ||
       !!document.querySelector('#draftBar:not(.hidden)');
     const line = pickDailyLine(
       noteId,

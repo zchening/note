@@ -15,6 +15,7 @@
  */
 
 import type { FxName } from './shell.ts';
+import type { TyKind } from './typewriter.ts';
 
 /** 五声音阶（相对半音）。 */
 const PENTA = [0, 2, 4, 7, 9];
@@ -55,6 +56,18 @@ export interface Sound {
   fx: (name: FxName) => void;
   /** 换当前局的音色（进游戏时调）。 */
   voice: (id: string) => void;
+  /**
+   * 打字机音（复古皮肤内）。**复用本引擎的 ctx**，绝不新造 AudioContext。
+   *
+   * 🔴 为什么挂在这里而不是另写一个模块：老项目 `nsTypeSound` 用的是它自己的
+   *   `remAudioCtx`，而 bj 只有本文件一个 ctx（`actx()`）。另造一个会被浏览器
+   *   限制（每域同时活跃的 AudioContext 有上限），症状是"进游戏有音、打字没音"。
+   *
+   * @param force 图鉴「再玩一次」点播示例音（老项目 `nsTypeSound('enter', true)`）：
+   *   绕开静音门，但**仍走 ctx.state === 'running' 检查** —— 未解锁时不该出声。
+   * @returns 是否真的发声了（`false` = 静音 / ctx 未解锁 / 被节流）。彩蛋埋点靠它。
+   */
+  type: (kind: TyKind, force?: boolean) => boolean;
 }
 
 /** 每个 fx 对应的音程（相对当前根音的半音数）与音量。 */
@@ -76,6 +89,18 @@ export function buildSound(): Sound {
   let ctx: AudioContext | null = null;
   let voice = 'ui';
   const lastAt: Record<string, number> = {};
+  /**
+   * 50ms 白噪声缓存（带自然衰减），避免每键重新生成。
+   *
+   * 🔴🔴 缓存**绑定 ctx**（老项目 index.html:6789 闸R2 的原话）：
+   *   跨 ctx 复用 AudioBuffer 会抛错，而整段被 catch 吞掉 ⇒ **永久消音**，
+   *   症状是"玩了一会儿游戏之后打字机音彻底没了"，且零报错。
+   *   所以判据是 `tyNoiseCtx === c`，不是"非空即复用"。
+   */
+  let tyNoise: AudioBuffer | null = null;
+  let tyNoiseCtx: AudioContext | null = null;
+  /** 打字机音自己的 24ms 节流（老项目 :6805）。与 fx 的 60ms 是两套，别混。 */
+  let tyLastAt = -1e9;
 
   const isMuted = (): boolean => {
     try {
@@ -128,6 +153,25 @@ export function buildSound(): Sound {
     osc.stop(at + dur + 0.02);
   };
 
+  /**
+   * 50ms 白噪声（带自然衰减），**按 ctx 缓存**（老项目 index.html:6789 `nsTyNoiseBuf`）。
+   *
+   * 🔴 判据必须是 `tyNoiseCtx === c` 而不是 `tyNoise !== null`（闸 R2）：
+   *   跨 ctx 复用 buffer 会抛 InvalidStateError，而 `type()` 整段被 catch 吞掉
+   *   ⇒ 用户看到的是"玩过游戏之后打字机音永久消失"，且**零报错**。
+   */
+  const noiseBuf = (c: AudioContext): AudioBuffer => {
+    if (tyNoise && tyNoiseCtx === c) return tyNoise;
+    const n = Math.max(1, Math.floor(c.sampleRate * 0.05));
+    const b = c.createBuffer(1, n, c.sampleRate);
+    const d = b.getChannelData(0);
+    // 线性衰减（1 - i/n）：白噪直接进包络会在末尾"啪"一下（老项目 :6794 逐字）
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    tyNoise = b;
+    tyNoiseCtx = c;
+    return b;
+  };
+
   return {
     muted: () => muted,
     toggle: () => {
@@ -161,6 +205,65 @@ export function buildSound(): Sound {
         spec.seq.forEach((s, i) => tone(s, t0 + i * 0.07, v.dec, spec.vol, v.wave));
       } else {
         tone(spec.semi, t0, v.dec, spec.vol, v.wave);
+      }
+    },
+    /**
+     * 打字机音（老项目 index.html:6798-6831 `nsTypeSound`，逐值照抄）。
+     *
+     * 🔴 三条复刻纪律：
+     *   1. **静音即停**（`!force && muted` 早退）。老项目 :6799。
+     *      `force` 是图鉴「再玩一次」的点播，明确意图绕开门。
+     *   2. **24ms 节流，回车豁免**（老项目 :6805）。回车是节奏点，吞掉就"不像打字机"。
+     *      ⚠️ 与 `fx()` 的 60ms 是两套独立节流 —— 混用会让打字声在高连打时
+     *      比游戏音效更容易被吞，反过来也一样。
+     *   3. **复用 actx()**，绝不 `new AudioContext()`（见 Sound.type 的注释）。
+     */
+    type: (kind, force) => {
+      if (!force && muted) return false;
+      const c = actx();
+      if (!c) return false;
+      // 未解锁（无手势）或已关闭：静默。老项目 :6803 的 `state !== 'running'` 闸。
+      if (c.state !== 'running') return false;
+      const now = Date.now();
+      if (kind !== 'enter' && now - tyLastAt < 24) return false; // 回车永不被吞
+      tyLastAt = now;
+      try {
+        const t0 = c.currentTime + 0.005;
+        const src = c.createBufferSource();
+        src.buffer = noiseBuf(c);
+        const bp = c.createBiquadFilter();
+        bp.type = 'bandpass';
+        // 空格比普通字母闷一档（老项目 :6812）—— 否则空格听起来与字母同质。
+        bp.frequency.value = kind === 'space' ? 1100 : 1900;
+        bp.Q.value = 1.1;
+        const g = c.createGain();
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(kind === 'enter' ? 0.12 : 0.16, t0 + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+        src.connect(bp);
+        bp.connect(g);
+        g.connect(c.destination);
+        src.start(t0);
+        src.stop(t0 + 0.06);
+        if (kind === 'enter') {
+          // 回车 = 打字机回车铃（老项目 :6820-6828）。少了这声回响就不像打字机。
+          const o = c.createOscillator();
+          const g2 = c.createGain();
+          o.type = 'sine';
+          o.frequency.value = 1560;
+          g2.gain.setValueAtTime(0.0001, t0);
+          g2.gain.exponentialRampToValueAtTime(0.1, t0 + 0.01);
+          g2.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+          o.connect(g2);
+          g2.connect(c.destination);
+          o.start(t0);
+          o.stop(t0 + 0.32);
+        }
+        return true;
+      } catch {
+        // 🔴 发声失败绝不打断输入（老项目 :6830 的空catch）。
+        //   注意**节流时刻已经推进**了：宁可少响一声，也不要每键都重试整条链。
+        return false;
       }
     },
   };

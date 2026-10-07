@@ -63,6 +63,27 @@ import { buildPairLink, parsePairLink } from '../src/scan/pair-link.ts';
 const PASS = 'correct horse battery staple';
 const ORIGIN = 'https://bj.xuyinji.com.cn';
 
+/** 16 字节 salt 的合法 base64 形状（24 字符含 ==）。 */
+const SALT_A = 'AAAAAAAAAAAAAAAAAAAAAA==';
+const SALT_B = 'BBBBBBBBBBBBBBBBBBBBBB==';
+
+/**
+ * 🔴🔴 手工造清单明文的工具（b64url 包 `notesync-bak:1:` 前缀）。
+ *
+ * 🔴🔴🔴 **为什么必须手工造，不能靠 encodeBakText 造**：
+ *   `encodeBakText` 的材料数组长度**恒等于**篇数长度（`kept` 是按 `out` 推的），
+ *   而且它会在出码侧把坏形状**降级成 null**。所以这两类输入它永远产不出来：
+ *     ·「材料多于篇数」—— 那条 `rawMats.length > out.length` 分支防的是**外部输入**；
+ *     ·「坏形状材料项」—— 同理。
+ *   而清单是**云端密文解出来的内容**，按外部数据看待，这些分支是真实可达的。
+ *   🔴 我第一版判据全从 encodeBakText 取输入，结果四条变异**全部存活**
+ *   （判据恒绿）—— 采样窗口压根没覆盖被测代码。
+ *   **教训：判外部输入的分支，必须用外部输入的形状去构造判据。**
+ */
+function rawManifest(obj) {
+  return BAK_TEXT_PREFIX + Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url');
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * 0. 先证明 bug 存在：旧路线的码长随篇数线性涨
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -330,6 +351,222 @@ test('BAK-NOTE-16 清单上限与老项目 BAK_MAX 同值 100', () => {
 test('BAK-NOTE-17 反向：正文带上限校验（超限返回 null，绝不静默截断）', () => {
   const tooMany = Array.from({ length: BAK_MAX + 1 }, (_, i) => `note-${i}`);
   assert.equal(encodeBakText(tooMany, 1), null, '超限必须返回 null（调用方据此报错），不是砍尾');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. 🔴🔴 v2：清单装「每篇的解锁材料」，恢复后**不必再输口令**
+ *    （用户报障第 3 条，2026-10-07 用户拍板：所有收藏笔记的口令材料
+ *      集中写入同一个备份笔记 —— 与老项目 :9014 `out.push([id, k])` 同款动作）
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 🔴🔴🔴 **为什么装 salt 还不够，必须再装一段"自证密文"**：
+ *
+ *   只装 salt，恢复端就能 `deriveKey(备份码口令, salt)` 算出钥匙 ——
+ *   但**算得出 ≠ 是那一把**。如果用户给不同笔记设了不同口令（bj 是每篇一把独立锁，
+ *   独立 salt + 独立派生），那么用备份码那一个口令去派生别的篇，会得到一把
+ *   **错的**钥匙。若不做验证就 putKey，后果是：
+ *     ① 用户打开那篇 → unlockIfRemembered 命中"有钥匙" → 拿错钥匙去解密 → 失败
+ *     ② 而 unlockIfRemembered:147-149 那条"只有密钥没有缓存"分支**照样返回 ok:true**
+ *        ⇒ 用户看到的是一个**空编辑器**。
+ *     ③ 空编辑器 + 无报错 = 用户以为那篇笔记是空的，正文在云端好好躺着。
+ *   那比"老实问一次口令"糟糕得多 —— 它是静默的数据丢失。
+ *
+ *   ⇒ 所以清单里每篇还要带一段**用该篇真密钥加密的定长明文**（下称"自证块"）。
+ *     恢复端派生完必须**真的解开它**，解不开就判定"这篇口令不同"，
+ *     那一篇照常走正常口令框，并在恢复卡上如实报"N 篇已免输"。
+ *   ⇒ 自证块是密文，**不是密钥材料**：它解不开任何别的内容，
+ *     拿到清单的人也拿不到任何钥匙（与"清单里装 raw key"有本质区别）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test('BAK-NOTE-18 🔴🔴 v2 清单必须装每篇的 salt + 自证块，且**绝不装密钥本身**', () => {
+  // 🔴 v1 清单（只有篇名）必须仍能读出来 —— 向后兼容，老备份不该作废
+  const v1 = encodeBakText(['alpha', 'bravo'], 1_700_000_000_000);
+  assert.ok(v1, 'v1 形态仍应能编码（老备份不该作废）');
+  const back1 = decodeBakText(v1);
+  assert.deepEqual(back1.ids, ['alpha', 'bravo'], 'v1 清单仍读得出篇名');
+  // 🔴 v1 的材料位必须补齐成等长的 null 数组（下标与篇名一一对应），
+  //   而不是空数组 —— 那样"第 2 篇的材料"会读到 undefined 而非 null，
+  //   恢复端就得写两套判空（判据纪律：形状在边界处一次定死，别让下游各自发明）。
+  assert.deepEqual(back1.mats, [null, null], 'v1 的材料位是等长 null 数组（那几篇恢复后仍要输口令）');
+
+  // 🔴🔴 v2：每篇带 salt + 自证密文
+  const mats = [
+    { s: 'AAAAAAAAAAAAAAAAAAAAAA==', c: 'Y2lwaGVy' },
+    { s: 'BBBBBBBBBBBBBBBBBBBBBB==', c: 'Y2lwaGVyMg==' },
+  ];
+  const v2 = encodeBakText(['alpha', 'bravo'], 1_700_000_000_000, mats);
+  assert.ok(v2, 'v2 应能编码');
+  const back2 = decodeBakText(v2);
+  assert.ok(back2, 'v2 应能读出');
+  assert.deepEqual(back2.ids, ['alpha', 'bravo'], 'v2 篇名保序');
+  assert.equal(back2.mats.length, 2, '🔴 每篇都要带一份材料，否则恢复后还要输口令');
+  assert.equal(back2.mats[0].s, mats[0].s, 'salt 必须原样带回来');
+  assert.equal(back2.mats[0].c, mats[0].c, '自证块必须原样带回来');
+
+  // 🔴🔴🔴 安全不变量（比 BAK-NOTE-10 更强的一条）：**装材料 ≠ 装密钥**
+  const payload = v2.slice(BAK_TEXT_PREFIX.length);
+  const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  // 键名只允许 s（salt）与 c（自证密文）—— 出现任何像密钥的字段就是回归
+  for (const it of decodeBakText(v2).mats) {
+    assert.deepEqual(
+      Object.keys(it).sort(),
+      ['c', 's'],
+      `材料项只允许 s/c 两个键，实际=${JSON.stringify(Object.keys(it))}`,
+    );
+  }
+  // salt 是 16 字节 base64（24 字符含 ==），自证块是密文 —— 两者都**不是** 44 字符的 AES 密钥
+  for (const it of decodeBakText(v2).mats) {
+    assert.ok(it.s.length <= 24, `salt 不该是长密钥串（实际 ${it.s.length} 字符）`);
+    assert.notEqual(it.s.length, 44, 'salt 绝不能是 44 字符的 raw AES 密钥');
+  }
+  assert.ok(!/"k"|"key"|"rawKey"|"aesKey"/i.test(json), `结构里出现了疑似密钥字段：${json.slice(0, 120)}`);
+});
+
+/**
+ * 🔴🔴 手工造清单明文的工具见文件头（rawManifest）。这里刻意不再重复定义 ——
+ *   判据纪律：同一工具在一个文件里只许有一份，两处各写一份迟早漂。
+ */
+
+test('BAK-NOTE-19 🔴🔴 材料数与篇数不一致：少则缺位、多则整份拒收', () => {
+  // ① 材料比篇数少（出码时某篇密钥丢了）—— 由 encodeBakText 产出，这条路是真实生产路径
+  const few = encodeBakText(['alpha', 'bravo', 'charlie'], 1, [{ s: SALT_A, c: 'Y2lwaGVy' }]);
+  assert.ok(few, '仍应能编码（少材料不是编码失败，是那几篇要口令）');
+  const back = decodeBakText(few);
+  assert.equal(back.ids.length, 3, '篇名三篇都在');
+  // 🔴 缺的材料必须是 **null**，绝不能是"空字符串"——
+  //   空字符串会被派生逻辑当成"有 salt 但 salt 异常"，报出错误的错因。
+  assert.equal(back.mats[0].s, SALT_A, '有材料的那篇材料必须带回来');
+  assert.equal(back.mats[1], null, '缺的材料必须是 null');
+  assert.equal(back.mats[2], null, '缺的材料必须是 null');
+  assert.equal(back.mats.length, 3, '材料位必须与篇名等长（下标一一对应）');
+
+  // 🔴🔴 材料**多于**篇数 ⇒ 整份拒收。手工造 —— encodeBakText 产不出这个形状。
+  //   为什么必须拒收：多出来的那份材料对应一篇**不在清单里**的笔记，
+  //   收下就等于"清单和用户以为的不一样"，而这正是 BAK-NOTE-11 那条纪律要防的。
+  const over = rawManifest({ v: 2, ts: 1, f: ['alpha'], m: [{ s: SALT_A, c: 'Y2lwaGVy' }, { s: SALT_B, c: 'Y2lwaGVyMg==' }] });
+  assert.equal(
+    decodeBakText(over),
+    null,
+    '材料多于篇数必须整份拒收（绝不能静默截断 —— 那会让清单里多出来的材料变成对不上的账）',
+  );
+
+  // 🔴 v1 冒充 v2（v 号说 2 却没 m 字段）⇒ 当 v1 读，材料位补 null，不是拒收
+  const v1withm = rawManifest({ v: 2, ts: 1, f: ['alpha'] });
+  const b2 = decodeBakText(v1withm);
+  assert.ok(b2, 'v 号是 2 但没有 m 字段：篇名仍应可读（不因缺字段拒收整份）');
+  assert.deepEqual(b2.mats, [null], '缺 m 字段 = 无材料（那篇照常要口令）');
+});
+
+test('BAK-NOTE-20 🔴 反向：材料项形状不对一律**不豁免那篇**（绝不影响其余篇）', () => {
+  // 🔴🔴 全部用 rawManifest 手工造。encodeBakText 会把坏形状**在出码侧就降级**成 null，
+  //   所以从它出来的清单里根本没有坏形状 —— 那些分支只能被外部输入触发
+  //   （清单是云端密文解出来的，属外部数据）。第一版判据全从 encodeBakText 取输入，
+  //   结果四条变异全被放过（采样窗口压根没覆盖被测代码）。
+  const bad = [
+    { s: 123, c: 'y' },              // salt 不是字符串
+    { s: SALT_A, c: 456 },           // 自证块不是字符串
+    { s: '', c: 'y' },               // 空 salt
+    { s: SALT_A, c: '' },            // 空自证块
+    { s: SALT_A },                   // 缺 c
+    { c: 'y' },                      // 缺 s
+    { s: 'x', c: 'y' },              // 🔴 salt 太短（1 字符，低于长度下限闸）
+    'notanobject',                   // 整项不是对象
+    null,
+  ];
+  for (const m of bad) {
+    const text = rawManifest({ v: 2, ts: 1, f: ['alpha', 'bravo'], m: [{ s: SALT_A, c: 'Y2lwaGVy' }, m] });
+    const back = decodeBakText(text);
+    assert.ok(back, `坏材料不该让整份清单作废（99 篇好笔记不能被一条坏数据卡住），材料=${JSON.stringify(m)}`);
+    assert.deepEqual(back.ids, ['alpha', 'bravo'], '篇名必须两篇都在');
+    // 🔴🔴 承重点：第 1 篇（好材料）必须**仍然免输**。
+    //   只判"整份没作废"的话，实现把 m 全清成 [null,null] 也能过 ——
+    //   而那等于「所有篇都要口令」，功能整个没实现，判据却全绿。
+    assert.ok(back.mats[0] !== null, `好材料那篇必须仍豁免（实际 ${JSON.stringify(back.mats[0])}）—— 坏的只是第 2 篇，输入=${JSON.stringify(m)}`);
+    assert.equal(back.mats[0].s, SALT_A, '好材料那篇的 salt 必须原样保留');
+    const got = back.mats[1];
+    assert.equal(
+      got,
+      null,
+      `坏形状必须判为「无材料」（那篇老实要口令），实际=${JSON.stringify(got)}（输入=${JSON.stringify(m)}）`,
+    );
+  }
+});
+
+test('BAK-NOTE-23 🔴🔴 材料必须**跟着篇名一起过滤**（下标错位 = 给 A 篇装上 B 篇的钥匙）', () => {
+  // 🔴🔴 这条判据是**变异 4 逼出来的**：前六条判据全绿时，我把 `for (const i of origIdx)`
+  //   改成 `for (let k = 0; k < out.length; k++)`（材料不再跟着被剔掉的篇名过滤），
+  //   测试**依然全绿** —— 因为我所有输入都是"篇名全合法且无重复"的，
+  //   origIdx 与 [0..n) 完全相同，变异点在采样窗口外。
+  //
+  // 症状（写下来防止后人"优化"掉下标跟随）：出码时某篇名非法/重复被剔掉，
+  //   材料却不跟着剔 ⇒ 材料整体前移一格 ⇒ 恢复后**给 A 篇装上了 B 篇的钥匙**。
+  //   那把钥匙解不开 A，用户看到的是"A 打开是空的/报口令不对"，
+  //   而清单里篇名是对的 —— 极难自查。
+  const S = [
+    { s: 'Mzc3zc3zc3zc3zc3zc3zc3zc3zc3zc3zc3zc3zc3M=', c: 'YWFnbGE=' },   // 0
+    { s: 'MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM=', c: 'YWFnbGJh' },  // 1
+    { s: 'MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjiyMjIyMjI=', c: 'YWFnbGM=' },   // 2
+    { s: 'MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=', c: 'YWFnbGQ=' },  // 3
+  ];
+  // 第 1 篇名非法（被剔）+ 第 3 篇重复（被去重）⇒ 篇名剩 [B, C]，材料必须剩 [matB, matC]
+  const text = encodeBakText(['A_invalid!', 'B', 'C', 'B'], 1, S);
+  assert.ok(text, '应能编码');
+  const back = decodeBakText(text);
+  assert.deepEqual(back.ids, ['B', 'C'], '非法名剔掉、重复去重');
+  // 🔴 承重点：留下的材料必须与留下的篇名**一一对应**
+  assert.equal(back.mats.length, 2, '材料位必须与留下的篇数等长');
+  assert.equal(back.mats[0].c, 'YWFnbGJh', 'B 必须配 matB（错位会给 B 装上 A 的材料）');
+  assert.equal(back.mats[1].c, 'YWFnbGM=', 'C 必须配 matC（错位会给 C 装上 B 的材料）');
+  assert.deepEqual(back.mats.map((m) => m && m.s), [S[1].s, S[2].s], 'salt 也必须逐个跟随');
+});
+
+test('BAK-NOTE-22 🔴 v1 清单必须**逐字**保持老形态（多写一个字段就红）', () => {
+  // 🔴🔴 这是"老备份不能作废"的机器形式。老项目 :8949 的清单明文就是
+  //   `{"v":1,"ts":…,"f":[…]}` —— 键序固定、无 m 字段。
+  //   出码侧在"全部篇都没有材料"时**必须**编 v1：清单形态与老版本一模一样，
+  //   二维码载荷也不因一个空数组而变长。
+  const text = encodeBakText(['alpha', 'bravo'], 1_700_000_000_000);
+  const json = Buffer.from(
+    text.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'),
+    'base64',
+  ).toString('utf8');
+  assert.equal(
+    json,
+    '{"v":1,"ts":1700000000000,"f":["alpha","bravo"]}',
+    '🔴 无材料时必须逐字编成 v1 老形态（不得多写 m 字段）',
+  );
+  // 反向：有一篇有材料就必须升 v2（否则材料丢了，功能静默失效）
+  const v2 = encodeBakText(['alpha', 'bravo'], 1, [{ s: SALT_A, c: 'Y2lwaGVy' }, null]);
+  const json2 = Buffer.from(
+    v2.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'),
+    'base64',
+  ).toString('utf8');
+  assert.ok(json2.startsWith('{"v":2,'), '有一篇有材料就必须编 v2');
+  // 🔴 v2 下缺材料的那篇必须写 **null 占位**，不得省略 ——
+  //   省略会让下标错位：恢复端按下标配对，第 2 篇会拿到第 1 篇的 salt。
+  assert.ok(/"m":\[\{"s":"[^"]+","c":"[^"]+"\},null\]/.test(json2), `缺材料的那篇必须写 null 占位（不得省略），实际=${json2}`);
+});
+
+test('BAK-NOTE-21 🔴🔴 容量闸必须按**真实字节**算（加了材料后每篇变大了）', () => {
+  // 🔴 BAK_MAX 是"篇数"上限（老项目 :8952 = 100，与 FAVS_MAX 同值），不变。
+  //   但加了材料后每篇的明文从 ~10 字节涨到 ~60 字节 ⇒ 必须确认 100 篇仍装得进
+  //   服务端 1MB 上限，且 encodeBakText 不误报超限。
+  const mats = Array.from({ length: BAK_MAX }, () => ({
+    s: 'A'.repeat(24),
+    c: 'A'.repeat(64),
+  }));
+  const ids = Array.from({ length: BAK_MAX }, (_, i) => `n${i}`);
+  const text = encodeBakText(ids, 1, mats);
+  assert.ok(text, `100 篇带材料必须仍能编码（不该误报超限）`);
+  const json = Buffer.from(
+    text.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'),
+    'base64',
+  ).toString('utf8');
+  // 100 篇 × ~60 字节 ≈ 6KB，离 1MB 上限极远 —— 量化钉住，别让后人"顺手调小 BAK_MAX"
+  assert.ok(json.length < 20_000, `清单明文应远小于 1MB（实际 ${json.length} 字节）`);
+  const back = decodeBakText(text);
+  assert.equal(back.ids.length, BAK_MAX, '100 篇全部保序读回');
+  assert.equal(back.mats.length, BAK_MAX, '100 份材料全部读回');
 });
 
 /* ── 本地脚手架 ──────────────────────────────────────────────────────────── */

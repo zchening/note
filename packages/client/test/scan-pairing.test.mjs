@@ -31,6 +31,7 @@ import {
   newDiag,
   shouldDowngrade,
   tierFor,
+  tierLabel,
   visibleCrop,
 } from '../src/scan/engine.ts';
 import { scaleFor, largeTargetPx } from '../src/scan/qr-draw.ts';
@@ -183,17 +184,84 @@ test('ENGINE-03 退化输入不得崩（0 宽高 / 未出帧）', () => {
   }
 });
 
+// 🔴 v1.12.0：数值由老项目基线（TIER_FAST 560 / TIER_UP_MISS 8 / GAP_MIN 120）
+//   调为 640 / 14 / 90（用户拍板"跳过真机验证直接改"）。
+//   ⇒ 本条判据必须跟着更新，否则它钉的正是"我们不想改的那套数值"。
+//
+//   🔴 但只钉**行为不变式**，不钉绝对数字：真正不能坏的是
+//      ①"起始档比清档小"（帧率优先的方向）
+//      ②"存在一个明确的升档门槛"（不是一上来就清档）
+//      ③升档后确实变大了（分辨率优先）
+//   数值本身是调优参数，允许调；钉死数值等于把调优路径也一起钉死。
+const FAST_TIER = tierFor(0);
+const CLEAR_TIER = tierFor(1000);
+
 test('ENGINE-04 像素分级：先快后清（帧率优先 → 分辨率优先）', () => {
-  assert.equal(tierFor(0), 560, '起始用小预算（帧率优先）');
-  assert.equal(tierFor(7), 560);
-  assert.equal(tierFor(8), 1120, '连续 8 帧没中才升大预算');
-  assert.equal(tierFor(100), 1120);
+  assert.ok(FAST_TIER < CLEAR_TIER, `起始档必须小于清档（${FAST_TIER} !< ${CLEAR_TIER}）`);
+  assert.equal(tierFor(0), FAST_TIER, 'miss=0 用快档');
+  assert.equal(tierFor(1000), CLEAR_TIER, 'miss 足够多用清档');
+
+  // 🔴 升档门槛必须落在"多帧"上：一上来就清档= 慢机型饿死（老项目 v10.1.6血泪）。
+  let first = -1;
+  for (let m = 0; m <= 200; m += 1) {
+    if (tierFor(m) === CLEAR_TIER) {
+      first = m;
+      break;
+    }
+  }
+  assert.ok(first >= 2, `升档门槛不能是 0 或 1 帧（实际 ${first}）`);
+  assert.ok(first <= 60, `升档门槛不能太大，否则迟迟不解（实际 ${first}）`);
 });
 
-test('ENGINE-05 自排队间隔夹在 [120,400]', () => {
-  assert.equal(gapFor(0), 120, '帧很快也要留 120ms，别空转烧电');
-  assert.equal(gapFor(100), 220);
-  assert.equal(gapFor(1000), 400, '慢帧要夹上限，否则用户以为死了');
+test('ENGINE-04b v1.12.0 调优取值：小档 640 / 升档门槛 14 帧', () => {
+  //🔴 这三条是本版的**具体调优取值**，显式钉住，避免以后被无意改回。
+  //   用户拍板依据是「老版本扫描识别更快」，方向＝更高帧率 + 更久保持快档。
+  assert.equal(tierFor(0), 640, '快档预算 v1.12.0 调为 640');
+  assert.equal(tierFor(13), 640, 'miss=13 仍在快档（门槛比老项目 8 帧宽）');
+  assert.equal(tierFor(14), 1120, 'miss=14 升清档');
+});
+
+test('ENGINE-04c tierLabel 必须与 tierFor 同源（不能复制魔法数）', () => {
+  // 🔴 回归防护：layer.ts 原来写 `tier > 560` 判断显示"清/快"，
+  //   而 TIER_FAST 调成 640 后该判断**恒真** ⇒ 诊断字段恒显示"清"。
+  assert.equal(tierLabel(tierFor(0)), '快', '快档必须显示"快"');
+  assert.equal(tierLabel(tierFor(1000)), '清', '清档必须显示"清"');
+  // 反向断言：照抄老写法`> 560` 在新参数下会给出错误答案 ——
+  //   640 > 560 恒真，快档会被误标成"清"。这条钉住"我们没退回老写法"。
+  assert.notEqual(tierLabel(tierFor(0)) === '清', 640 > 560);
+});
+
+test('ENGINE-05 自排队间隔 = clamp(耗时 + 余量, 下限, 上限)', () => {
+  // 🔴 v1.12.0：老版钉的是 `gapFor(0) === 120`，而本版调了参数，
+  //   照抄那个断言只会让判据钉住"我们不想改的那套数值"。改为钉**公式形状**：
+  //   ① 极快帧也必须 > 0（不许空转烧电）
+  //   ② 耗时越长间隔越大（自适应的意义）
+  //   ③ 慢帧必须被夹上限（否则用户以为死了）
+  //   ④ 夹紧后的值不得越界
+  const fast = gapFor(0);
+  const mid = gapFor(100);
+  const slow = gapFor(1000);
+  assert.ok(fast > 0, `帧很快也要留间隔下限（实际 ${fast}）`);
+  assert.ok(fast < mid, `耗时越长间隔越大（fast=${fast} mid=${mid}）`);
+  assert.equal(slow, 400, '慢帧要夹上限 400ms，否则用户以为死了');
+  for (const v of [fast, mid, slow, gapFor(50_000)]) {
+    assert.ok(v >= 0 && v <= 400, `间隔必须落在 [0,400]，实际 ${v}`);
+  }
+});
+
+test('ENGINE-05b v1.12.0 调优取值：余量 60ms（真正的帧率杠杆）', () => {
+  // 🔴 显式钉住余量而非下限：上一版只改 GAP_MIN 120→90 几乎等于空操作
+  //   （costMs + 余量早已大于下限），真杠杆是这个加数。首跑 ENGINE-05
+  //   `120 !== 90` 就是"常量改了公式没改"抓出来的 —— 已改为具名 GAP_PAD。
+  //   老项目余量 120ms ⇒ 本版 60ms。
+  //
+  // 🔴 注意 gapFor(0) 不是 60：公式是 clamp(cost + 余量, GAP_MIN=90, GAP_MAX)，
+  //   极快帧落到下限上（90）。别把它写成 60 —— 首跑就是这么错的。
+  assert.equal(gapFor(0), 90, '极快帧落到下限 90ms');
+  assert.equal(gapFor(40), 100, 'cost 40 + 余量 60 > 下限，取计算值');
+  assert.equal(gapFor(100), 160, '耗时 100ms + 余量 60ms');
+  // 真正的等价性断言：余量真的变小了（老基线 120）
+  assert.ok(gapFor(100) < 220, `耗时 100ms 时间隔应小于老基线 220，实际 ${gapFor(100)}`);
 });
 
 test('ENGINE-06 降级判据：连错 3 帧 或 40 帧零命中', () => {
@@ -297,6 +365,35 @@ test('PAIR-14 gitignore 不得把 static 源目录排除掉', () => {
 
 const read = (rel) => readFileSync(resolve(HERE, '..', rel), 'utf8');
 
+/**
+ * 从 `decl` 处按**花括号配平**截出函数体（不含结尾 `}`）。
+ *
+ * 🔴🔴 为什么不能 `main.slice(main.indexOf(decl))` 一路切到文件尾：
+ *   v1.13.0 加了 `tryResumeLastNote()`（"恢复最后一篇"，里面**必须**用
+ *   `location.assign`——那是页面内跳转，不是扫码落地），它定义在
+ *   `handleScanRaw` **之后**。按文件尾切片会把那段正确代码一起吃进来，
+ *   于是 PAIR-15 红在一个**与扫码毫无关系**的新功能上。
+ *
+ *   这是本项目第二次栽在同一个形状上（另一次见 last-note.test.mjs 的
+ *   `sliceBlock`）：**判据切片的边界必须等于语义边界**。
+ *   判据红在别人的正确代码上，比判据恒绿更浪费时间 —— 它会把人引去改产品代码。
+ */
+function bodyOf(code, decl) {
+  const start = code.indexOf(decl);
+  assert.ok(start >= 0, `源码里应能找到 ${decl}`);
+  const open = code.indexOf('{', start);
+  assert.ok(open > 0, `${decl} 后面应该有一个 {`);
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return code.slice(open, i);
+    }
+  }
+  throw new Error(`${decl} 的花括号不配平，判据自身有问题`);
+}
+
 test('PAIR-15 🔴 配对链接不得有任何 location.assign / href 跳转落地', () => {
   // 老项目用 location.assign(dest) 整页重载，那会把口令带进地址栏
   //   → 进浏览器历史、进"最近访问"、可能被同步到别的设备。
@@ -305,7 +402,8 @@ test('PAIR-15 🔴 配对链接不得有任何 location.assign / href 跳转落�
   assert.ok(!/location\s*\.\s*assign/.test(src), '配对链接模块不得跳地址');
   assert.ok(!/\.href\s*=/.test(src), '配对链接模块不得写 href');
   const main = read('src/main.ts');
-  const seg = main.slice(main.indexOf('async function handleScanRaw'));
+  // 🔴 只切 `handleScanRaw` **自己的函数体**（见 bodyOf 的注释）
+  const seg = bodyOf(main, 'async function handleScanRaw');
   assert.ok(!seg.includes('location.assign'), '扫码落地不得用 location.assign（口令会进地址栏）');
   assert.ok(seg.includes('unlock('), '扫码落地必须走 unlock()，与手输口令同一条路径');
 });
@@ -457,5 +555,133 @@ test('PAIR-23 解析器钩子只回显结构、不回显口令（不是泄露入
   assert.ok(
     !seg.includes('passphrase: parsed') && !seg.includes('passphrase: raw'),
     '形状对象不得携带口令本体',
+  );
+});
+
+/* ─────────────────────v1.12.0：扫码提速三条 ───────────────────── */
+
+/**
+ * 🔴 去掉注释再看。
+ *
+ * 本组要断言"预热被调用了""160ms 不在了"，而这两个词**都写在注释里**
+ * （engine.ts 的 prefetchJsQrIdle 注释、layer.ts 的"原先有 setTimeout(...,160)"）。
+ * 直接在原文里 includes 搜，**判据会恒绿** —— 匹配到的全是注释，
+ * 把实现删了照样通过。这正是本仓反复栽过的坑（见 MEMORY.md「恒真断言 = 没有断言」）。
+ */
+const stripComments = (src) =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+test('ENGINE-10 🔴 v1.12.0 boot() 必须调 prefetchJsQrIdle（扫码前预拉 jsQR）', () => {
+  // 动机：老项目 index.html:2877 有空闲预热，所以点扫码是热的；
+  //   bj 此前零预热（loadJsQr 只在打开浮层时才调）⇒ 打开扫码先干等 127KB 下载。
+  const main = stripComments(read('src/main.ts'));
+  assert.ok(
+    main.includes('prefetchJsQrIdle()'),
+    'boot() 必须调用 prefetchJsQrIdle()，否则扫码仍要先等网络往返',
+  );
+  // 必须是**值导入**（真去调），不是 type-only import
+  assert.ok(
+    /import\s*\{[^}]*\bprefetchJsQrIdle\b[^}]*\}\s*from\s*['"]\.\/scan\/engine\.ts['"]/.test(main),
+    '必须从 scan/engine.ts 值导入 prefetchJsQrIdle（type-only import 调不到）',
+  );
+});
+
+test('ENGINE-11 🔴 预热必须双保险（rIC + setTimeout 兜底）且幂等', () => {
+  const src = stripComments(read('src/scan/engine.ts'));
+  // 移动内核（尤其国产 WebView）可能压根不调 requestIdleCallback，只靠 rIC 会永远不预热
+  assert.ok(src.includes('requestIdleCallback'), '预热必须用 requestIdleCallback');
+  assert.ok(src.includes('setTimeout'), '预热必须有 setTimeout 兜底（rIC 可能不来）');
+  // 兜底那道必须在 rIC 分支之外：写成 if/else 就等于「rIC 存在时没有定时兜底」
+  const fn = src.slice(src.indexOf('export function prefetchJsQrIdle'));
+  assert.ok(fn.length > 0, '应存在 prefetchJsQrIdle');
+  const rICAt = fn.indexOf('requestIdleCallback');
+  const timeoutAt = fn.indexOf('setTimeout(go, 8000)');
+  assert.ok(rICAt >= 0 && timeoutAt >= 0, '两处都应存在');
+  assert.ok(timeoutAt > rICAt, '8000ms 兜底必须写在 rIC 分支之后（照抄老项目 index.html:2877 的顺序）');
+  // 复用 loadJsQr 才有in-flight 去重，否则预热与扫码并发会拉两次 127KB
+  assert.ok(fn.includes('loadJsQr'), '预热必须复用 loadJsQr（它自带 in-flight 去重）');
+  // 预热失败不许 console.error —— 那时 loadJsQr 自己会打，重复打只干扰真排查
+  assert.ok(!/console\.(error|warn)/.test(fn), '预热失败不许打日志（loadJsQr 自己会报）');
+});
+
+/**
+ * 🔴 取出某个 `const NAME = (...) => {` 声明的**函数体原文**（已去注释）。
+ *
+ * 🔴🔴 为什么不能直接 `src.slice(src.indexOf('const hit ='))` 就完事：
+ *   那样会把**后面所有函数**一起吃进来。本条判据首跑就是这么红的 ——
+ *   `hit()` 本身干净，但切片一路带进了 `tick()` 里的
+ *   `timer = window.setTimeout(...)`（那是帧循环的排队，不是命中停顿）。
+ *   断言 `/setTimeout/` 于是对着一段不属于 hit 的代码开火 ⇒ **判据自己错了**。
+ *
+ * 🔴 不手写括号配对（正是本仓栽过的坑：缩进层级才是可靠信号）。
+ *   锚点用「声明行」到**下一个同缩进声明行**之间的区间。
+ *   本仓统一 2 空格缩进 ⇒ 同级声明行 = 缩进 4 空格且以`const `/`function ` 开头。
+ */
+const fnBody = (src, decl) => {
+  const start = src.indexOf(decl);
+  assert.ok(start >= 0, `应存在声明 ${decl}`);
+  // 🔴 从**声明所在那一行的行首**切，不能用 indexOf 的落点：
+  //   去注释会把声明前的缩进吃成空串，`slice(start)` 的首行缩进变成 0，
+  //   下面的同缩进判定随之全失效（首跑就是这样：hit() 判据一直红）。
+  const lineStart = src.lastIndexOf('\n', start) + 1;
+  const lines = src.slice(lineStart).split('\n');
+  const indent = (lines[0].match(/^\s*/) || [''])[0];
+  const out = [lines[0]];
+  for (let i = 1; i < lines.length; i += 1) {
+    const l = lines[i];
+    const ind = (l.match(/^\s*/) || [''])[0];
+    // 同缩进（或更浅）的下一条声明/收尾 = 本函数结束
+    if (ind.length <= indent.length && i > 1) {
+      if (/^\s*(\}|const|let|function|async function)/.test(l)) break;
+    }
+    out.push(l);
+  }
+  return out.join('\n');
+};
+
+test('ENGINE-12 🔴 命中后不得再有 160ms 收场停顿（用户拍板，且不加开关）', () => {
+  // 用户原话：扫码的判断标准是「扫到就立刻开」。
+  const layer = stripComments(read('src/scan/layer.ts'));
+  const fn = fnBody(layer, 'const hit = (value: string)');
+  assert.ok(fn.includes('deps.onResult(value)'), 'hit() 必须调 onResult');
+  // 关键：hit() 体内不得有任何 setTimeout（旧写法是 setTimeout(..., 160)）
+  assert.ok(
+    !/setTimeout/.test(fn),
+    'hit() 内不得有 setTimeout —— 命中必须同步收场，否则每次扫码白付一次延迟',
+  );
+  // 反馈没丢：文案仍要写一次
+  assert.ok(fn.includes('COPY.scanHit'), 'hit() 仍应写一次"已识别"文案（反馈不因去停顿而消失）');
+});
+
+test('ENGINE-13 🔴 命中收场顺序：先 cleanup 再 onResult', () => {
+  // 顺序反了会怎样：onResult 触发上层跳转，而浮层还挂在 DOM 上 →
+  // 跳转后残留一层遮罩，下一次点任何键都像"没反应"。
+  const layer = stripComments(read('src/scan/layer.ts'));
+  const fn = fnBody(layer, 'const hit = (value: string)');
+  const iCleanup = fn.indexOf('cleanup()');
+  const iResult = fn.indexOf('deps.onResult(value)');
+  assert.ok(iCleanup >= 0 && iResult >= 0, '两者都要出现');
+  assert.ok(iCleanup < iResult, '必须先 cleanup() 再 onResult()');
+});
+
+test('ENGINE-04d 🔴 layer.ts 必须真的用 tierLabel，不许自己比魔法数', () => {
+  // 🔴🔴 上一版 ENGINE-04c **是假绿**（变异测试抓到：把 layer.ts 改回
+  //   `tier > 560` 硬编码，38 条全过）。原因：04c 只测了 tierLabel 这个函数
+  //   自己的对错，没钉住**调用方真的在用它**。
+  //   这正是本仓的老坑：「断言某行为存在」与「断言某实现被使用」是两件事。
+  //
+  //   ⚠️ 必须去注释后再搜：layer.ts 的注释里就写着 `tier > 560`（解释历史），
+  //   不去注释的话这条判据会恒绿。
+  const layer = stripComments(read('src/scan/layer.ts'));
+  assert.ok(
+    layer.includes('tierLabel(tier)'),
+    'layer.ts 必须调 tierLabel(tier)，不许自己复制 `tier > 560` 这类魔法数',
+  );
+  // 反向断言：实现里不得再出现裸的 560 分界
+  assert.ok(
+    !/tier\s*>\s*560/.test(layer),
+    'layer.ts 不得再用硬编码 560 判断档位（TIER_FAST 已是 640，该判断恒真）',
   );
 });

@@ -96,10 +96,10 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
       blobToB64,
       nativeCopyImage: deps.nativeCopyImage,
       showPreview: (b) => showPreview(b),
-      // 🔴 触屏判据取全项目唯一出处（`platform/touch.ts`）——
-      //   那个文件里记着"matchMedia 缺失/抛异常时按什么处理"的纪律，
-      //   本模块自己再写一份字面量就会漂移（它此前就在下面写了两处）。
-      isTouch: isTouchDevice(),
+      // 🔴🔴 这里**不再**注入 isTouch：交付阶梯里唯一的平台分支是"原生桥 vs 分享"，
+      //   而"剪贴板成功后给触屏补开预览层"已按用户拍板的 A1 删掉了（render.ts 的注释与
+      //   单测 EXP-W02b 钉着这条）。平台判据在本模块仍有两处消费（文案分档、预览层指引），
+      //   走同一个唯一出处 `platform/touch.ts`，不在 render.ts 再开一个注入口。
     } satisfies DeliverDeps);
 
     if (kind === 'cancelled') return 'cancelled';
