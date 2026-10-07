@@ -124,10 +124,56 @@ export interface DeliverDeps {
   nativeCopyImage?: ((base64: string, mime: string) => Promise<boolean>) | undefined;
   /** 全屏预览兜底。必须有 id 以便 e2e 判。 */
   showPreview: (blob: Blob) => void;
-  /** 当前是否在原生壳内。 */
+  // 当前是否在原生壳内。
   isNativeApp: boolean;
   /** Blob → base64（去掉 data: 前缀）。 */
   blobToB64: (blob: Blob) => Promise<string>;
+  /**
+   * 是否纯触屏（老项目口径 `(hover: none) and (pointer: coarse)`）。
+   *
+   * 🔴 由调用方注入而不是本模块自己 matchMedia：触屏判据全项目唯一出处是
+   *   `platform/touch.ts` 的 `isTouchDevice()`（那里记着"判不准时怎么办"的纪律），
+   *   本模块再写一份字面量就是第二处口径，迟早漂移。
+   */
+  isTouch: boolean;
+}
+
+/**
+ * 触屏上剪贴板成功时，**额外**开一次全屏预览层。
+ *
+ * 🔴🔴🔴 为什么必须多开这个出口（用户报障第 5 条，实测由 e2e EXPORT-W02 钉住）：
+ *
+ *   老项目 v7.7.0 写阶梯时的判断是「Android WebView 对图片写剪贴板长期不可用」
+ *   —— 在那个假设下，移动端必然落到分享/预览档，所以阶梯把剪贴板当终点没问题。
+ *
+ *   但 bj 的用户实测是**反的**：「能正常复制到系统自带笔记 App」
+ *   ⇒ 第①档剪贴板在他手机上**是成功的** ⇒ 阶梯停在第①档就 return 了，
+ *   **永远到不了分享面板与预览层**。
+ *   而微信会话框不接受剪贴板里的图片（它只认相册/自己的媒体输入），
+ *   于是用户看到的正是「提示已复制 → 去微信粘贴 → 没反应」，
+ *   而屏上根本没有一张可以长按的图。
+ *
+ * 🔴 这**不是推翻老项目的阶梯**：顺序一分不变，仍是剪贴板→桥→分享→预览。
+ *   只是在第①档成功之后，**触屏**再补一个出口，把"长按转发给微信"这条路
+ *   真正摆到用户面前。
+ *
+ * 🔴🔴 为什么桌面端绝对不许走这条：桌面有分享面板与 Ctrl+V，
+ *   多弹一层遮罩是把老项目同款行为改坏（e2e EXPORT-W03 反向闸钉着）。
+ */
+async function openTouchPreviewOnClipboard(
+  blobP: Promise<Blob>,
+  deps: DeliverDeps,
+): Promise<void> {
+  if (!deps.isTouch) return;
+  try {
+    // 🔴 必须 await 渲染结果：第①档是把 Promise 塞进 ClipboardItem 交出去的，
+    //   此刻手上还没有 Blob。剪贴板已经写成功，这里渲染失败**绝不能**改写结论
+    //   （否则会把"已复制"变成"失败"，用户反而更懵）。
+    const blob = await blobP;
+    deps.showPreview(blob);
+  } catch {
+    /* 预览开不出来不影响"已复制"这个既成事实 */
+  }
 }
 
 /**
@@ -150,6 +196,7 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     ) {
       clipTried = true;
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]);
+      await openTouchPreviewOnClipboard(blobP, deps);
       return 'clipboard';
     }
   } catch {
@@ -171,6 +218,9 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
   if (clipTried && !deps.isNativeApp) {
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      // 🔴 与第①档同一条真因：这里也是"剪贴板成功"，触屏上同样到不了分享/预览。
+      //   漏了这一档的话，老内核（只认 Blob）那批手机上用户照样进不了微信。
+      await openTouchPreviewOnClipboard(Promise.resolve(blob), deps);
       return 'clipboard';
     } catch {
       /* 仍被拒（手势过期等）→ 继续 */

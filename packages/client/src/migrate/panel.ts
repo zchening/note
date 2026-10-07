@@ -34,9 +34,12 @@
  *   实现见 migrate/fav-backup.ts（含"为什么不装密钥"的架构性分叉论证）。
  *
  * ── 一处**不承接**的老项目行为 ───────────────────────────────────────────
- * 老项目把清单加密后写进**云端一篇专用笔记**，二维码只装那篇的链接（甲案）。
- * 本项目不写那篇笔记，清单直接进码 —— 少一个"往云端写特殊笔记"的副作用，
- * 少一份"那篇笔记被误当普通笔记编辑"的风险。论证见 fav-backup.ts 文件头。
+ * 🔴🔴 2026-10-08 起**已承接**：老项目把清单加密后写进**云端一篇专用笔记**，
+ *   二维码只装那篇的链接（甲案，用户报障第 2 条拍板「复刻老项目甲案」）。
+ *   判「码密度与篇数解耦」的那个承诺由 migrate/bak-note.ts 承担，
+ *   本面板只多了**一行「备份笔记：nsbak-xxxxxx」**（老项目 #bakBakId，
+ *   与 #bakTip 是两个独立 `p.qr-warn`，见 outIdLine）。
+ *   本项目仍然保留**单篇码 `nsbak1:` 与收藏清单码 `nsfav1:` 的读**（旧码仍能恢复）。
  */
 
 import { COPY } from '../ui/copy.ts';
@@ -67,6 +70,15 @@ export interface MigratePanelDeps {
    */
   preKey?: string | null;
   /**
+   * 备份侧的入口引导句（HTML）。不传则用 `COPY.migrateMakeLeadHtml`（旧路线那句）。
+   *
+   * 🔴 为什么要开这个口而不是直接改 `migrateMakeLeadHtml`：
+   *   旧收藏清单码 `nsfav1:` 仍然可解（历史码不能作废），它那条路要展示的
+   *   是"清单就在码里"；甲案那句说的是"清单写进了备份笔记"。两句话**互斥**，
+   *   合成一句只会两边都不成立。
+   */
+  makeLeadHtml?: string;
+  /**
    * 恢复侧：拿码 + 口令去恢复。
    *
    * 🔴 `reason` 在 `ok:true` 时是**成功文案**（老项目 :9270 口径逐字，
@@ -95,6 +107,14 @@ export interface MigratePanelDeps {
    *   不传则退回通用提示（单篇换机走那条）。
    */
   scanTip?: (code: string) => string;
+  /**
+   * 出码后码上方那行「备份笔记：nsbak-xxxxxx」（老项目 #bakBakId）。
+   *
+   * 🔴 与 `scanTip` 同款理由传**函数**：备份篇名是 `onMake` 里才生成的，
+   *   `buildMigratePanel` 的实参早于那一刻求值 ⇒ 传字符串只能是空值或预估值。
+   * 🔴 不传则该行保持隐藏（单篇码 `nsbak1:` / 收藏清单码 `nsfav1:` 两条路都没有它）。
+   */
+  scanIdLine?: (code: string) => string;
   /** 关闭后归还焦点（老项目红线：关弹窗必须让光标回到编辑器）。 */
   onClosed: () => void;
   /** 恢复成功后要跳的提示文案（由调用方决定，因为要带上篇名）。 */
@@ -212,12 +232,16 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
 
   const lead = document.createElement('p');
   lead.className = 'hint';
-  // 🔴 老项目 index.html:926 原文含 `<b>备份笔记</b>` 与 `<br>`：
+  // 🔴 老项目 index.html:801 原文含 `<b>备份笔记</b>` 与 `<br>`：
   //   「换机备份要用口令为专用的<b>备份笔记</b>派生密钥：<br>收藏夹里笔记的密钥都写进它，扫一扫整体带走。」
   //   这段是**本项目自产的常量**（不是用户输入），所以 innerHTML 安全；
-  //   而纯文本版 migrateMakeLead 会把「备份笔记」四字连同标签一起显示出来。
+  //   而纯文本版migrateMakeLead 会把「备份笔记」四字连同标签一起显示出来。
+  // 🔴 甲案那一版（migrateBakLeadHtml）与这句只差「密钥」→「篇名」：
+  //   老项目的清单里装的是**密钥**，bj 的清单里**没有密钥**（CryptoKey 是
+  //   extractable:false，WebCrypto 层面导不出 raw 字节，见 migrate/fav-backup.ts 文件头）。
+  //   照抄「密钥都写进它」就是谎报，用户会以为码里带着钥匙。
   if (making) {
-    lead.innerHTML = COPY.migrateMakeLeadHtml;
+    lead.innerHTML = deps.makeLeadHtml ?? COPY.migrateMakeLeadHtml;
   } else {
     lead.textContent = COPY.migrateTakeLead;
   }
@@ -266,10 +290,19 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
   outWrap.classList.add('hidden');
   const holder = document.createElement('div');
   holder.id = 'migrateQrHolder';
+  // 🔴 老项目 index.html:805 是**两个独立**的 `p.qr-warn`：
+  //     `<p class="qr-warn" id="bakBakId"></p>`（备份笔记名）
+  //     `<p class="qr-warn" id="bakTip"></p>`   （扫码指引）
+  //   合成一句会让用户找不到"我那篇备份笔记叫什么"—— 而那正是换机时要手输/对号的
+  //   唯一标识。默认隐藏（单篇码/收藏码路径没有它），由调用方给出时才出现。
+  const idLine = document.createElement('p');
+  idLine.className = 'ns-qr-warn';
+  idLine.id = 'migrateBakId';
+  idLine.classList.add('hidden');
   const tip = document.createElement('p');
   tip.className = 'ns-qr-warn';
   tip.id = 'migrateTip';
-  outWrap.append(holder, tip);
+  outWrap.append(holder, idLine, tip);
 
   /* ── 成功区 ── */
   const doneWrap = document.createElement('div');
@@ -380,6 +413,16 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
     //   没有就给通用那句（单篇换机）。见 MigratePanelDeps.scanTip 的注释。
     //   scanTip 传的是函数：篇数要等 onMake 跑完才知道（见该字段注释）。
     hint(tip, (deps.scanTip && deps.scanTip(code)) || COPY.migrateScanTip);
+    // 🔴 甲案那一行（老项目 :9186 `bakIdLine.textContent = '备份笔记：' + res.id`）。
+    //   只在调用方给了 scanIdLine 时出现；没给就保持隐藏，别给单篇/收藏码留一行空的。
+    const idText = deps.scanIdLine ? deps.scanIdLine(code) : '';
+    if (idText) {
+      idLine.textContent = idText;
+      idLine.classList.remove('hidden');
+    } else {
+      idLine.textContent = '';
+      idLine.classList.add('hidden');
+    }
     void acquireWakeLock();
   }
 

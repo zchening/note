@@ -59,8 +59,37 @@ test('EGG-E 彩蛋层全链路', async (t) => {
       assert.equal(btn, '打开彩蛋', '门牌时按钮文案应为「打开彩蛋」');
       assert.equal(await page.isDisabled('#landingBtn'), false, '门牌不禁用按钮（点了是去彩蛋）');
 
+      // 🔴🔴 彩蛋提示行是老项目 index.html:10187-10192 的**结构**：
+      //   `<b>/门牌名</b>` + 裸文字「 是彩蛋门牌，不会新建笔记」
+      //   （门牌名金黄 600、说明文字 muted —— `.eggtip b{color:var(--accent)}`）。
+      //   🔴 我第一版只比 `textContent` 逐字等于「snake 是彩蛋门牌，不会新建笔记」，
+      //   那是**旧实现**（整行 textContent 同一颜色）的口径。
+      //   改成 DOM 拼装后 bj 与老项目一致了，判据却红 —— 这就是"老判据钉旧口径"，
+    //   与"实现回退"会长得一模一样。逐字比对老项目源码后才敢改判据。
+      //   结构必须一起钉：只钉文案的话，把实现退回整行同色它照样绿。
       const tip = (await page.textContent('#landingEggTip'))?.trim();
-      assert.equal(tip, 'snake 是彩蛋门牌，不会新建笔记');
+      assert.equal(tip, '/snake 是彩蛋门牌，不会新建笔记');
+      const tipStruct = await page.evaluate(() => {
+        const el = document.getElementById('landingEggTip');
+        const b = el?.querySelector('b');
+        return {
+          hasB: !!b,
+          bText: b?.textContent ?? '',
+          bColor: b ? getComputedStyle(b).color : '',
+          bWeight: b ? getComputedStyle(b).fontWeight : '',
+          tail: b?.nextSibling?.textContent ?? '',
+        };
+      });
+      assert.equal(tipStruct.hasB, true, '门牌名必须在 <b> 里（金黄 600），老项目同款');
+      assert.equal(tipStruct.bText, '/snake', '门牌名那段逐字应为「/snake」（老项目 :10190 逐字）');
+      assert.equal(tipStruct.tail, ' 是彩蛋门牌，不会新建笔记', '后半句应是裸文字节点（老项目 :10191 逐字）');
+      // 金黄取值随主题变，只钉"确实是强调色"这件事：与门牌名 span 同色即达标
+      const nameColor = await page.evaluate(() => {
+        const el = document.getElementById('landingUrlName');
+        return el ? getComputedStyle(el).color : '';
+      });
+      assert.equal(tipStruct.bColor, nameColor, '门牌名 <b> 应与网址行的笔记名同色（老项目都是 --accent）');
+      assert.equal(tipStruct.bWeight, '600', '门牌名 <b> 字重应为 600（老项目 :10190 同款）');
 
       // 普通笔记名仍走普通文案
       await page.fill('#li', 'plainNote');

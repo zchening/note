@@ -26,6 +26,17 @@ export interface PairPanelDeps {
   /** 关闭后归还焦点（老项目红线：关弹窗必须让光标回到编辑器）。 */
   onClosed: () => void;
   /**
+   * 出码回调，把那条配对链接交给调用方（正式接口）。
+   *
+   * 🔴🔴 为什么必须有它：配对链接是**画在 canvas 上的**（DOM 里读不到），
+   *   于是 e2e 想验"这条链接能被生产解析器收下、往返无损"就只能手写一份
+   *   `buildPairLink` —— 那正是判据纪律禁止的"手写第二份实现"：
+   *   一旦生产侧改了 origin 归一或 fragment 边界，判据与产物分叉却照样全绿。
+   *   ⇒ 由生产侧把链接交出来（与 migrate/panel.ts 的 `#migrateQrHolder[data-code]`
+   *   同一个思路，那边能读到是因为它把 code 写进了 dataset）。
+   */
+  onCode?: (link: string) => void;
+  /**
    * 「锁定笔记」按钮的回调（可省）。
    *
    * 🔴 只在**本机没有口令**（passphrase 为 null）时才用到 ——
@@ -225,6 +236,8 @@ export function buildPairPanel(deps: PairPanelDeps): PairPanel {
     holder.innerHTML = '';
     cv.addEventListener('click', () => showLarge(link));
     holder.appendChild(cv);
+    // 🔴 把链接交给调用方（理由见 PairPanelDeps.onCode）
+    deps.onCode?.(link);
   };
 
   const teardown = (): void => {

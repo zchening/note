@@ -922,6 +922,17 @@ test('VED-13 🔴🔴 提醒已设列表是裸行（无描边无底色）+ 顶�
   const page = await openEditor(h.browser(), h.baseUrl(), 'ved13', 'pw');
   try {
     const m = await page.evaluate(() => {
+      // 🔴🔴 夹具必须**逐层复刻生产 DOM**（reminder/ui.ts:600-641）：
+      //   `.box.ns-rembox > .ns-rem-list > .ns-rem-row > button.ns-rem-off`
+      // 🔴 我第一版把 list 直接挂在 `document.body` 下，**缺 `.box` 祖先**，
+      //   于是本轮为修用户报障第 4 条（关闭钮颜色被 `.box button:not(.box-x)`
+      //   吃掉）新加的 `.box .ns-rem-list .ns-rem-row button.ns-rem-off`
+      //   在夹具上**匹配不到** ⇒ 「取消键应有 1px 描边」恒红 0px。
+      //   这不是实现回退，是**夹具与产物不同构**：
+      //   判据自己搭了个生产里不存在的结构，然后拿它的 computed 当金标。
+      //   ⇒ 凡是量"某条规则在真实页面里长什么样"，夹具必须照抄真实层级。
+      const box = document.createElement('div');
+      box.className = 'box ns-rembox';
       const list = document.createElement('div');
       list.className = 'ns-rem-list';
       const row = document.createElement('div');
@@ -932,12 +943,16 @@ test('VED-13 🔴🔴 提醒已设列表是裸行（无描边无底色）+ 顶�
       off.textContent = '×';
       row.appendChild(off);
       list.appendChild(row);
-      document.body.appendChild(list);
+      box.appendChild(list);
+      document.body.appendChild(box);
+      // 前置自证：这条选择器必须真的命中（否则下面量的都是别的规则的产物）
+      const matched = off.matches('.box .ns-rem-list .ns-rem-row button.ns-rem-off');
       const ls = getComputedStyle(list);
       const rs = getComputedStyle(row);
       const os = getComputedStyle(off);
       const root = getComputedStyle(document.documentElement);
       const snap = {
+        matched,
         listBorderTop: parseFloat(ls.borderTopWidth),
         listPadTop: parseFloat(ls.paddingTop),
         listMarginTop: parseFloat(ls.marginTop),
@@ -951,9 +966,16 @@ test('VED-13 🔴🔴 提醒已设列表是裸行（无描边无底色）+ 顶�
         line: root.getPropertyValue('--line').trim(),
         boxBg: root.getPropertyValue('--box-bg').trim(),
       };
-      list.remove();
+      box.remove();
       return snap;
     });
+    // 🔴 前置自证：那条修复规则必须真的命中这个夹具。
+    //   少了它，"描边 0px"这种失败无法区分"规则没生效"与"夹具不在作用域内"。
+    assert.equal(
+      m.matched,
+      true,
+      '夹具必须命中 `.box .ns-rem-list .ns-rem-row button.ns-rem-off`（层级与生产同构）',
+    );
     assert.equal(m.listBorderTop, 1, `列表顶部应有 1px 分隔线，实际 ${m.listBorderTop}px`);
     assert.equal(
       m.listBorderTop === 1 ? toRgb(m.line) : '',

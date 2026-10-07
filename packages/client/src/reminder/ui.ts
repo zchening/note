@@ -167,12 +167,21 @@ export class ReminderUI {
     const range = sel.getRangeAt(0);
     // 🔴 只在编辑器内部的光标才响应：选区落在菜单/输入框里时不该浮 chip
     if (!editable.contains(range.startContainer)) return this.hideChip();
-    const offset = this.offsetWithin(editable, range.startContainer, range.startOffset);
-    if (offset < 0) return this.hideChip();
-    const text = editable.textContent ?? '';
-    const m = matchAtCaret(text, offset, Date.now());
+    // 🔴🔴🔴 必须取**块级** text + 块内偏移（老项目 index.html:6305 caretInfoInEditor）。
+    //   这里曾用 `editable.textContent` + 全编辑器偏移，两者都错在同一个地方：
+    //   全文 textContent 把**所有块无分隔符地拼在一起**，于是
+    //     ① itemForChip 的 `end` 回退到 text.length ⇒ 事项把**下面所有块**吞进来
+    //        （用户报障第1 条：chip 事项显示成「买菜和水果第二行文字第三行文字」）；
+    //     ② 光标在第二块时，collectTimeMatches 仍能匹配，但 index 是全局的，
+    //        一切基于"同一行"的推断全部失效。
+    //   老项目的 `itemAfterMatch` 虽然也切到串尾，但它的 text 来自
+    //   `caretInfoInEditor()` —— **只含当前块**，所以天然不跨行。
+    //   ⇒ 这不是"少了个 trim"，是**取文本的粒度**错了。
+    const info = caretInfoIn(editable, range.startContainer, range.startOffset);
+    if (!info) return this.hideChip();
+    const m = matchAtCaret(info.text, info.offset, Date.now());
     if (!m) return this.hideChip();
-    const item = itemForChip(text, m, Date.now());
+    const item = itemForChip(info.text, m, Date.now());
     // 🔴🔴 已添加态优先判定（老项目 index.html:6380
     //   `if (reminders.some(r => r.at === m.at))`）。
     //   此前这一步整个缺失 —— 只要命中一个未过期时间串就弹 CTA「添加提醒」卡，
@@ -319,14 +328,15 @@ export class ReminderUI {
   /**
    * 把 DOM 位置换算成编辑器纯文本里的字符偏移。
    *
-   * 🔴🔴 用 `Range.toString()` 而不是 `textContent.indexOf(node.textContent)`：
+   * 🔴🔴🔴 本方法已**不再用于 chip 判定**（改走文件尾的 `caretInfoIn`，取块级 text）。
+   *   保留它是因为它还有一个正当用途：把 chip 的全局 index 换算回"编辑器全文"，
+   *   供 `insertRemLine` 之类的写回路径定位。**留着一个"看起来还能用"的旧口径**
+   *   是本项目记过的坑（`STATE_LABEL`、CSS 里的 `.menu-item` 背景都栽过）：
+   *   下一个人看到它会以为这就是 chip 的取文本方式。
+   *
+   * 🔴 用 `Range.toString()` 而不是 `textContent.indexOf(node.textContent)`：
    *   同一段文字在文档里出现两次时 indexOf 会返回第一处，于是光标在第二处
    *   却被算成第一处 —— 表现为"点第二个时间串，加的却是第一个的提醒"。
-   *
-   * 🔴 偏移必须与 matchAtCaret 吃的那个 text 是**同一个串**。
-   *   这里用 Range 展开（等价于 textContent 的 DOM 顺序），调用方也必须传
-   *   `editable.textContent` —— 两处口径不一致时偏移会整体错位，
-   *   症状是"光标明明在时间串上，chip 不出现"。
    */
   private offsetWithin(root: HTMLElement, node: Node, nodeOffset: number): number {
     if (!root.contains(node)) return -1;
@@ -588,6 +598,12 @@ export class ReminderUI {
 
   private buildPanel(): HTMLDivElement {
     const mask = document.createElement('div');
+    // 🔴 id 是**对外契约**：`main.ts hasOverlayPanelOpen()` 用它判断"提醒面板开着没有"
+    //   （链接识别延迟守卫）。此前这里只有 `class="mask hidden"`、既无 id 也无专属类，
+    //   而守卫那边写的是 `.ns-rem-mask:not(.hidden)` ⇒ **恒 null，守卫静默失效**。
+    //   病：提醒面板开着时正文不可编辑，那种场景没有新输入，
+    //   守卫失效就表现为"打开面板时点正文，光标被链接重建弹走"。
+    mask.id = 'remMask';
     mask.className = 'mask hidden';
     const box = document.createElement('div');
     box.className = 'box ns-rembox';
@@ -886,6 +902,62 @@ export class ReminderUI {
 }
 
 /* ---------------- 小工具 ---------------- */
+
+/**
+ * 光标落点信息：**所在根级块的纯文本 + 块内偏移**。
+ *
+ * 🔴🔴🔴 逐字对应老项目 `caretInfoInEditor()`（index.html:6305）。这是本项目
+ *   提醒 chip 能不能"事项不跨行"的**唯一决定性结构**，不是可选优化。
+ *
+ * 为什么必须是块级（量化实测，390×844 真浏览器）：
+ *   输入「2027-3-1 10:00　买菜和水果 ↵ 第二行文字 ↵ 第三行文字」，
+ *   光标停在第一行时间串上时——
+ *     全编辑器 textContent = "2027-3-1 10:00买菜和水果第二行文字第三行文字"
+ *       ⇒ itemForChip 的 end 回退到 text.length ⇒ 事项 = "买菜和水果第二行文字第三行文字"❌
+ *     块级 textContent     = "2027-3-1 10:00　买菜和水果"
+ *       ⇒ 事项 = "买菜和水果" ✅（与老项目实测逐字一致）
+ *
+ * 两个必须与老项目一致的实现细节：
+ *   ① 偏移用 `Range.selectNodeContents(block)` + `setEnd` 再 `.toString().length`
+ *      —— 与 `block.textContent` **同源**。若改用全局偏移，跨块就错位。
+ *   ② **裸文本节点兜底**：光标落在"直接挂在 root 下的裸文本"里时，
+ *      往上找不到块（老项目 v5.57 修的就是这个：症状是"有时候不弹 chip"）。
+ *      此时用该节点自身文本 + 节点内偏移。
+ *
+ * @param root 编辑器根元素
+ * @param node 光标所在 DOM 节点（通常是文本节点）
+ * @param nodeOffset 该节点内的偏移
+ * @returns 块级文本与块内偏移；光标不在 root 内 / 找不到块时返回 null
+ */
+export function caretInfoIn(
+  root: HTMLElement,
+  node: Node,
+  nodeOffset: number,
+): { text: string; offset: number } | null {
+  if (!root.contains(node)) return null;
+
+  // ① 裸文本兜底（老项目 v5.57）
+  if (node.nodeType === 3 && node.parentNode === root) {
+    return { text: (node as Text).data || '', offset: nodeOffset };
+  }
+
+  // ② 往上找到"直接挂在 root 下的那一层块"
+  let block: Node | null = node.nodeType === 3 ? node.parentNode : node;
+  while (block && block.parentNode !== root) block = block.parentNode;
+  if (!block || block === root) return null;
+
+  // ③ 块内偏移：Range 展开，与 block.textContent 同源
+  let offset: number;
+  try {
+    const pre = document.createRange();
+    pre.selectNodeContents(block);
+    pre.setEnd(node, nodeOffset);
+    offset = pre.toString().length;
+  } catch {
+    return null;
+  }
+  return { text: block.textContent || '', offset };
+}
 
 /** 纯文本截断（进的是 textContent，不拼 HTML，所以不需要 HTML 转义）。 */
 function escapeTruncPlain(s: string, n: number): string {

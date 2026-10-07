@@ -517,3 +517,156 @@ test('REM-12 🔴 同日的提醒：首行右侧不挂相对日元素（老项�
     await page.close();
   }
 });
+
+/* ═══════════════ 事项不跨行（老项目 caretInfoInEditor 块级口径）═══════════════ */
+
+/**
+ * 🔴🔴🔴 REM-13 提醒 chip 的事项**只取时间串所在那一行**，不得吞掉下面各行。
+ *
+ * 现象（用户报障第 1 条）：正文输入
+ *     2027-3-1 10:00　买菜和水果 ↵
+ *     第二行文字 ↵
+ *     第三行文字
+ * 把光标移到第一行的时间串上，chip 里的事项显示成
+ *     「买菜和水果第二行文字第三行文字」
+ *
+ * 🔴 根因不是"少了个 trim"，是**取文本的粒度**错了：
+ *   旧实现拿 `editable.textContent`（所有块无分隔符拼接）+ 全编辑器偏移，
+ *   `itemForChip` 的 `end` 回退到 text.length ⇒ 后面所有块一起进事项。
+ *   老项目 index.html:6305 `caretInfoInEditor()` 返回的是
+ *   **块级 textContent + 块内偏移**，所以天然不跨行。
+ *
+ * 🔴 老项目真机对照（量化实测 390×844，非源码推断）：
+ *   infoText = "2027-3-1 10:00　买菜和水果"   itemAfterMatch = "买菜和水果"
+ */
+test('REM-13 🔴🔴 chip 事项只取本行，不得把下面各行吞进来', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem13', 'pw');
+  try {
+    await page.click('.ns-editor');
+    await page.keyboard.type('2027-3-1 10:00　买菜和水果');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('第二行文字');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('第三行文字');
+    await page.waitForTimeout(300);
+
+    // 光标移回第一行时间串上（offset 3 落在 "2027" 里）
+    await caretTo(page, 3);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+
+    const got = await page.evaluate(() => {
+      const c = document.querySelector('#timeChip');
+      return {
+        item: (c.querySelector('.ns-chip-item') || {}).textContent || '',
+        editorText: document.querySelector('.ns-editor').textContent,
+      };
+    });
+
+    assert.equal(got.item, '买菜和水果',
+      '事项必须是本行时间串之后的文字，实际=' + JSON.stringify(got.item));
+
+    // 🔴 反向断言：下面两行一个字都不许进事项。
+    //   只有正向断言时，"把整篇正文都当事项"这种更离谱的错法也能变绿。
+    for (const forbidden of ['第二行文字', '第三行文字']) {
+      assert.ok(!got.item.includes(forbidden),
+        '事项不得包含下一行的内容：' + forbidden + '，实际=' + JSON.stringify(got.item));
+    }
+    // 🔴 前三行确实都在正文里 —— 证明上面两条不是因为"没输入进去"而绿的
+    assert.ok(got.editorText.includes('第二行文字') && got.editorText.includes('第三行文字'),
+      '正文必须真的有三行，editorText=' + JSON.stringify(got.editorText));
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * 🔴 REM-14 同一行内**两个**时间串：事项只到下一个时间串为止（老项目 itemAfterMatch 同款）。
+ *
+ * 与 REM-13 配对：REM-13 钉"不跨块"，本条钉"同行按下一个时间串截断"。
+ * 两者都绿才说明切法与老项目 `itemAfterMatch`（index.html:6041）一致。
+ */
+test('REM-14 同行第二个时间串会截断事项（老项目 itemAfterMatch 同款）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem14', 'pw');
+  try {
+    await page.click('.ns-editor');
+    await page.keyboard.type('2027-3-1 10:00　买菜　2027-3-2 09:00　水果');
+    await page.waitForTimeout(300);
+
+    await caretTo(page, 3);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    const first = await page.evaluate(() =>
+      (document.querySelector('#timeChip .ns-chip-item') || {}).textContent || '');
+    assert.equal(first, '买菜', '第一个时间串的事项只到下一个时间串前，实际=' + JSON.stringify(first));
+
+    // 光标移到第二个时间串上（跳过 "2027-3-1 10:00　买菜　" 共 18 字符）
+    await caretTo(page, 18 + 3);
+    await page.waitForTimeout(400);
+    const second = await page.evaluate(() => ({
+      item: (document.querySelector('#timeChip .ns-chip-item') || {}).textContent || '',
+      visible: !document.querySelector('#timeChip').classList.contains('hidden'),
+    }));
+    assert.equal(second.visible, true, '第二个时间串也应浮 chip');
+    assert.equal(second.item, '水果', '第二个时间串的事项=' + JSON.stringify(second.item));
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-15 🔴🔴 提醒面板开着时，遮罩守卫必须认得出来（链接识别延迟守卫的前提）', async () => {
+  // 🔴🔴 这条判的是**一个恒失效的守卫**，不是界面。
+  //
+  //   `main.ts hasOverlayPanelOpen()` 是链接识别延迟守卫的一项（老项目 index.html:3632
+  //   的 `!remPanelOpen`）：面板开着时正文不可编辑，那种场景没有新输入，
+  //   若也把识别推迟 1.5s，用户会看到"打开面板时点正文，光标被链接重建弹走"。
+  //
+  //   病：`hasOverlayPanelOpen()` 问的是 `document.querySelector('.ns-rem-mask:not(.hidden)')`，
+  //   而提醒面板的真实 DOM 是 `reminder/ui.ts` `mask.className = 'mask hidden'` ——
+  //   **既没有 `.ns-rem-mask` 也没有任何 id** ⇒ 该查询恒返回 null ⇒ 守卫静默失效。
+  //   同一条函数里 `querySelector('.ns-scan:not(.hidden)')` 同样恒 null
+  //   （扫一扫真实根元素是 `#scanMask`，scan/layer.ts:66-67）。
+  //
+  // 🔴 为什么钉 DOM 事实而不是钉 `hasOverlayPanelOpen` 的返回值：
+  //   它在 main.ts 里，import 就会把整个应用启动起来。所以这里钉**它所依赖的事实**
+  //   （提醒遮罩有稳定 id / 开着时没有 hidden / 关掉后 hidden 回去）。
+  //   🔴 扫一扫那一支（`#scanMask`）**本条不覆盖** —— 打开取景框要真摄像头，
+  //   本仓刻意不在共享 harness 里造假 MediaStream（见 MEMORY 的 Playwright 纪律）。
+  //   它由源码层对齐保证：守卫查的 id 与 scan/layer.ts:67 建的一致。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem15', 'pw');
+  try {
+    // 面板未开时：遮罩可以在 DOM 里，但必须挂着 hidden
+    const closed = await page.evaluate(() => {
+      const m = document.getElementById('remMask');
+      return { exists: !!m, hidden: m ? m.classList.contains('hidden') : null };
+    });
+    assert.equal(closed.exists, true,
+      '提醒遮罩必须有一个稳定 id（守卫靠它查；此前它只有 class="mask hidden"，守卫恒失效）');
+    assert.equal(closed.hidden, true, '面板未打开时遮罩必须带 hidden');
+
+    await page.click('#remBtn');
+    await withTimeout(page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 }), 6000, '等提醒面板');
+
+    const open = await page.evaluate(() => {
+      const m = document.getElementById('remMask');
+      return {
+        hidden: m ? m.classList.contains('hidden') : null,
+        // 守卫真正的判据式（与 main.ts 现在的实现同款）
+        guardRem: !!(m && !m.classList.contains('hidden')),
+      };
+    });
+    assert.equal(open.hidden, false, '面板打开后遮罩必须摘掉 hidden');
+    assert.equal(open.guardRem, true,
+      '面板开着时守卫的第一分支必须为真（此前 .ns-rem-mask 恒 null ⇒ 整条守卫失效）');
+
+    // 关闭面板 → hidden 必须回去（反向断言）
+    await page.evaluate(() => {
+      const x = document.querySelector('#remMask .box-x');
+      if (x) x.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    await withTimeout(
+      page.waitForFunction(() => document.getElementById('remMask')?.classList.contains('hidden'), { timeout: 5000 }),
+      6000, '关闭后遮罩应回到 hidden',
+    );
+  } finally {
+    await page.close();
+  }
+});

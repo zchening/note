@@ -30,7 +30,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installHarness, openEditor, openEditorAt, withTimeout } from './harness.mjs';
+import { installHarness, openEditor, openEditorAt, openEditorTouch, closeTouch, withTimeout } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 🔴 路径纪律：必须 4 级（e2e → test → client → packages → 仓库根）。
@@ -1603,5 +1603,902 @@ test('VVW-18 🔴 二维码配对弹窗的警示与画布几何（弹窗按钮/�
     );
   } finally {
     await page.close();
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 两条「被更特异规则吃掉」的样式（用户报障：历史预览 / 提醒关闭钮颜色）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 🔴🔴🔴 VVW-19 历史版本「预览」展开的文本框必须**换行到按钮下方独占一行**。
+ *
+ * 现象（用户报障第 3 条）：老版本点预览后，按钮**下方**出现一个带滚动条的文本框；
+ * bj 的预览块挤在时间戳右边，被压成窄窄一条。
+ *
+ * 🔴 根因是 `.list-row` 缺 `flex-wrap: wrap`：
+ *   老项目 index.html:465 `.hist-item{display:flex;flex-wrap:wrap;align-items:center;…}`
+ *   —— `flex-wrap:wrap` 是 `width:100%` 能换行的**唯一前提**。
+ *   bj 的 `.list-row`（styles.css:960）只有 `display:flex`，没有 wrap，
+ *   于是 `.hist-preview{width:100%}` 不是"占满一行"，而是"在当行里被 flex 压扁"。
+ *
+ * 🔴 量化实测（390×844，同一结构分别挂到两套真实样式表内，读 getBoundingClientRect）：
+ *   老项目：flex-wrap=wrap，hist-preview 宽 = 容器全宽（390）
+ *   bj 改前：flex-wrap=nowrap，hist-preview 宽 = 263.39（被压到不足 2/3）
+ *
+ * 🔴🔴 判据必须钉**用户可见的最终结果**（预览块的 top 与按钮行的 bottom 关系、
+ *   以及宽度接近容器宽），不能只钉 `flex-wrap` 这个实现值 ——
+ *   钉实现值的话，"把预览改成绝对定位"也能变绿，而那显然不是老项目。
+ */
+test('VVW-19 🔴🔴 历史预览文本框必须换行独占一行（老项目 flex-wrap:wrap）', async () => {
+  // 🔴 时钟钉死：提醒快照要"非空正文"，而断言里不出现任何依赖真实时钟的值。
+  //   固定在 2026-10-05 14:00，下面的相对日判断才在本地/UTC 下同一结论。
+  const page = await openEditorAt(h.browser(), h.baseUrl(), 'vvw19', 'pw', {
+    iso: '2026-10-05T14:00:00+08:00',
+  });
+  try {
+    // 🔴🔴 先敲正文再开菜单：菜单是遮罩，开着时 `.ns-editor` 虽然在 DOM 里、
+    //   但**点不到**（Playwright 报 'element is not visible'，等 30s 超时）。
+    //   症状看起来像"编辑器坏了"，实际是遮罩挡着 —— 与判据本身无关。
+    await page.click('.ns-editor');
+    await page.keyboard.type('第一行正文第二行正文第三行正文第四行正文');
+    await page.waitForTimeout(400);
+
+    await openMenu(page);
+    await page.click('#menuHistEntry');
+    await page.waitForSelector('#histSave', { timeout: 10_000 });
+    await page.click('#histSave');
+    await page.waitForSelector('.list-row[data-at]', { timeout: 10_000 });
+
+    await page.waitForSelector('.list-row[data-at] [data-preview]', { timeout: 10_000 });
+    await page.waitForTimeout(400);
+    await page.click('.list-row[data-at] [data-preview]');
+    await page.waitForSelector('.list-row[data-at] .hist-preview', { timeout: 10_000 });
+    await page.waitForTimeout(300);
+
+    const g = await page.evaluate(() => {
+      const row = document.querySelector('.list-row[data-at]');
+      const pv = row.querySelector('.hist-preview');
+      const btns = row.querySelector('.hist-btns');
+      const rowCs = getComputedStyle(row);
+      const pvCs = getComputedStyle(pv);
+      const pvR = pv.getBoundingClientRect();
+      const rowR = row.getBoundingClientRect();
+      const btnR = btns.getBoundingClientRect();
+      // 内容盒（去掉 padding 与 border）
+      const innerW = rowR.width - 24 - 2; // 左右 padding 12+12 + 左右 border 1+1
+      return {
+        rowWrap: rowCs.flexWrap,
+        pvW: pvR.width,
+        innerW,
+        pvTop: pvR.top,
+        btnBottom: btnR.bottom,
+        maxH: pvCs.maxHeight,
+        overflowY: pvCs.overflowY,
+      };
+    });
+
+    // 🔴 主判据：预览块必须落在按钮行**下方**（换行独占一行）
+    assert.ok(
+      g.pvTop >= g.btnBottom - 1,
+      `预览块必须换行到按钮下方（老项目 flex-wrap:wrap）。` +
+      `实测 pvTop=${g.pvTop.toFixed(1)} btnBottom=${g.btnBottom.toFixed(1)}，rowWrap=${g.rowWrap}。` +
+      `挤在同行时用户看到的就是"时间戳右边一条窄文本"，不是老版本的下方文本框。`,
+    );
+    // 🔴 宽度判据：预览块**边框盒**宽应等于行内容宽（老项目 width:100%）。
+    //   ⚠️ 比的是 border-box 宽度，不是"内容宽"：`.hist-preview` 自己有
+    //   `padding:9px 12px` + `border-left:2px`，把它的 border-box 宽再减内距
+    //   去比行宽，会永远差 26px —— 我第一版就这么写，红了才发现是自己算错。
+    //   两边都 box-sizing:border-box（`* { box-sizing: border-box }`），可直接比。
+    assert.ok(
+      g.pvW >= g.innerW - 1,
+      `预览块应占满行内容宽（老项目 width:100%）。实测 pvW=${g.pvW.toFixed(1)} innerW=${g.innerW.toFixed(1)}，rowWrap=${g.rowWrap}。`,
+    );
+    // 🔴 滚动条：长版本必须可滚（老项目 max-height:120px + overflow-y:auto）
+    assert.equal(g.maxH, '120px', `预览块限高应120px（老项目同值），实测 ${g.maxH}`);
+    assert.equal(g.overflowY, 'auto', '预览块必须可滚（老项目 overflow-y:auto）');
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * 🔴🔴🔴 VVW-20 提醒面板「已添加提醒」那行的关闭钮颜色/字号/边框必须与老项目逐值同。
+ *
+ * 现象（用户报障第 4 条）：bj 的关闭钮是**深底白字的大按钮**，老项目是
+ * **透明底 + 深字 + 一圈浅灰细描边的小胶囊**。
+ *
+ * 🔴 根因（量化实测，读命中该元素的全部规则）：bj 的 `.ns-rem-off` 只有
+ *   **(0,1,0)**，而弹窗通栏按钮规则 `.box button:not(.box-x)` 是 **(0,2,1)**
+ *   ⇒ 声明被**结构性压过**，渲染成 bg=--fg / color=--bg / font-size:15px /
+ *   padding:0 14px / border-radius:10px。
+ *   老项目靠 `#remBoxList .rem-row button`（含 ID，**(1,2,1)**）压过同款通栏规则，
+ *   所以拿到自己的小胶囊样式。bj 没有 ID 级选择器，就没这个保护。
+ *
+ * 🔴 老项目真机实测金标（390×844，读 computed，不是读源码）：
+ *   color=rgb(28,28,26)  background=transparent  border=1px rgb(236,234,226)
+ *   font-size=12px  line-height=normal  padding=4px 12px  border-radius=8px
+ *
+ * 🔴 用令牌比对而不是写死 rgb：harness 可能落在夜间主题（见本文件头部纪律第 1 条）。
+ */
+test('VVW-20 🔴🔴 提醒已设行的关闭钮必须是小胶囊（被通栏按钮规则吃掉这条）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw20', 'pw');
+  try {
+    // 🔴🔴 走**提醒面板**加这一条，不走 chip。
+    //   我第一版在正文敲 `12-31 10:00` 等 chip 弹出来，5 秒/10 秒两次超时。
+    //   真因不是提醒坏了，是 `time-parse` 的短格式 `reShort`
+    //   （`(\d{1,2})[-/](\d{1,2})[ T　](\d{1,2}):(\d{2})`）**一律按今年解析**，
+    //   而"今年 12-31"在本机时钟（2026-10）看着是未来… 但探针跑的时候
+    //   页面时钟已被 harness 的其它用例影响，实测取到的是已过期分支 ⇒ chip 不浮。
+    //   ⇒ 这条判据要钉的是**关闭钮的样式**，造提醒的路径必须选**确定能成**的那条：
+    //   面板「添加」默认填当前 +5 分钟（同款被 REM-07/REM-08 钉过），不依赖任何时间串解析。
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 10_000 });
+    await page.fill('.ns-rem-input', '买菜和水果');
+    await page.click('.ns-rem-add');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    // 重开面板看已设行
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rem-off', { state: 'visible', timeout: 10_000 });
+
+    const g = await page.evaluate(() => {
+      const off = document.querySelector('.ns-rem-off');
+      if (!off) return { missing: true };
+      const cs = getComputedStyle(off);
+      const root = getComputedStyle(document.documentElement);
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${(n >> 255) & 255})`.replace(
+          `${(n >> 8) & 255}, ${(n >> 255) & 255}`,
+          `${(n >> 8) & 255}, ${n & 255}`,
+        );
+      };
+      const r = off.getBoundingClientRect();
+      return {
+        // 🔴 关键判据：文字色必须与弹窗通栏按钮**相反**
+        //   （通栏是 color:var(--bg) 浅字深底；关闭钮是老项目的小胶囊 = color:var(--fg) 深字）
+        color: cs.color,
+        bg: cs.backgroundColor,
+        fg: toRgb(root.getPropertyValue('--fg')),
+        bgTok: toRgb(root.getPropertyValue('--bg')),
+        borderColor: cs.borderTopColor,
+        line: toRgb(root.getPropertyValue('--line')),
+        borderW: cs.borderTopWidth,
+        fs: cs.fontSize,
+        lh: cs.lineHeight,
+        pad: cs.padding,
+        radius: cs.borderRadius,
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+      };
+    });
+    assert.ok(!g.missing, '提醒面板里应有已添加行的关闭钮（.ns-rem-off）');
+
+    // 🔴 1) 文字色必须是 --fg（深），不是 --bg（浅）。这一条最直击"颜色不一样"。
+    assert.equal(g.color, g.fg,
+      `关闭钮文字色必须是 --fg（老项目 :283 color:var(--fg)），实测 ${g.color}，fg=${g.fg}。` +
+      `被 .box button:not(.box-x) 压过时会变成 --bg（浅）——那正是"深底白字大按钮"的来源。`);
+    // 🔴 2) 背景必须透明（老项目 background:none）
+    assert.ok(g.bg === 'transparent' || g.bg === 'rgba(0, 0, 0, 0)',
+      `关闭钮背景必须透明（老项目 background:none），实测 ${g.bg}`);
+    // 🔴 3) 一圈 1px 浅灰描边（老项目 border:1px solid var(--line)）
+    assert.equal(g.borderW, '1px', `关闭钮描边应 1px（老项目同值），实测 ${g.borderW}`);
+    assert.equal(g.borderColor, g.line,
+      `关闭钮描边色必须是 --line，实测 ${g.borderColor}，line=${g.line}`);
+    // 🔴 4) 字号/内距/圆角逐值（老项目 :283 font-size:12px; padding:4px 12px; border-radius:8px）
+    assert.equal(g.fs, '12px', `关闭钮字号应 12px（老项目同值），实测 ${g.fs}（被压过会变 15px）`);
+    assert.equal(g.pad, '4px 12px', `关闭钮内距应 4px 12px，实测 ${g.pad}（被压过会变 0px 14px）`);
+    assert.equal(g.radius, '8px', `关闭钮圆角应 8px，实测 ${g.radius}（被压过会变 10px）`);
+    // 🔴 5) 高度量级：小胶囊约 28px，通栏按钮是 46px
+    assert.ok(g.h <= 34,
+      `关闭钮应是小胶囊（高 ≤34px），实测 ${g.h}px —— 46px 说明吃的是弹窗通栏按钮规则`);
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * ============================================================================
+ * 21 / 22 / 23 —— 落地页（用户报障第 6 条）
+ * ============================================================================
+ *
+ * 🔴🔴🔴 本组三条的根因是**同一个**：`pages.ts` 末尾的 `input.focus()`。
+ *
+ *   老项目 `index.html` 全文 `grep '\.focus()'` 共 39 处，**没有一处是落地页输入框**
+ *   （`li` 只在 :10163 被 `getElementById` 取出来，从不 focus）。
+ *   bj `pages.ts:114` 有 `input.focus()`（注释写"老项目也这样"——**这句是错的**）。
+ *
+ *   连锁后果有两条，都不是"样式没抄"，而是行为被这一行改掉了：
+ *     ① 落地页一进来就触发 `focus` 事件 → `#landing` 挂上 `.trust-away`
+ *        → `.trust{opacity:0}` ⇒ **"服务器只见密文/无需账号/扫码跨设备"三行永久不可见**。
+ *        这就是用户说的"这三个文案和对应图标没出现"。
+ *        （老项目的淡出是**聚焦时**才发生，且软键盘弹出才需要让位；
+ *          bj 一进来就聚焦 ⇒ 一进来就淡出，键盘还没弹就先没了。）
+ *     ② 入场动画 `rise` 的 `both` fill-mode 与 `.trust` 的 `animation-fill-mode:backwards`
+ *        是一对；少了动画时 `.trust` 那条 `backwards` 是空转。
+ *
+ *   判据钉的是**用户可见的最终结果**（三行文案真的可见 / 真的逐级延迟出现），
+ *   不是钉"有没有调 focus()"——后者会把"改成 focus 时机"也算绿。
+ */
+
+/**
+ * 打开落地页（未解锁），钉住视口 390×844 与老项目量化同视口。
+ * 🔴 必须走**根路径** `/`：带笔记名（`/vvw21`）会被路由直接送进口令页，
+ *   落地页根本不渲染 ⇒ `waitForSelector('#li')` 15s 超时（VVW-15 同款做法）。
+ */
+async function openLanding(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+  await withTimeout(page.waitForSelector('#li'), 15_000, '等落地页');
+  return page;
+}
+
+test('VVW-21 🔴🔴🔴 落地页必须逐级淡入上移（老项目 rise 动画），且不得一进来就把信任行淡出', async () => {
+  // 老项目 index.html:550-559 + :586
+  //   #landing>*{animation:rise .7s cubic-bezier(.2,.7,.3,1) both}
+  //   #landing>*:nth-child(2){animation-delay:.06s} … :nth-child(9){animation-delay:.48s}
+  //   @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  const page = await openLanding(h.browser(), h.baseUrl());
+  try {
+    // 🔴🔴 动画判定必须**等动画跑完再读终值**。
+    //   我第一版在 goto 后立刻读 opacity，拿到的是 0.164427（rise 的中间帧），
+    //   报红信息写的是"挂着 .trust-away"——**判据自己写错了，症状与真因无关**。
+    //   ⇒ 这里等 `getAnimations()` 全部 finish（超时兜底），再读终态。
+    await page.evaluate(() => Promise.all(
+      Array.from(document.getAnimations()).map((a) => a.finished.catch(() => {})),
+    )).catch(() => {});
+    await page.waitForTimeout(150);
+
+    const g = await page.evaluate(() => {
+      // 🔴 不写逗号选择器：`#landing .a, #landing .b` 返回**文档顺序第一个命中任一分支**的元素
+      //   （本文件头部纪律），这里要的是全部子节点，逐个读。
+      const kids = Array.from(document.querySelectorAll('#landing .landing-in > *'));
+      const cs = (e) => getComputedStyle(e);
+      const trust = document.querySelector('#landing .trust');
+      return {
+        n: kids.length,
+        tags: kids.map((e) => e.tagName + '.' + (e.className || e.id)),
+        animNames: kids.map((e) => cs(e).animationName),
+        animDelays: kids.map((e) => cs(e).animationDelay),
+        animDur: kids.length ? cs(kids[0]).animationDuration : '',
+        animTiming: kids.length ? cs(kids[0]).animationTimingFunction : '',
+        trustOpacity: trust ? cs(trust).opacity : null,
+        landingClasses: document.getElementById('landing')?.className ?? null,
+        // 关键行为证据：一进来焦点就该在 body（老项目从不 focus 落地页输入框）
+        activeId: document.activeElement ? document.activeElement.id : '',
+      };
+    });
+
+    // 🔴 1) 三行信任文案必须**真的可见** —— 这是用户报障的原话
+    //   （"这三个文案和对应图标没出现"）。
+    assert.equal(
+      g.trustOpacity, '1',
+      `信任行三行文案（服务器只见密文/无需账号/扫码跨设备）必须可见（动画结束后），` +
+      `实测 opacity=${g.trustOpacity}，#landing class="${g.landingClasses}"。` +
+      `opacity 0 = 挂着 .trust-away —— bj pages.ts 末尾曾有 input.focus()，一进来就触发 focus 事件；` +
+      `老项目全文 39 处 .focus() 无一处是落地页输入框。`,
+    );
+    assert.ok(
+      !/\btrust-away\b/.test(String(g.landingClasses)),
+      `落地页初始不得带 .trust-away（那是"聚焦输入时"的让位态），实测 class="${g.landingClasses}"`,
+    );
+    assert.notEqual(
+      g.activeId, 'li',
+      `落地页刚打开时焦点不该落在输入框上（老项目从不 focus 它），实测 activeElement=#${g.activeId}` +
+      ` —— 这同时也是移动端一进落地页就弹软键盘的来源`,
+    );
+
+    // 🔴 2) 逐级入场：每个直接子节点都要有 rise 动画
+    assert.ok(g.n >= 9, `落地页 .landing-in 子节点应 ≥9（老项目 9 个），实测 ${g.n}：${JSON.stringify(g.tags)}`);
+    for (let i = 0; i < g.n; i++) {
+      assert.equal(
+        g.animNames[i], 'nsLandingRise',
+        `第 ${i + 1} 个子节点（${g.tags[i]}）animation-name 应为 nsLandingRise` +
+        `（值逐字等于老项目 rise），实测 "${g.animNames[i]}" —— 没有它就是"刷新时从上到下依次出现"整条缺失。` +
+        `⚠️ 注意不能只断言"声明在"：display:contents 的元素动画无效果，判据必须逐个子节点读。`,
+      );
+    }
+    assert.equal(g.animDur, '0.7s', `入场动画时长应 0.7s（老项目同值），实测 ${g.animDur}`);
+    assert.match(
+      g.animTiming, /cubic-bezier\(0\.2, 0\.7, 0\.3, 1\)/,
+      `入场缓动应 cubic-bezier(.2,.7,.3,1)（老项目同值），实测 ${g.animTiming}`,
+    );
+
+    // 🔴 3) 逐级延迟 0 / .06 / .12 …，且**必须单调不减**。
+    //   🔴 为什么不逐个钉死具体值：老项目用 `:nth-child(n)` 步进，而 bj 比老项目多一个
+    //   内部用的 #landingScanMsg 警示位（老项目 grep landingScanMsg = 0 命中），
+    //   所以纯 nth-child 会把 .trust 推成 .54s。老项目"最后一行可见元素"的步进是 .48s
+    //   —— 那是用户眼睛看到的节奏，所以实现选择把 .trust 钉回 .48s（见 styles.css）。
+    //   ⇒ 判据钉「单调不减 + 首项 0s + 末项 .48s」，这三条合起来就锁住了"从上到下依次出现"，
+    //   又不会因为内部多一个不可见节点而误红。
+    const delays = g.animDelays.map((d) => parseFloat(d));
+    assert.equal(delays[0], 0, `第一个子节点不应延迟（老项目 :nth-child(1) 无 delay），实测 ${g.animDelays[0]}`);
+    for (let i = 1; i < delays.length; i++) {
+      assert.ok(
+        delays[i] >= delays[i - 1],
+        `入场延迟必须单调不减（自上而下依次出现），第 ${i + 1} 项 ${g.animDelays[i]} < 第 ${i} 项 ${g.animDelays[i - 1]}`,
+      );
+    }
+    assert.ok(
+      Math.abs(delays[delays.length - 1] - 0.48) < 0.001,
+      `最后一行可见元素的延迟应 .48s（老项目 :nth-child(9) 的步进值 = 用户看到的收尾节奏），` +
+      `实测 ${g.animDelays[delays.length - 1]}`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('VVW-22 🔴🔴 网址预览行必须逐值同老项目 .urlline，且笔记名是金黄加粗', async () => {
+  // 老项目 index.html:583-584
+  //   #landing .urlline{color:var(--muted);font-size:12.5px;margin:16px 0 0;
+  //                   line-height:1.7;letter-spacing:.03em;max-width:340px;word-break:break-all}
+  //   #landing .urlline .u-name{color:var(--accent);font-weight:600;letter-spacing:.02em}
+  // bj 改前实测（探针 _probe_out5.json）：
+  //   font-size:12px / letter-spacing:normal / line-height:19.2px / margin-top:10px / max-width:none
+  //   且整行是**单一纯文本**，没有金黄 span
+  const page = await openLanding(h.browser(), h.baseUrl());
+  try {
+    // 初始：整行必须隐身（老项目 :639 `class="urlline hidden"`）——
+    // 反向断言：不能一进来就闪一行光杆域名。
+    assert.equal(
+      await page.evaluate(() => document.getElementById('landingUrl').classList.contains('hidden')),
+      true,
+      '网址行初始必须 hidden（老项目 index.html:639 带 hidden），空输入不该闪光杆域名',
+    );
+    await page.fill('#li', 'my_note-1');
+    await withTimeout(
+      page.waitForFunction(() => !document.getElementById('landingUrl').classList.contains('hidden'), { timeout: 3000 }),
+      4000, '输入合法名后网址行应显形',
+    );
+
+    const g = await page.evaluate(() => {
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      const row = document.getElementById('landingUrl');
+      const nameSpan = document.getElementById('landingUrlName');
+      const cs = getComputedStyle(row);
+      const root = getComputedStyle(document.documentElement);
+      return {
+        fs: cs.fontSize,
+        lh: cs.lineHeight,
+        ls: cs.letterSpacing,
+        mt: cs.marginTop,
+        maxW: cs.maxWidth,
+        color: cs.color,
+        muted: toRgb(root.getPropertyValue('--muted')),
+        wb: cs.wordBreak,
+        rowText: row.textContent,
+        // 金黄 span
+        hasNameSpan: !!nameSpan,
+        nameText: nameSpan ? nameSpan.textContent : '',
+        nameColor: nameSpan ? getComputedStyle(nameSpan).color : '',
+        nameFw: nameSpan ? getComputedStyle(nameSpan).fontWeight : '',
+        nameLs: nameSpan ? getComputedStyle(nameSpan).letterSpacing : '',
+        accent: toRgb(root.getPropertyValue('--accent')),
+      };
+    });
+
+    assert.equal(g.fs, '12.5px', `网址行字号应 12.5px（老项目同值），实测 ${g.fs}（12px 会让整行小一号）`);
+    assert.equal(g.lh, '21.25px', `网址行行高应 21.25px（12.5×1.7），实测 ${g.lh}`);
+    assert.equal(g.ls, '0.375px', `网址行字距应 0.375px（.03em×12.5），实测 ${g.ls} —— 用户报障「字体间距不一样」`);
+    assert.equal(g.mt, '16px', `网址行上外距应 16px（老项目同值），实测 ${g.mt}`);
+    assert.equal(g.maxW, '340px', `网址行限宽应 340px（老项目同值），实测 ${g.maxW}`);
+    assert.equal(g.wb, 'break-all', `网址行应 word-break:break-all（老项目同值），实测 ${g.wb}`);
+    assert.equal(g.color, g.muted, `网址行文字色应 --muted，实测 ${g.color}`);
+
+    // 🔴 金黄笔记名：这条是用户报障里点名的「老版本笔记名是金黄色」
+    assert.ok(g.hasNameSpan,
+      `网址行里必须有独立笔记名 span（老项目 #landingUrlName.u-name），实测无 —— ` +
+      `整行单一纯文本时笔记名只能是 muted 灰，正是"笔记名不是金黄色"的来源`);
+    assert.equal(g.nameText, 'my_note-1', `金黄 span 只装笔记名，实测 "${g.nameText}"`);
+    assert.equal(g.nameColor, g.accent,
+      `笔记名必须是 --accent 金黄（老项目 .urlline .u-name），实测 ${g.nameColor}，accent=${g.accent}`);
+    assert.equal(g.nameFw, '600', `笔记名字重应 600（老项目同值），实测 ${g.nameFw}`);
+    assert.equal(g.nameLs, '0.25px', `笔记名字距应 0.25px（.02em×12.5），实测 ${g.nameLs}`);
+
+    // 反向：整行文案仍要完整（老项目 `你的笔记网址为：&nbsp;<域名>/<笔记名>`）
+    assert.match(g.rowText, /你的笔记网址为：/, `网址行文案应含前缀，实测 "${g.rowText}"`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('VVW-23 🔴 信任行三段结构与几何（老项目 #landing .trust > span）', async () => {
+  // 老项目 index.html:586-588
+  //   #landing .trust{position:absolute;left:0;right:0;bottom:44px;
+  //     bottom:calc(44px + env(safe-area-inset-bottom));display:flex;justify-content:center;
+  //     color:var(--muted);font-size:11.5px;letter-spacing:.05em;
+  //     transition:opacity .25s;animation-fill-mode:backwards}
+  //   #landing .trust>span{display:flex;flex-direction:column;align-items:center;
+  //     gap:7px;margin:0 13px}
+  //   #landing .trust svg{width:17px;height:17px;color:var(--muted);display:block}
+  //
+  // 🔴 bj 改前：`.trust` 下有 **6 个 span**（每项是"外层 span 套一个纯文字 span"），
+  //   老项目是 **3 个**（svg + 裸文字直接挂在外层 span 里）。
+  //   结构差异本身不算 bug，但多出来的内层 span 会被 `.trust > span` 的
+  //   column + gap:7px 变成"文字行自己又是一个 flex item" ⇒ 图标与文字间距多一层。
+  const page = await openLanding(h.browser(), h.baseUrl());
+  try {
+    const g = await page.evaluate(() => {
+      const trust = document.querySelector('.trust');
+      if (!trust) return { missing: true };
+      const cs = getComputedStyle(trust);
+      const spans = Array.from(trust.children);
+      return {
+        n: spans.length,
+        fs: cs.fontSize,
+        ls: cs.letterSpacing,
+        justify: cs.justifyContent,
+        pos: cs.position,
+        fill: cs.animationFillMode,
+        // 每项：外层 span 内应恰好 1 个 svg + 1 个裸文字节点（老项目结构）
+        perItem: spans.map((s) => ({
+          tag: s.tagName,
+          svgCount: s.querySelectorAll('svg').length,
+          childKinds: Array.from(s.childNodes).map((n) =>
+            n.nodeType === 3 ? 'text' : n.nodeType === 1 ? n.tagName : String(n.nodeType)),
+          text: s.textContent.trim(),
+          gap: getComputedStyle(s).gap,
+          margin: getComputedStyle(s).margin,
+        })),
+        svgW: (() => { const s = trust.querySelector('svg'); return s ? parseFloat(getComputedStyle(s).width) : -1; })(),
+      };
+    });
+    assert.ok(!g.missing, '落地页应有 .trust 信任行');
+    assert.equal(g.n, 3, `信任行应是 3 项（老项目 3 个 span），实测 ${g.n} 个子元素`);
+    assert.equal(g.fs, '11.5px', `信任行字号应 11.5px（老项目同值），实测 ${g.fs}`);
+    assert.equal(g.ls, '0.575px', `信任行字距应 0.575px（.05em×11.5），实测 ${g.ls}`);
+    assert.equal(g.justify, 'center', `信任行应 justify-content:center（老项目同值），实测 ${g.justify}`);
+    assert.equal(g.pos, 'absolute', `信任行应 position:absolute 贴底（老项目同值），实测 ${g.pos}`);
+    assert.equal(g.fill, 'backwards',
+      `信任行 animation-fill-mode 必须是 backwards（老项目 v7.9.1 闸R2/R3：` +
+      `rise 的 both 会把 to 帧 opacity:1 永久锁死、压过聚焦淡出），实测 ${g.fill}`);
+    assert.equal(g.svgW, 17, `信任行图标应 17px（老项目同值），实测 ${g.svgW}`);
+    // 三项文案逐字
+    assert.deepEqual(
+      g.perItem.map((x) => x.text),
+      ['服务器只见密文', '无需账号', '扫码跨设备'],
+      `信任行三段文案必须逐字是老项目原文，实测 ${JSON.stringify(g.perItem.map((x) => x.text))}`,
+    );
+    // 🔴 反向断言：每项内部不得有多余包裹 span（老项目是 svg + 裸文字）
+    for (const [i, it] of g.perItem.entries()) {
+      assert.equal(it.svgCount, 1, `第 ${i + 1} 项应有且仅有 1 个 svg，实测 ${it.svgCount}`);
+      assert.ok(
+        !it.childKinds.includes('SPAN'),
+        `第 ${i + 1} 项内不得再套 span（老项目是 svg + 裸文字直接挂外层 span），` +
+        `实测子节点 ${JSON.stringify(it.childKinds)} —— 多一层 span 会被 column+gap 多加一层间距`,
+      );
+      assert.equal(it.gap, '7px', `第 ${i + 1} 项图标与文字间距应 7px（老项目 gap:7px），实测 ${it.gap}`);
+      assert.equal(it.margin, '0px 13px', `第 ${i + 1} 项左右外距应 13px（老项目同值），实测 ${it.margin}`);
+    }
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * ============================================================================
+ * 24 —— 落地页「警示行 / 彩蛋提示行 / 扫码入口」的间距与配色
+ * ============================================================================
+ *
+ * 用户报障第 6 条里「按钮、图标、元素大小、文案、颜色、位置、字体和老版本不一样」
+ * 这一句，拆开逐值比对后落在下面三处**声明缺失**上（老项目 index.html 原文）：
+ *
+ *   #landing .warn{color:#C0453E;font-size:12px;margin:14px 0 0;letter-spacing:.04em}
+ *     bj `.warn{margin-top:8px; font-size:12px; color:var(--danger)}`
+ *     ⇒ 差：上外距 8 vs 14、**整行无字距**。
+ *
+ *   #landing .scan-row{margin:26px 0 0}
+ *     bj 直接把 `.lscan` 挂在 `.landing-in` 下，**没有任何 26px 上边距**
+ *     ⇒ 扫码胶囊紧贴上一行 —— 这正是"位置不一样"最显眼的一处。
+ *
+ *   #landing .eggtip{margin:12px 0 0;max-width:340px;width:100%;font-size:11px;
+ *                     line-height:1.7;letter-spacing:.04em;color:var(--muted)}
+ *   #landing .eggtip b{color:var(--accent);font-weight:600}
+ *     bj `.legghint{margin-top:4px;font-size:12px;color:var(--accent);min-height:1em}`
+ *     ⇒ 差：字号 12 vs 11、行高 normal vs 1.7、无字距/无限宽、
+ *       **整行金黄**（老项目是 muted 灰，只有<b>门牌名</b>是金黄 600），
+ *       以及用 min-height 硬撑空行（老项目初始 hidden，压根不占位）。
+ */
+
+/** 读样式表里命中该元素的全部规则（探针同款手法，用来定位"被谁吃掉"）。 */
+const rulesOf = `((el) => {
+  const out = [];
+  for (const ss of Array.from(document.styleSheets)) {
+    let rules; try { rules = ss.cssRules; } catch (e) { continue; }
+    for (const r of Array.from(rules)) {
+      if (!r.selectorText) continue;
+      let m = false;
+      try { m = el.matches(r.selectorText); } catch (e) { m = false; }
+      if (m) out.push(r.selectorText);
+    }
+  }
+  return out;
+})`;
+
+test('VVW-24 🔴 落地页警示行/彩蛋提示行/扫码入口的间距与配色必须逐值同老项目', async () => {
+  const page = await openLanding(h.browser(), h.baseUrl());
+  try {
+    // ① 警示行：先造出"中文被净化"的场景
+    await page.fill('#li', '我的笔记');
+    await withTimeout(
+      page.waitForFunction(() => !document.getElementById('landingWarn').classList.contains('hidden'), { timeout: 3000 }),
+      4000, '净化后警示行应显形',
+    );
+    const g = await page.evaluate((rulesOfSrc) => {
+      const rulesOf = eval(rulesOfSrc);
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      const root = getComputedStyle(document.documentElement);
+      const warn = document.getElementById('landingWarn');
+      const egg = document.getElementById('landingEggTip');
+      const scan = document.getElementById('landingScan');
+      const wcs = getComputedStyle(warn);
+      const ecs = getComputedStyle(egg);
+      const scs = getComputedStyle(scan);
+      return {
+        warn: { mt: wcs.marginTop, fs: wcs.fontSize, ls: wcs.letterSpacing, color: wcs.color, danger: toRgb(root.getPropertyValue('--danger')) },
+        warnRules: rulesOf(warn),
+        egg: {
+          mt: ecs.marginTop, fs: ecs.fontSize, lh: ecs.lineHeight, ls: ecs.letterSpacing,
+          color: ecs.color, maxW: ecs.maxWidth, w: ecs.width, muted: toRgb(root.getPropertyValue('--muted')),
+          hasBold: !!egg.querySelector('b'),
+          html: egg.innerHTML,
+        },
+        eggRules: rulesOf(egg),
+        scan: {
+          // 🔴 老项目是 `.scan-row{margin:26px 0 0}` 包一层；bj 直接挂 .lscan。
+          //   所以这里量"扫码胶囊顶 与 上一行底 的间距"，钉的是**用户看到的距离**，
+          //   不是钉"有没有 .scan-row 这个壳"（钉壳的话，换个等价实现就误红）。
+          gapAbove: (() => {
+            const r = scan.getBoundingClientRect();
+            let prevBottom = -Infinity;
+            for (const el of document.querySelectorAll('#landing *')) {
+              if (el === scan || el.contains(scan)) continue;
+              if (el.children.length) continue; // 只看叶子
+              const b = el.getBoundingClientRect();
+              if (b.height > 0 && b.bottom <= r.top + 1 && b.bottom > prevBottom) prevBottom = b.bottom;
+            }
+            return r.top - prevBottom;
+          })(),
+          pad: scs.padding, radius: scs.borderRadius, fs: scs.fontSize,
+        },
+      };
+    }, rulesOf);
+
+    // ① 警示行
+    assert.equal(g.warn.mt, '14px', `警示行上外距应 14px（老项目 margin:14px 0 0），实测 ${g.warn.mt}（bj 是 8px）`);
+    assert.equal(g.warn.fs, '12px', `警示行字号应 12px（老项目同值），实测 ${g.warn.fs}`);
+    assert.equal(g.warn.ls, '0.48px', `警示行字距应 0.48px（.04em×12，老项目 letter-spacing:.04em），实测 ${g.warn.ls} —— 整行无字距是 bj 现状`);
+    assert.equal(g.warn.color, g.warn.danger, `警示行文字色应 --danger（老项目 #C0453E），实测 ${g.warn.color}`);
+
+    // ② 彩蛋提示行：先切到彩蛋门牌
+    await page.fill('#li', 'pet');
+    await withTimeout(
+      page.waitForFunction(() => document.getElementById('landingEggTip').textContent.trim() !== '', { timeout: 3000 }),
+      4000, '彩蛋门牌应出提示行',
+    );
+    const e = await page.evaluate(() => {
+      const egg = document.getElementById('landingEggTip');
+      const cs = getComputedStyle(egg);
+      const root = getComputedStyle(document.documentElement);
+      const toRgb = (c) => {
+        const m = /^#([0-9a-f]{6})$/i.exec(String(c).trim());
+        if (!m) return String(c).trim();
+        const n = parseInt(m[1], 16);
+        return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+      };
+      return {
+        mt: cs.marginTop, fs: cs.fontSize, lh: cs.lineHeight, ls: cs.letterSpacing,
+        color: cs.color, maxW: cs.maxWidth, width: cs.width,
+        muted: toRgb(root.getPropertyValue('--muted')), accent: toRgb(root.getPropertyValue('--accent')),
+        hasBold: !!egg.querySelector('b'),
+        boldColor: egg.querySelector('b') ? getComputedStyle(egg.querySelector('b')).color : '',
+        boldFw: egg.querySelector('b') ? getComputedStyle(egg.querySelector('b')).fontWeight : '',
+      };
+    });
+    assert.equal(e.mt, '12px', `彩蛋提示行上外距应 12px（老项目同值），实测 ${e.mt}（bj 是 4px）`);
+    assert.equal(e.fs, '11px', `彩蛋提示行字号应 11px（老项目同值），实测 ${e.fs}（bj 是 12px，整行大一号）`);
+    assert.equal(e.lh, '18.7px', `彩蛋提示行行高应 18.7px（11×1.7），实测 ${e.lh} —— bj 用 normal 就不等于这个值`);
+    assert.equal(e.ls, '0.44px', `彩蛋提示行字距应 0.44px（.04em×11），实测 ${e.ls}`);
+    assert.equal(e.color, e.muted,
+      `彩蛋提示行整行应是 muted 灰（老项目 .eggtip color:var(--muted)），实测 ${e.color} —— ` +
+      `整行金黄是 bj 现状，老项目只有<b>门牌名</b>是金黄`);
+    assert.equal(e.maxW, '340px', `彩蛋提示行限宽应 340px（老项目同值），实测 ${e.maxW}`);
+    assert.ok(e.hasBold,
+      `门牌名必须是独立 <b>（老项目 #landing .eggtip b{color:var(--accent);font-weight:600}），实测无 —— ` +
+      `这样就没法做到"只有门牌名金黄、说明文字灰色"`);
+    assert.equal(e.boldColor, e.accent, `门牌名应 --accent 金黄，实测 ${e.boldColor}`);
+    assert.equal(e.boldFw, '600', `门牌名字重应 600（老项目同值），实测 ${e.boldFw}`);
+
+    // ③ 扫码入口上方留白：老项目 .scan-row margin:26px 0 0
+    assert.ok(
+      Math.abs(g.scan.gapAbove - 26) <= 2,
+      `扫码胶囊上方应留 26px（老项目 .scan-row{margin:26px 0 0}），实测 ${g.scan.gapAbove.toFixed(1)}px —— ` +
+      `bj 把 .lscan 直接挂在 .landing-in 下、没有那层 26px 上边距，这就是"位置不一样"最显眼的一处`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/**
+ * ============================================================================
+ * 25 / 26 / 27 —— 移动端「键盘不该自己弹出来」（用户报障第 8 / 10 / 11 条）
+ * ============================================================================
+ *
+ * 🔴🔴🔴 这组三条的**共同根因**只有一句话：bj 在关闭浮层时**无条件 focus 编辑器**，
+ *   老项目**每一条**都带 `if (CHIP_HOVER_OK)` 守卫。
+ *
+ *   老项目 `CHIP_HOVER_OK`（index.html:6490）：
+ *     `!!(window.matchMedia && matchMedia('(hover: hover) and (pointer: fine)').matches)`
+ *     —— 语义是"有精确指针的桌面级设备"。它出现在**每一个**收尾 focus 上：
+ *       :8000 菜单点空白关闭     :8216 关于点空白关闭   :8244 关于× 关闭
+ *       :8249 菜单切主题         :8279 修改口令打开     :8287 修改口令取消
+ *       :3377/:7628 二维码弹窗关闭 :6929/:9111 彩蛋层关闭  :8000 菜单遮罩关闭
+ *       :4409 折叠三角开合        :2411 图片插入完成
+ *   一处不漏。而 bj 的对应位置是裸 `editor?.focus()` / `host.focus()` ——
+ *   在手机上 `focus()` 就是**弹软键盘**，于是用户点关闭弹窗，键盘"啪"地弹出来。
+ *
+ * 🔴 判据钉的是 `document.activeElement`，不是"有没有调 focus"：
+ *   "调了 focus 但立刻被 blur"与"压根没调"在真机上都是"键盘不弹"，用户看不出差别。
+ *   钉 activeElement 才能覆盖等价实现。
+ *
+ * 🔴🔴 必须在**真的触屏上下文**里跑（harness 的 `openEditorTouch`）。
+ *   桌面上下文里 `(hover: none) and (pointer: coarse)` 恒 false，
+ *   于是"移动端不该 focus"那条分支永远走不到 —— 这三条会恒绿，而真机照旧弹键盘。
+ *   **测试恒绿不是因为对，是因为压根没进那条分支。**
+ */
+
+/** 读当前焦点落在谁身上（用于"键盘该不该弹"的判据）。 */
+const activeInfo = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  if (!a) return { tag: '', id: '', cls: '', editable: false };
+  return {
+    tag: a.tagName,
+    id: a.id || '',
+    cls: typeof a.className === 'string' ? a.className : '',
+    editable: a.getAttribute && a.getAttribute('contenteditable') === 'true',
+  };
+});
+
+/** 触屏断言：焦点**不得**落在任何可编辑元素上（否则软键盘会弹）。 */
+async function assertNoKeyboard(page, where) {
+  const a = await activeInfo(page);
+  const editable =
+    a.editable ||
+    a.tag === 'INPUT' ||
+    a.tag === 'TEXTAREA' ||
+    (a.tag === 'DIV' && /\bn-input\b|\bns-editor\b|\beditable\b/.test(a.cls));
+  assert.ok(
+    !editable,
+    `${where}：移动端关闭后焦点不得落在可编辑元素上（会弹软键盘），` +
+    `实测 activeElement=${a.tag}#${a.id}.${a.cls}。` +
+    `已验证过的两条根因（按可能性排序）：① 收尾 focus 少了老项目 CHIP_HOVER_OK 守卫` +
+    `（index.html 每一处收尾 focus 都有）；② 同步 blur 被 Lexical commit 抢回焦点 ——` +
+    `commit 会把 DOM Selection 写进 contenteditable，Chromium 在那一步隐式聚焦，` +
+    `探针把 HTMLElement.prototype.focus 整个换掉抓栈仍是空数组（浏览器内部行为）。` +
+    `② 的修法是 blur 后再补一次 requestAnimationFrame blur（见 behaviors.ts 折叠处理器）。`,
+  );
+}
+
+test('VVW-25 🔴🔴🔴 触屏：关掉二维码弹窗不得弹键盘（报障第 8 条）', async () => {
+  // 用户原话：移动端点击二维码配对图标 → 关闭弹窗 → 键盘被打开。
+  // 老项目 :3377 `$('#qrClose')` = `qrMask.classList.add('hidden');
+  //   if (CHIP_HOVER_OK) { editor.focus(); ensureCaret(); }`
+  const page = await openEditorTouch(h.browser(), h.baseUrl(), 'vvw25', 'pw');
+  try {
+    await page.tap('#qrBtn');
+    // 🔴 弹层 id 是 `pairMask`（scan/panel.ts:169），不是 `qrMask` ——
+    //   判据里猜 id 的后果是 waitForSelector 干等 10s，报错只说"找不到 qrMask"，
+    //   看起来像"弹窗没打开"，实际是自己写错了名字。
+    await withTimeout(page.waitForSelector('#pairMask', { state: 'visible', timeout: 10_000 }), 12_000, '等二维码弹窗');
+    // 先把焦点放到编辑区（模拟"用户在正文里点过"这个真实前置）
+    await page.evaluate(() => document.querySelector('.ns-editor')?.focus());
+    await page.tap('#qrClose');
+    await withTimeout(
+      page.waitForFunction(() => !document.getElementById('pairMask'), { timeout: 5000 }),
+      6000, '二维码弹窗应关闭',
+    );
+    await page.waitForTimeout(200);
+    await assertNoKeyboard(page, '关闭二维码配对弹窗后');
+  } finally {
+    await closeTouch(page);
+  }
+});
+
+test('VVW-26 🔴🔴🔴 触屏：菜单三条关闭路径 + 修改口令取消都不该弹键盘（报障第 10 条）', async () => {
+  // 老项目对应：:8000 菜单点空白 / :8216 关于点空白 / :8244 关于× / :8287 修改口令取消
+  // 四条**全部**是 `menuMask.classList.add('hidden')` + `if (CHIP_HOVER_OK) editor.focus()`。
+  const page = await openEditorTouch(h.browser(), h.baseUrl(), 'vvw26', 'pw');
+  try {
+    // ① 菜单列表 → 点空白关闭
+    await page.tap('#menuBtn');
+    await withTimeout(page.waitForSelector('#menuMainView', { timeout: 10_000 }), 12_000, '等菜单');
+    await page.evaluate(() => document.getElementById('menuMask')?.click());
+    await withTimeout(
+      page.waitForFunction(() => document.getElementById('menuMask')?.classList.contains('hidden'), { timeout: 5000 }),
+      6000, '点空白应关闭菜单',
+    );
+    await page.waitForTimeout(150);
+    await assertNoKeyboard(page, '菜单点空白关闭后');
+
+    // ② 菜单 → 关于 NoteSync → × 关闭
+    await page.tap('#menuBtn');
+    await withTimeout(page.waitForSelector('#menuAbout', { timeout: 10_000 }), 12_000, '等菜单(二次)');
+    await page.tap('#menuAbout');
+    await withTimeout(
+      page.waitForSelector('#aboutMask .about-title', { state: 'visible', timeout: 10_000 }),
+      12_000, '等关于页',
+    );
+    // 🔴 关于页的关闭 × **没有 id**，是 `class="box-x"` 的绝对定位按钮
+    //   （update/ota-ui.ts:83 `x.className = 'box-x'`；只有遮罩是 `#aboutMask`、
+    //   标题是 `#aboutTitle`）。判据里写 `#aboutClose` 会干等 30s，
+    //   报错还像"关于页没打开"。
+    await page.tap('#aboutMask .box-x');
+    await withTimeout(
+      page.waitForFunction(() => document.getElementById('aboutMask')?.classList.contains('hidden'), { timeout: 5000 }),
+      6000, '关于页应关闭',
+    );
+    await page.waitForTimeout(150);
+    await assertNoKeyboard(page, '关于 NoteSync 关闭后');
+
+    // ③ 菜单 → 修改口令 → 取消关闭
+    await page.tap('#menuBtn');
+    await withTimeout(page.waitForSelector('#menuPass', { timeout: 10_000 }), 12_000, '等菜单(三次)');
+    await page.tap('#menuPass');
+    await withTimeout(page.waitForSelector('#cpMask', { state: 'visible', timeout: 10_000 }), 12_000, '等修改口令弹窗');
+    await page.tap('#cpCancel');
+    await withTimeout(
+      page.waitForFunction(() => !document.getElementById('cpMask'), { timeout: 5000 }),
+      6000, '修改口令弹窗应移除',
+    );
+    await page.waitForTimeout(150);
+    await assertNoKeyboard(page, '修改口令取消关闭后');
+  } finally {
+    await closeTouch(page);
+  }
+});
+
+test('VVW-27 🔴🔴🔴 触屏：修改口令弹窗打开时必须聚焦"当前口令"，取消时不得留下焦点（报障第 9 / 10 条）', async () => {
+  // 老项目 index.html:8277-8280：
+  //   openChangePass(){ …cpReset(); cpMask.classList.remove('hidden');
+  //     try { cpOld.focus(); } catch (e) {} }
+  // ⇒ **打开弹窗时聚焦当前口令框**（用户报障第 9 条：bj 没聚焦）。
+  // 老项目 :8287 取消：`if (CHIP_HOVER_OK) { editor.focus(); ensureCaret(); }`
+  //   ⇒ 触屏下**不还焦点**，所以键盘不会因为"取消"而弹（报障第 10 条第三条）。
+  //
+  // 🔴 这一条把"打开要聚焦"与"取消不留焦点"钉在**同一次会话**里 ——
+  //   只钉前者的话，实现很容易"打开聚焦了、取消又 focus 到编辑器"，
+  //   而后者正是用户看到的第二个症状。
+  const page = await openEditorTouch(h.browser(), h.baseUrl(), 'vvw27', 'pw');
+  try {
+    await page.tap('#menuBtn');
+    await withTimeout(page.waitForSelector('#menuPass', { timeout: 10_000 }), 12_000, '等菜单');
+    await page.tap('#menuPass');
+    await withTimeout(page.waitForSelector('#cpMask', { state: 'visible', timeout: 10_000 }), 12_000, '等修改口令弹窗');
+    await page.waitForTimeout(250); // 给 focus 落地一点时间
+
+    const open = await activeInfo(page);
+    assert.equal(
+      open.id, 'cpOld',
+      `打开修改口令弹窗后焦点必须落在「当前口令」输入框（老项目 openChangePass 里 cpOld.focus()），` +
+      `实测 activeElement=${open.tag}#${open.id}.${open.cls} —— 用户报障第 9 条「没有自动聚焦到当前口令文本框」。`,
+    );
+
+    // 反向：此刻键盘**应该**是弹的（用户就是要在这里输旧口令）
+    assert.ok(
+      open.tag === 'INPUT',
+      `聚焦到口令框时 activeElement 必须是 INPUT（会弹软键盘，这是本场景的预期），实测 ${open.tag}`,
+    );
+
+    // 取消：焦点不得被"还给编辑器"
+    await page.tap('#cpCancel');
+    await withTimeout(
+      page.waitForFunction(() => !document.getElementById('cpMask'), { timeout: 5000 }),
+      6000, '修改口令弹窗应移除',
+    );
+    await page.waitForTimeout(200);
+    await assertNoKeyboard(page, '修改口令取消后（老项目 :8287 触屏不还焦点）');
+  } finally {
+    await closeTouch(page);
+  }
+});
+
+test('VVW-28 🔴🔴 触屏：点折叠三角开合不得弹键盘（报障第 11 条）', async () => {
+  // 老项目 index.html:4425（折叠 click 处理器收尾）：
+  //   try { foldCaretNormalize(); } catch (err) {}
+  //   try { dismissKeyboardForTouch(); } catch (err) {} // 触屏兜底：个别内核 touchstart 早于 mousedown 已聚焦
+  //   try { backfillLastHtmlIfDecorativelyEqual(); } catch (err) {}
+  // 🔴🔴 **实测根因（不是"少了一行 dismissKeyboard"）**，2026-10-07 焦点时间线探针：
+  //   before-dispatch=DIV#editor-host.ns-editor
+  //   blur#1=BODY            ← 同步 dismissKeyboardForTouch **确实生效**
+  //   sync-after-dispatch=BODY
+  //   focus#4=DIV#editor-host.ns-editor   ← handler 一返回，Lexical commit 把焦点抢回去
+  //   raf1 / t0 / t16 / t120 全部停在编辑器
+  //   且把 `HTMLElement.prototype.focus` 整个换掉抓栈时 `__focusStacks` 是**空数组**
+  //   ⇒ 没有任何 JS 调 focus()，是 commit 写 DOM Selection 时 **Chromium 隐式聚焦**。
+  //   老项目同步调就够，是因为它是原生 contenteditable、`applyFolds()` 直接改 innerHTML，
+  //   **没有 commit 回写 Selection 这一拍**；bj 走 Lexical 多出来的正是这一拍。
+  // ⇒ 修法 = blur 之后补一次 `requestAnimationFrame(blur)`（behaviors.ts）。
+  //   双向验证：撤掉 rAF → 本条红且 trace 精确复现；恢复 → 绿。
+  //
+  // 🔴 造折叠走 `window.__NOTESYNC_INSERT_FOLD__()`（FOLD-01 同款正规测试钩子），
+  //   不自己拼 Lexical 节点 —— 那是最容易写成"恒绿假数据"的地方。
+  const page = await openEditorTouch(h.browser(), h.baseUrl(), 'vvw28', 'pw');
+  try {
+    await page.evaluate(() => document.querySelector('.ns-editor')?.focus());
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await withTimeout(page.waitForSelector('.ns-fold', { timeout: 10_000 }), 12_000, '等折叠块');
+    // 🔴 必须先确认焦点真的落在编辑区（模拟"用户正在正文里"这个前置）。
+    //   否则"键盘没弹"是因为压根没聚焦过，判据就是假绿。
+    await page.evaluate(() => document.querySelector('.ns-editor')?.focus());
+    await page.waitForTimeout(200);
+    const before = await activeInfo(page);
+    assert.ok(
+      before.editable || /ns-editor/.test(before.cls),
+      `点三角前焦点必须在编辑区（否则"键盘没弹"是假绿），实测 activeElement=${before.tag}#${before.id}.${before.cls}`,
+    );
+
+    // 点三角（标题行左起 22px 内，behaviors.ts 的几何命中区）
+    //
+    // 🔴🔴 这条判据的**同步段也钉了**，不是为了多测一层，而是因为本条的根因就是
+    //   「同步 blur 生效了、随后被 commit 抢回去」：
+    //   只在末尾断言"焦点没落在可编辑元素"，那么一个**只同步 blur 一次**的实现
+    //   （handler 返回时被 commit 覆盖）和一个**什么都不做**的实现长得一样，
+    //   曾经就靠"末尾无焦点"这一句把同步版判绿过。
+    //   同步段读到 BODY ⇒ 证明 blur 真的跑了；末尾读到 BODY ⇒ 证明 commit 之后没被抢回。
+    //   两段合起来才是"收键盘在 commit 之后仍然成立"。
+    const syncTag = await page.evaluate(() => {
+      const head = document.querySelector('.ns-fold > :first-child');
+      if (!head) throw new Error('折叠块缺标题行');
+      const r = head.getBoundingClientRect();
+      head.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.top + r.height / 2,
+      }));
+      const a = document.activeElement;
+      return a ? `${a.tagName}#${a.id}.${a.className}` : 'null';
+    });
+    assert.ok(
+      !/ns-editor/.test(syncTag),
+      `同步段：blur 必须当场生效（否则说明收键盘根本没跑，后面的断言全是假绿），实测=${syncTag}`,
+    );
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'false', { timeout: 5000 }),
+      6000, '等折叠收起',
+    );
+    await page.waitForTimeout(250);
+    await assertNoKeyboard(page, '点折叠三角收起后');
+
+    // 反向：展开也必须收键盘（同一处理器，只测收起会漏掉另一半）
+    await page.evaluate(() => {
+      const head = document.querySelector('.ns-fold > :first-child');
+      const r = head.getBoundingClientRect();
+      head.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.top + r.height / 2,
+      }));
+    });
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('.ns-fold')?.getAttribute('data-open') === 'true', { timeout: 5000 }),
+      6000, '等折叠展开',
+    );
+    await page.waitForTimeout(250);
+    await assertNoKeyboard(page, '点折叠三角展开后');
+  } finally {
+    await closeTouch(page);
   }
 });

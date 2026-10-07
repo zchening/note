@@ -17,6 +17,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,6 +33,7 @@ let child = null;
 let base = '';
 let dataDir = '';
 let wwwDir = '';
+let deployDir = '';
 
 /** 起一个隔离实例（独立 DATA_DIR + 独立 WWW_DIR + 随机端口） */
 async function boot() {
@@ -51,6 +53,10 @@ async function boot() {
   );
   // 一份带扩展名的静态资源，用来判"有扩展名走真文件、无扩展名走回落"这条分界
   fs.writeFileSync(path.join(wwwDir, 'probe.txt'), 'probe', 'utf8');
+  // 🔴 deploy/ 必须隔离：OTA 判据要放**假 APK**（含 Range/206/416/穿越），
+  //   不隔离就只能往真实仓库的 deploy/apk/ 里写垃圾。
+  deployDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bj-deploy-'));
+  fs.mkdirSync(path.join(deployDir, 'apk'), { recursive: true });
 
   const port = 20000 + Math.floor(Math.random() * 20000);
   child = spawn(process.execPath, [SERVER], {
@@ -59,6 +65,7 @@ async function boot() {
       NS_BJ_PORT: String(port),
       NOTESYNC_BJ_DATA_DIR: dataDir,
       NOTESYNC_BJ_WWW: wwwDir,
+      NOTESYNC_BJ_DEPLOY: deployDir,
       NS_BJ_VERSION: '9.9.9-test',
       NS_BJ_BUILD_DATE: '2026-10-05',
     },
@@ -82,9 +89,31 @@ test.before(async () => {
   await boot();
 });
 
+/**
+ * 原始 HTTP GET（手写请求行，返回完整响应文本）。
+ *
+ * 🔴 判"服务端怎么解析 pathname"时**必须**用它，不能用 fetch：
+ *   WHATWG URL 会在客户端就把 `/dl/../x` 规范化成 `/x`，带 .. 的请求根本发不出去。
+ *   用 fetch 写出来的穿越判据对"服务端是否解码/是否防穿越"零区分力 —— 恒绿。
+ */
+function rawGet(target) {
+  const port = Number(new URL(base).port);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1', () => {
+      sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    let buf = '';
+    sock.setEncoding('utf8');
+    sock.on('data', (d) => { buf += d; });
+    sock.on('end', () => resolve(buf));
+    sock.on('error', reject);
+  });
+}
+
 test.after(() => {
   if (child) child.kill();
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+  if (deployDir) fs.rmSync(deployDir, { recursive: true, force: true });
 });
 
 test('/healthz 自报版本与关键路径（部署核对第一判据）', async () => {
@@ -227,6 +256,219 @@ test('/api/latest 无发布元数据时 404（App 靠这个查新版）', async 
   assert.equal(r.status, 404);
   const j = await r.json();
   assert.equal(j.error, 'no release metadata');
+});
+
+/* ================= APK 直下（OTA 下载通道）=================
+ *
+ * 🔴🔴 这组判据对应 packages/server/src/server.js 的 /dl 路由。它是 App
+ *   在线升级的唯一下载入口，去掉它App 仍能正常用（网页是线上站），但
+ *   "检查更新"会永远失败 —— 属于**沉默缺失**，所以必须有判据钉住。
+ *
+ * 🔴 假 APK 用可预测字节（i % 251）而不是随机数：Range 分段必须能验证
+ *   "返回的确实是文件的那一段"，随机字节只能验证长度，对上了也可能内容错。
+ */
+const APK_SIZE = 300000;
+const apkByte = (i) => i % 251;
+
+function seedApk(name) {
+  const buf = Buffer.alloc(APK_SIZE);
+  for (let i = 0; i < APK_SIZE; i++) buf[i] = apkByte(i);
+  fs.writeFileSync(path.join(deployDir, 'apk', name), buf);
+  return buf;
+}
+
+test('DL-01 /dl/latest.apk 直出真字节（200 + 头齐全 + 内容逐字节相符）', async () => {
+  const buf = seedApk('latest.apk');
+  const r = await fetch(`${base}/dl/latest.apk`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/vnd.android.package-archive');
+  // 🔴 Accept-Ranges 是 DownloadManager 分段续传的前提，缺了就不是 200 而是整体重下
+  assert.equal(r.headers.get('accept-ranges'), 'bytes');
+  assert.equal(r.headers.get('content-length'), String(APK_SIZE));
+  assert.match(r.headers.get('content-disposition') || '', /attachment; filename="NoteSync-latest\.apk"/);
+  const got = Buffer.from(await r.arrayBuffer());
+  assert.equal(got.length, APK_SIZE, '字节数对不上');
+  // 🔴 反向断言：不能只对长度。逐字节比内容，否则"返回了别的东西同样长度"会绿。
+  assert.ok(buf.equals(got), '返回的字节与磁盘上的 APK 不一致（可能截断/串内容）');
+});
+
+test('DL-02 Range 分段续传 206，且 Content-Range 精确（低带宽不断点续传的前提）', async () => {
+  seedApk('latest.apk');
+  // 中间一段
+  const r = await fetch(`${base}/dl/latest.apk`, { headers: { Range: 'bytes=1000-1099' } });
+  assert.equal(r.status, 206);
+  assert.equal(r.headers.get('content-range'), `bytes 1000-1099/${APK_SIZE}`);
+  assert.equal(r.headers.get('content-length'), '100');
+  const got = Buffer.from(await r.arrayBuffer());
+  assert.equal(got.length, 100);
+  for (let i = 0; i < 100; i++) {
+    assert.equal(got[i], apkByte(1000 + i), `第 ${i} 字节应是文件的第 ${1000 + i} 字节`);
+  }
+  // 🔴 开头一段（客户端续传的真实起点）
+  const r2 = await fetch(`${base}/dl/latest.apk`, { headers: { Range: 'bytes=0-99' } });
+  assert.equal(r2.status, 206);
+  assert.equal(r2.headers.get('content-range'), `bytes 0-99/${APK_SIZE}`);
+  const g2 = Buffer.from(await r2.arrayBuffer());
+  assert.equal(g2.length, 100);
+  assert.equal(g2[0], apkByte(0));
+  assert.equal(g2[99], apkByte(99));
+});
+
+test('DL-03 Range 后缀区间 bytes=-N 取末尾 N 字节', async () => {
+  seedApk('latest.apk');
+  const r = await fetch(`${base}/dl/latest.apk`, { headers: { Range: 'bytes=-50' } });
+  assert.equal(r.status, 206);
+  const wantFrom = APK_SIZE - 50;
+  assert.equal(r.headers.get('content-range'), `bytes ${wantFrom}-${APK_SIZE - 1}/${APK_SIZE}`);
+  const got = Buffer.from(await r.arrayBuffer());
+  assert.equal(got.length, 50);
+  assert.equal(got[0], apkByte(wantFrom), '后缀区间必须从末尾往前数50 字节的起点开始');
+  assert.equal(got[49], apkByte(APK_SIZE - 1));
+});
+
+test('DL-04 Range 越界回 416 + Content-Range: bytes */total（不是 200 也不是崩）', async () => {
+  seedApk('latest.apk');
+  // 起点超过文件大小
+  const r = await fetch(`${base}/dl/latest.apk`, { headers: { Range: 'bytes=999999-' } });
+  assert.equal(r.status, 416, '越界 Range 必须 416；回 200 等于从头重下，续传白做');
+  assert.equal(r.headers.get('content-range'), `bytes */${APK_SIZE}`);
+  // 🔴 起点 ≤ size 但 > end（end 小于 start）也必须 416
+  const r2 = await fetch(`${base}/dl/latest.apk`, { headers: { Range: 'bytes=500-100' } });
+  assert.equal(r2.status, 416);
+});
+
+test('DL-05 版本固定名 /dl/vX.Y.Z.apk 可下载，且与 latest.apk 同内容', async () => {
+  // 🔴 不可变版本副本是 Range 续传的生命线：客户端下载途中发新版，
+  //   latest.apk 被覆盖会让手机读到"新旧混装字节" ⇒ packageInfo is null 死循环。
+  //   所以 json 的 URL 必须指永不覆盖的版本副本。
+  const a = seedApk('latest.apk');
+  const b = seedApk('v1.11.0.apk');
+  const r = await fetch(`${base}/dl/v1.11.0.apk`);
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-disposition') || '', /NoteSync-v1\.11\.0\.apk/);
+  const got = Buffer.from(await r.arrayBuffer());
+  assert.ok(a.equals(got) && b.equals(got), '两个名字必须给出同一份 APK');
+  // 🔴 反向断言：多段版本号也要认（v10.1.8 这种）
+  const c = seedApk('v10.1.8.apk');
+  const r2 = await fetch(`${base}/dl/v10.1.8.apk`);
+  assert.equal(r2.status, 200, '多段版本号被拒 ⇒ v10.1.8 这类版本发不出去');
+  assert.ok(c.equals(Buffer.from(await r2.arrayBuffer())));
+});
+
+test('DL-06 HEAD 只回头不回体（App 用它探活/取大小）', async () => {
+  seedApk('latest.apk');
+  const r = await fetch(`${base}/dl/latest.apk`, { method: 'HEAD' });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-length'), String(APK_SIZE));
+  assert.equal((await r.arrayBuffer()).byteLength, 0, 'HEAD 不该带体');
+});
+
+test('DL-07 🔴 路径穿越拿不到 deploy/ 之外的字节', async () => {
+  // 🔴🔴 这条判据的写法是踩过坑才定下来的，两个必须知道的事实：
+  //
+  //   ① **不能用 fetch()**：WHATWG URL 在**客户端**就把 `/dl/../x` 规范化成 `/x`，
+  //      服务端压根收不到带 .. 的 pathname。实测（探针，非推测）：无论白名单怎么
+  //      放宽，fetch 版本的这组断言都不会红 —— 它对"服务端是否解码"零区分力。
+  //      所以必须用 net.connect 手写原始请求行，绕过客户端规范化。
+  //   ② **诱饵名必须叫 secret.apk.apk**：路由拼的是 `dlMatch[1] + '.apk'`，
+  //      跨过apk/ 目录后落点是 deploy/secret.apk + '.apk'。诱饵叫 secret.apk 时
+  //      穿越即使成功也只会去找 secret.apk.apk（不存在）⇒ 又一个恒绿陷阱。
+  //      已用变异验证：白名单放宽成 ^/dl/(.+)$ 且fname 加 decodeURIComponent 后，
+  //      本条**确实转红**（DL-08 同步红），证明确有区分力。
+  fs.writeFileSync(path.join(deployDir, 'secret.apk.apk'), 'TOP-SECRET', 'utf8');
+  // deploy/ 外也放一个，判"连父目录都出不去"
+  fs.writeFileSync(path.join(path.dirname(deployDir), 'secret.apk.apk'), 'TOP-SECRET', 'utf8');
+
+  const attempts = [
+    '/dl/../secret.apk',
+    '/dl/..%2fsecret.apk',
+    '/dl/%2e%2e%2fsecret.apk',
+    '/dl/..%252fsecret.apk',
+    '/dl/..\\secret.apk',
+    '/dl/..%5csecret.apk',
+    '/dl/%2e%2e%5csecret.apk',
+  ];
+  for (const p of attempts) {
+    const r = await rawGet(p);
+    assert.ok(!r.includes('TOP-SECRET'), `穿越 ${p} 泄露了 deploy/ 之外的文件内容`);
+    // 🔴 不许回 200：即使没泄露，给 200 空体也会让安卓安装器报"文件损坏"而非"下载失败"
+    assert.ok(!/HTTP\/1\.1 200/.test(r), `穿越 ${p} 返回了 200`);
+  }
+});
+
+test('DL-08 🔴 不在白名单的 APK 名一律 404（latest / v数字 之外都拒）', async () => {
+  seedApk('latest.apk');
+  // 造一个真实存在的 apk 文件，但名字不合白名单 —— 必须仍然 404
+  seedApk('evil.apk');
+  seedApk('vTEST.apk');
+  for (const n of ['evil.apk', 'vTEST.apk', 'v1.11.0-rc1.apk', 'app-release.apk']) {
+    const r = await fetch(`${base}/dl/${n}`);
+    assert.equal(r.status, 404, `${n}竟可下载 —— 白名单太宽`);
+    //🔴 错误文案钉的是**老项目的值**：不合白名单 ⇒ 没进/dl 路由 ⇒ 落到通用
+    //   静态 404（not found）；只有"进了路由但文件不在"才是 no apk（见 DL-09）。
+    //   两者都是 404 JSON，分开钉是为了防止有人把 no apk 泛用到白名单外，
+    //   那会让"这个 APK 名不合法"和"这个版本还没上传"看起来一样，排障时误导。
+    const j = await r.json().catch(() => null);
+    assert.equal(j && j.error, 'not found', `${n} 的 404 文案应与老项目同形（not found）`);
+  }
+});
+
+test('DL-09 🔴 不存在的版本回 404 + no apk（不能回 200 空体或 HTML）', async () => {
+  seedApk('latest.apk');
+  const r = await fetch(`${base}/dl/v9.9.9.apk`);
+  assert.equal(r.status, 404);
+  const j = await r.json();
+  assert.equal(j.error, 'no apk');
+  // 🔴 HTML 更糟：APK 安装器拿到 <!doctype…> 会报"文件损坏"而不是"下载失败"
+  assert.ok(!(r.headers.get('content-type') || '').includes('text/html'));
+});
+
+test('DL-10 /dl 前缀的"非法 APK 名"不得被 SPA 回落吞成 HTML', async () => {
+  // 🔴 老项目口径（notesync/server.js:878）：只有**无扩展名**路径走 SPA 兜底回
+  //   index.html；带扩展名的路径一律 404 JSON。所以 /dl 本身回200 HTML 是**同款
+  //   设计**，不是 bug（这条曾被我错写成"必须 404"，判据钉错比没判据更糟）。
+  //   真正的分界在这条：/dl/xxx.apk 名不合法时必须是 404 JSON而不是 HTML ——
+  //   APK 安装器拿到 <!doctype…> 会报"文件损坏"，而不是"下载失败"，排障方向全错。
+  seedApk('latest.apk');
+  for (const p of ['/dl/nope.apk', '/dl/latest.txt', '/dl/a/b.apk']) {
+    const r = await fetch(`${base}${p}`);
+    assert.equal(r.status, 404, `${p} 应404（被 SPA 回落吞了）`);
+    assert.ok(
+      !(r.headers.get('content-type') || '').includes('text/html'),
+      `${p}回落成了 HTML —— 安卓会报"文件损坏"而非"下载失败"`,
+    );
+  }
+});
+
+test('DL-11 有 latest_app.json 时 /api/latest 指向不可变版本副本（不许指 latest.apk）', async () => {
+  const meta = {
+    assets: [{
+      browser_download_url: 'https://bj.xuyinji.com.cn/dl/v1.11.0.apk',
+      name: 'app-release.apk',
+      size: APK_SIZE,
+    }],
+    tag_name: 'v1.11.0',
+  };
+  fs.writeFileSync(
+    path.join(deployDir, 'latest_app.json'),
+    JSON.stringify(meta),
+    'utf8',
+  );
+  const r = await fetch(`${base}/api/latest`);
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.tag_name, 'v1.11.0');
+  const url = j.assets[0].browser_download_url;
+  // 🔴🔴 指向 latest.apk 就是"续传跨发版读到混装字节"的复发 —— 从元数据层面钉死
+  assert.ok(url.endsWith('/dl/v1.11.0.apk'), `下载 URL 必须指版本固定名，实际 ${url}`);
+  assert.ok(!url.endsWith('/dl/latest.apk'), '🔴 下载 URL 绝不能指 latest.apk（会被覆盖，续传会读到混装字节）');
+  // 🔴 客户端 ota.ts 只认这三个字段，少一个就当无更新
+  assert.equal(j.assets[0].name, 'app-release.apk');
+  assert.equal(j.assets[0].size, APK_SIZE);
+  // 🔴 有"应该有"就得配"不应该有"：清掉元数据后必须回 404，不能留着上一次的缓存
+  fs.rmSync(path.join(deployDir, 'latest_app.json'));
+  const r2 = await fetch(`${base}/api/latest`);
+  assert.equal(r2.status, 404, '删掉 latest_app.json 后仍返回 200 ⇒ 服务端缓存了它');
 });
 
 test('未知资源 404 JSON（带扩展名，不走 SPA 回落）', async () => {

@@ -114,6 +114,7 @@ const HISTORY_MERGE_DELAY_MS = 300;
 import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
 import { spansToNodes } from './serialize.ts';
 import { registerLinkify } from './linkify/deferred.ts';
+import { dismissKeyboardForTouch } from './platform/touch.ts';
 import type { Span } from '@bj/shared-schema';
 
 /**拖拽高亮用的 class。与 styles.css `.ns-editor.dragover` 一一对应（改一处必须改两处）。 */
@@ -440,6 +441,35 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
       const willCollapse = fold.open;
       fold.setOpen(!fold.open);
       if (willCollapse) $parkCaretOnFoldHead(fold);
+      // 🔴🔴🔴 触屏必须收一次键盘（老项目 index.html:4425 折叠 click 处理器收尾第三行：
+      //   `try { dismissKeyboardForTouch(); } catch (err) {}`
+      //   注释原文：「触屏兜底：个别内核 touchstart 早于 mousedown 已聚焦，开合后收一次键盘（桌面/组字期为 no-op）」）。
+      //
+      //   病：点三角是**在 contenteditable 里点**，多数内核会顺手把焦点给编辑器 ——
+      //   手机上那就是软键盘弹起来。用户明明只是收起了折叠列表（用户报障第 11 条）。
+      //   桌面端这条是 no-op（`dismissKeyboardForTouch` 只认纯触屏），行为零变化。
+      //
+      // 🔴🔴🔴 **为什么必须延到 rAF，不能同步调**（探针实测，2026-10-07）：
+      //   同步 blur **确实生效了**（trace：`blur#1=BODY` → `sync-after-dispatch=BODY`），
+      //   但 handler 一返回，Lexical 就 commit 这次 update —— commit 会把 DOM Selection
+      //   写进 contenteditable，**Chromium 在这一步隐式把焦点还给编辑器**
+      //   （trace 紧接 `focus#4=DIV#editor-host.ns-editor`，之后 raf1/t0/t16/t120 全在编辑器）。
+      //
+      //   🔬 **不是谁调了 `.focus()`**：探针把 `HTMLElement.prototype.focus` 整个换掉
+      //   抓栈，`__focusStacks` 是**空数组** —— 焦点是浏览器内部行为，JS 层抓不到调用点。
+      //   所以"在 handler 里再补一次 focus/blur"这种改法注定无效，必须让开 commit 那一拍。
+      //
+      //   老项目为什么同步调就够了：它是**原生 contenteditable**，`applyFolds()` 里
+      //   直接改 innerHTML，没有"commit 阶段回写 Selection"这一步 ⇒ 同步 blur 就是终态。
+      //   bj 走 Lexical，多出来的正是这一拍。
+      try {
+        dismissKeyboardForTouch();
+        requestAnimationFrame(() => {
+          dismissKeyboardForTouch();
+        });
+      } catch {
+        /* 收键盘失败绝不影响开合本身 */
+      }
       // 不 preventDefault：标题行是 contenteditable 的一部分，
       // 阻止会让部分内核把点击当作文本选择起点。
       return true;

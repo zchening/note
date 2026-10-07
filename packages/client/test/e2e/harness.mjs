@@ -413,3 +413,75 @@ export async function openEditorAt(browser, base, noteName, pass, opts) {
   }
   return page;
 }
+
+/**
+ * ============================================================================
+ * 触屏装置 —— 移动端判据必须在**真的触屏上下文**里跑
+ * ============================================================================
+ *
+ * 🔴🔴🔴 为什么不能直接 `browser.newPage({ hasTouch: true })`：
+ *   bj 的触屏判据是 `matchMedia('(hover: none) and (pointer: coarse)')`。
+ *   本机实测（Playwright 1.x + Chromium）：
+ *     isMobile+hasTouch → coarse:true  hoverFine:false  anyFine:false   ← 触屏
+ *     hasTouch only     → coarse:true  hoverFine:false  anyFine:false   ← 同上
+ *     desktop           → coarse:false hoverFine:true   anyFine:true    ← 桌面
+ *   也就是说 **`hasTouch` 就够**，但必须显式给 `isMobile` 更保险（不同内核版本
+ *   对 hover/pointer 的模拟实现有差异，实测已确认本机这套两个都给最稳）。
+ *
+ * 🔴🔴🔴 为什么"触屏判据"本身必须落在这条链上而不是 mock 掉：
+ *   用户报障第 8/10/11 条（"关闭弹窗后键盘被打开"）全部是**触屏专属行为**。
+ *   在桌面上下文里跑，`(hover: none) and (pointer: coarse)` 恒 false，
+ *   于是"移动端不该 focus"那条守卫永远走不到 ⇒ **测试恒绿、用户照旧被弹键盘**。
+ *   这就是"测试骗人"的典型：它绿不是因为对，是因为压根没进那条分支。
+ *
+ * ⚠️ 关闭弹层用 `Esc` 而不是点遮罩：Playwright 的 `page.click('.mask')` 命中
+ *   `pointer-events` 判定，浮层开着时顶栏按钮"visible 但点不到"（本项目纪律）。
+ *   `Esc` 走真实事件路径，与用户按返回键一致。
+ */
+export const TOUCH_CTX = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true };
+
+/**
+ * 走到**编辑器就绪**为止，但全程在触屏上下文里。
+ *
+ * 🔴 与 `openEditor` 的差别只有两处，其余逐步同款（落地页 → 口令 → 编辑器）：
+ *   ① 自己开 context（`browser.newPage()` 隐式建的 context 是桌面的，改不了）
+ *   ② 用 `tap()` 而不是 `click()`（触屏语义；Chromium 下 click 也能过，
+ *      但语义不对，将来加 touchstart 路径的判据会骗人）
+ *
+ * 🔴 返回值是 page；**调用方负责 `page.context().close()`**
+ *   （`page.close()` 不会关掉自建 context，泄漏到文件末尾会让 after 挂住）。
+ */
+export async function openEditorTouch(browser, base, noteName = 'e2e', pass = '测试口令') {
+  const ctx = await withTimeout(browser.newContext(TOUCH_CTX), 30_000, 'newContext(touch)');
+  const page = await withTimeout(ctx.newPage(), 30_000, 'newPage(touch)');
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e.message)));
+  await page.goto(base);
+  try {
+    await withTimeout(page.waitForSelector('#li', { timeout: 20_000 }), 25_000, '等落地页(touch)');
+    await page.fill('#li', noteName);
+    await page.tap('#landingBtn');
+    await withTimeout(page.waitForSelector('#pw', { timeout: 20_000 }), 25_000, '等口令页(touch)');
+    await page.fill('#pw', pass);
+    await page.tap('#ok');
+    await withTimeout(
+      page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 }),
+      25_000, '编辑器未挂载(touch)',
+    );
+  } catch (e) {
+    const bodyLen = await page.evaluate(() => document.body?.innerHTML.length ?? -1).catch(() => -2);
+    throw new Error(
+      `触屏路径失败：${e instanceof Error ? e.message : String(e)}` +
+      `；bodyHTML长度=${bodyLen}；pageerror=${errors.join(' | ') || '(无)'}`,
+    );
+  }
+  return page;
+}
+
+/**
+ * 触屏上下文的收尾：**必须关 context**。
+ * 只 `page.close()` 会留下活着的 context，文件末尾的 browser.close() 偶尔就挂住。
+ */
+export async function closeTouch(page) {
+  await page.context().close();
+}

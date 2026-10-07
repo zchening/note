@@ -77,6 +77,7 @@ git -c http.proxy= -c https.proxy= push origin main
 - 🔴 **判 CSS 补丁是否生效必须读真浏览器 `computedStyle`**；正则匹配 CSS 字符串
   的断言在 specificity 算错时**恒绿**（真发生过：425 测试全绿、导出图照样丢正文）。
 - 🔴 **`:not()` 的 specificity 取其参数**（自身不贡献），写补丁选择器必须精确数。
+- 🔴 **`--test-name-pattern` 用子测试名会整轮空跑**：e2e 是 `test('父', t => t.test('子'))` 两层结构，用**子**级名过滤会让 node 当文件级过滤、子测试全跳过，输出 `# tests 1 / # pass 1` 假绿。pattern 必须给**父级**名，并核对子测试 `ok N` 真的列出（不只看 `# pass`）。
 
 ## 深入文档
 

@@ -35,19 +35,23 @@ export function buildLanding(host: HTMLElement, cb: LandingCallbacks): void {
       <button type="button" id="landingBtn" disabled>${COPY.landingBtnOpen}</button>
     </div>
     <div class="warn hidden" id="landingWarn">${COPY.landingWarn}</div>
-    <div class="lurl" id="landingUrl"></div>
-    <div class="legghint" id="landingEggTip"></div>
-    <div class="lscan" id="landingScan" role="button" tabindex="0"
-         aria-label="${COPY.landingScan}">${ICON_SCAN()}<span>${COPY.landingScan}</span></div>
+    <p class="lurl hidden" id="landingUrl">${COPY.landingUrlPrefix}&nbsp;<span class="lurl-host"></span>/<span id="landingUrlName" class="u-name"></span></p>
+    <p class="legghint hidden" id="landingEggTip"></p>
+    <div class="lscan-row">
+      <div class="lscan" id="landingScan" role="button" tabindex="0"
+           aria-label="${COPY.landingScan}">${ICON_SCAN()}<span>${COPY.landingScan}</span></div>
+    </div>
     <!-- 🔴 扫码反馈专用位。必须与 #landingWarn 分开：
          landingWarn 归输入校验管（净化时亮），拿它显示"相机起不来"的话，
          用户下一次敲键盘就会被净化逻辑清掉 —— 症状是"错误信息闪一下就没了"。
-         这个位只由 scanFeedback 写，且带「文案仍是它才清」守卫。 -->
+         这个位只由 scanFeedback 写，且带「文案仍是它才清」守卫。
+         🔴 它在 DOM 里排在 .lscan-row **之后**，而入场动画是按子节点序号步进的
+            （老项目 nth-child 步进）—— 放在最后一位，步进序号才与老项目一致。 -->
     <div class="warn hidden" id="landingScanMsg"></div>
     <div class="trust" aria-hidden="true">
-      <span>${ICON_TRUST_LOCK()}<span>${COPY.trustCipher}</span></span>
-      <span>${ICON_TRUST_NOACCT()}<span>${COPY.trustNoAccount}</span></span>
-      <span>${ICON_TRUST_SCAN()}<span>${COPY.trustScan}</span></span>
+      <span>${ICON_TRUST_LOCK()}${COPY.trustCipher}</span>
+      <span>${ICON_TRUST_NOACCT()}${COPY.trustNoAccount}</span>
+      <span>${ICON_TRUST_SCAN()}${COPY.trustScan}</span>
     </div>
   </div>
 </div>`.trim();
@@ -56,13 +60,17 @@ export function buildLanding(host: HTMLElement, cb: LandingCallbacks): void {
   const btn = host.querySelector<HTMLButtonElement>('#landingBtn');
   const warn = host.querySelector<HTMLElement>('#landingWarn');
   const url = host.querySelector<HTMLElement>('#landingUrl');
+  const urlName = host.querySelector<HTMLElement>('#landingUrlName');
+  const urlHost = host.querySelector<HTMLElement>('#landingUrl .lurl-host');
   const eggTip = host.querySelector<HTMLElement>('#landingEggTip');
   const scan = host.querySelector<HTMLElement>('#landingScan');
-  if (!input || !btn || !warn || !url || !eggTip || !scan) {
+  if (!input || !btn || !warn || !url || !urlName || !urlHost || !eggTip || !scan) {
     throw new Error('落地页结构不完整：buildLanding 与模板不同源');
   }
 
-  const hostName = location.host;
+  // 🔴 老项目 index.html:3289 那个 IIFE 用 **hostname**（不含端口），
+  //   网址预览行显示的是用户要抄到别处的地址，带端口是噪声。
+  urlHost.textContent = location.hostname;
 
   const refresh = (): void => {
     const raw = input.value;
@@ -82,8 +90,27 @@ export function buildLanding(host: HTMLElement, cb: LandingCallbacks): void {
     // 🔴 彩蛋门牌不禁用按钮（点了是去彩蛋，不是新建笔记）
     btn.disabled = !isEgg && name.trim().length === 0;
 
-    eggTip.textContent = isEgg ? COPY.eggReservedTip(name) : '';
-    url.textContent = name === '' ? '' : `${COPY.landingUrlPrefix}${hostName}/${name}`;
+    // 🔴🔴 彩蛋提示行照老项目 index.html:10187-10192 的做法**用 DOM API 拼装**：
+    //   门牌名进 <b>（金黄 600），后半句说明是裸文字（muted）。
+    //   此前是 `eggTip.textContent = ...` 整行同一颜色 —— 老项目整行是灰的，
+    //   只有门牌名金黄（`.eggtip b{color:var(--accent);font-weight:600}`）。
+    //   走 DOM API 而非 innerHTML：门牌名来自用户输入，不拼字符串进 HTML。
+    eggTip.textContent = '';
+    eggTip.classList.toggle('hidden', !isEgg);
+    if (isEgg) {
+      const b = document.createElement('b');
+      b.textContent = `/${name}`;
+      eggTip.appendChild(b);
+      eggTip.appendChild(document.createTextNode(COPY.eggReservedTipSuffix));
+    }
+
+    // 🔴 网址预览行：老项目 index.html:10177-10181 `syncUrlHint()`
+    //   「非空且非彩蛋才显行，空值/彩蛋整行隐身」——
+    //   彩蛋门牌不是网址，显示出来是错的（老项目也这么判）。
+    //   结构必须是「前缀 + 域名 + / + <b>笔记名</b>」四段，
+    //   笔记名那一段是金黄 span（老项目 .urlline .u-name）。
+    urlName.textContent = name;
+    url.classList.toggle('hidden', name === '' || isEgg);
   };
 
   input.addEventListener('input', refresh);
@@ -110,8 +137,14 @@ export function buildLanding(host: HTMLElement, cb: LandingCallbacks): void {
   });
 
   refresh();
-  // 落地页是首屏，自动聚焦（老项目也这样，进来就能打字）
-  input.focus();
+  // 🔴🔴 **不要** input.focus()。
+  //   老项目 index.html 全文 39 处 `.focus()` 无一处是落地页输入框（`li` 只被 getElementById 取用）。
+  //   此前这里有一句 `input.focus()`，注释还写"老项目也这样" —— 那句注释是错的，后果有两条：
+  //     ① 一进来就触发 focus 事件 → #landing 挂 `.trust-away` → .trust opacity:0
+  //        ⇒ "服务器只见密文/无需账号/扫码跨设备"三行**永久不可见**（用户报障第 6 条原话）；
+  //     ② 移动端一进落地页就弹软键盘。
+  //   老项目把淡出做成"聚焦时"的行为，语义是"给软键盘让位"，
+  //   不是"一进来就让位"—— 自动聚焦把这个前提整个抹掉了。
 }
 
 export interface PassCallbacks {
@@ -320,6 +353,8 @@ export function buildChangePass(host: HTMLElement, cb: ChangePassCallbacks): voi
   }
 
   refresh();
+  // 老项目 index.html:8279-8280 `try { cpOld.focus(); } catch (e) {}`
+  //   —— 打开修改口令弹窗必须聚焦「当前口令」框（用户报障第 9 条）。
   oldIn.focus();
 }
 

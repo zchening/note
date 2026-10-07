@@ -20,7 +20,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installHarness, openEditor, withTimeout } from './harness.mjs';
+import { installHarness, openEditor, openEditorTouch, closeTouch, withTimeout } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 🔴 必须是 4 级（e2e → test → client → packages → 仓库根）。
@@ -309,6 +309,251 @@ test('EXPORT-E 导出长图全链路', async (t) => {
       assert.deepEqual(cerrs, [], `出现 console.error：${cerrs.join(' | ')}`);
     } finally {
       await page.close();
+    }
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * EXPORT-W：移动端「导出图片复制到微信」（用户报障第 5 条）
+ *
+ * 用户原话：「导出为图片并复制在 PC 端可以正常复制，在我的小米手机上
+ * 可以正常复制到系统自带笔记app 里，但复制到微信会话框没反应。
+ * 我记得之前老版本也出现过这个问题并且修复好了。」
+ * 用户 2026-10-07 拍板核查方向：「移动浏览器访问」。
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * 🔴🔴🔴 先把"这是不是一个 bug"这件事查清楚，而不是先写代码
+ *
+ * 老项目的修法（index.html:2904-2958 v7.7.0逐字）是一条**五档交付阶梯**，
+ * 每一档都还在 bj 里（export/render.ts:139deliverPng 同构）。
+ * 老项目那条注释把移动端的机制说得很直白：
+ *   「Android WebView 对图片写剪贴板长期不可用、`<a download>` 在壳内是哑弹」
+ * ⇒ **老项目认定移动端落不到剪贴板档**，于是后面三档才是手机上真正生效的出口。
+ *
+ * 而用户的现象是「能复制到系统自带笔记 App」⇒ **剪贴板档在他手机上其实是成功的**
+ *（系统笔记能读到剪贴板里的图）。可微信会话框不接受剪贴板里的图片
+ *   —— 这是微信自己的输入实现（它只认相册/自己的媒体），不是网页能控制的。
+ * ⇒ 于是阶梯停在第①档（clipboard）就 return 了，**永远到不了分享面板与预览层**，
+ *   而用户真正需要的出口（分享面板直发微信 / 预览层长按转发）恰恰在后面。
+ *
+ * 🔴🔴 这就是"移动浏览器访问"这条链路的**真因**（已由下面的 EXPORT-W02 实测钉住）：
+ *   剪贴板成功 ≠ 用户能把它送进微信，而阶梯把"成功"当成了终点。
+ *
+ * 修法（与老项目的差别，必须写清楚）：
+ *   老项目假设"移动端剪贴板不可用"，所以没这个问题；
+ *   bj 的用户实测"移动端剪贴板可用但没用"，所以必须给剪贴板档补一条**明示**：
+ *   触屏上剪贴板成功时，**额外打开全屏预览层**，让"长按转发给微信"这条路真的存在。
+ *   这不是推翻老项目阶梯 —— 阶梯顺序一分不变，只是在第①档之后**多开一个出口**。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) => {
+  const browser = h.browser();
+
+  await t.test('EXPORT-W01 🔴 触屏上下文里`(hover:none) and (pointer:coarse)` 必须为真（否则下面全是空转）', async () => {
+    // 🔴 这条是整组的**前提闸**。移动端专属行为若在桌面上下文里跑，
+    //   matchMedia 恒 false ⇒ 触屏分支永远走不到 ⇒ 测试恒绿而用户照旧被坑。
+    //   这就是 harness.mjs 里TOUCH_CTX 那段注释说的"测试骗人"的典型。
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expW01', PASS);
+    try {
+      const mq = await page.evaluate(() => ({
+        coarse: matchMedia('(pointer: coarse)').matches,
+        hoverNone: matchMedia('(hover: none)').matches,
+        both: matchMedia('(hover: none) and (pointer: coarse)').matches,
+      }));
+      assert.equal(mq.coarse, true, '触屏上下文里 pointer 必须是 coarse');
+      assert.equal(mq.hoverNone, true, '触屏上下文里 hover 必须是 none');
+      assert.equal(mq.both, true, '生产代码用的那条触屏判据必须为真');
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-W02 🔴🔴🔴 剪贴板成功时也必须开预览层（否则用户永远进不了微信）', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expW02', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('导出到微信验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+
+      // 🔴🔴 装一个**会成功**的剪贴板替身 —— 这正是用户手机上的真实情况
+      //   （「可以正常复制到系统自带笔记app 里」⇒ 剪贴板档成功）。
+      //   🔴 替身必须**忠实于外部规范**、绝不能忠实于我们的实现（判据纪律）：
+      //   这里模拟的是 WebClipboard 接口的契约（write 接受 ClipboardItem[] 并 resolve），
+      //   不是"我们希望它怎么表现"。
+      await page.evaluate(() => {
+        window.__W_CLIP_CALLS__ = [];
+        const blob = new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' });
+        // 真实内核的 write 是**立即 resolve**、内容在窗口内异步落地。
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: {
+            write: async (items) => {
+              window.__W_CLIP_CALLS__.push(
+                items.map((it) => Object.keys(it.types || {})),
+              );
+            },
+          },
+        });
+        window.ClipboardItem = class {
+          constructor(types) { this.types = types; }
+        };
+        void blob;
+      });
+
+      await page.tap('#exportImgBtn');
+
+      // 🔴🔴 核心判据：剪贴板**成功**之后，预览层也必须出现。
+      //   症状与用户原话一一对应：用户看到"已复制"，照着去微信粘贴，没反应，
+      //   而屏上根本没有一张可以长按的图。
+      await withTimeout(
+        page.waitForSelector('#imgPreviewMask', { timeout: 30_000 }),
+        35_000,
+        '剪贴板成功后也必须开预览层（触屏长按转发是唯一真出口）',
+      );
+      const st = await page.evaluate(() => ({
+        clip: window.__W_CLIP_CALLS__,
+        img: !!document.querySelector('#imgPreviewMask img'),
+        tips: Array.from(document.querySelectorAll('#imgPreviewMask p')).map((p) => p.textContent),
+      }));
+      // 前置自证：替身确实被调到了（否则上面那条 waitForSelector 可能只是等到了别的东西）
+      assert.equal(st.clip.length, 1, '剪贴板替身必须被调用一次（前置自证），实际=' + JSON.stringify(st.clip));
+      assert.deepEqual(st.clip[0], [['image/png']], '剪贴板里必须装的是 PNG');
+      assert.equal(st.img, true, '预览层里必须有图（用户要长按的就是它）');
+
+      // 🔴 预览层里那行触屏指引必须在（老项目那句没点名"转发给微信"）
+      const joined = st.tips.join(' | ');
+      assert.ok(
+        joined.includes('转发给朋友'),
+        '预览层必须有触屏指引「转发给朋友」，否则用户不知道要长按，实际=' + joined,
+      );
+      // 老项目那句泛用指引也必须留着（逐字）
+      assert.ok(
+        joined.includes('长按图片可保存或发送'),
+        '老项目那句泛用指引必须留着，实际=' + joined,
+      );
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-W03 🔴🔴 反向闸：桌面剪贴板成功时**不许**开预览层（老项目同款，别把桌面也改了）', async () => {
+    const page = await editorWithText(browser, 'expW03', '桌面不该开预览。');
+    try {
+      await page.evaluate(() => {
+        window.__W_CLIP_CALLS__ = [];
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: {
+            write: async (items) => {
+              window.__W_CLIP_CALLS__.push(items.length);
+            },
+          },
+        });
+        window.ClipboardItem = class {
+          constructor(types) { this.types = types; }
+        };
+      });
+      await page.click('#exportImgBtn');
+      // 桌面剪贴板成功 ⇒ 收场，不该再开预览层（老项目 index.html:2914 直接 return）
+      await withTimeout(
+        page.waitForFunction(() => (window.__W_CLIP_CALLS__ || []).length > 0, null, { timeout: 25_000 }),
+        30_000,
+        '桌面剪贴板替身应被调用',
+      );
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.equal(
+        await page.evaluate(() => document.getElementById('imgPreviewMask') !== null),
+        false,
+        '桌面剪贴板成功后不该开预览层（老项目 :2914 同款；桌面有 Ctrl+V，开预览是多余的打断）',
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('EXPORT-W04 🔴 触屏剪贴板被拒 → 仍必须落到分享/预览（阶梯不许被改坏）', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expW04', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('剪贴板被拒的回退验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      // 剪贴板全拒（老项目注释里说的"Android WebView 长期不可用"那种内核）
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: { write: async () => { throw new Error('not allowed'); } },
+        });
+        window.ClipboardItem = class {
+          constructor(types) { this.types = types; }
+        };
+      });
+      await page.tap('#exportImgBtn');
+      // 必须落到最后一档：全屏预览
+      await withTimeout(
+        page.waitForSelector('#imgPreviewMask', { timeout: 30_000 }),
+        35_000,
+        '剪贴板被拒后必须落到全屏预览（唯一不依赖权限的出口）',
+      );
+      assert.equal(
+        await page.evaluate(() => !!document.querySelector('#imgPreviewMask img')),
+        true,
+        '预览层里必须有图',
+      );
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-W05 🔴 成功文案按档位分档，且不许出现桌面专属的「Ctrl+V」', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expW05', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('成功文案验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      // 收集状态条上出现过的所有文案（它会一闪而过，必须全程监听）
+      const seen = await page.evaluate(async () => {
+        const out = [];
+        const mo = new MutationObserver(() => {
+          const el = document.querySelector('#uploadNote, .ns-note, #uploadStatus');
+          if (el) {
+            const t = (el.textContent || '').trim();
+            if (t && !out.includes(t)) out.push(t);
+          }
+        });
+        mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: { write: async () => {} },
+        });
+        window.ClipboardItem = class {
+          constructor(types) { this.types = types; }
+        };
+        document.getElementById('exportImgBtn').click();
+        await new Promise((r) => setTimeout(r, 12000));
+        mo.disconnect();
+        return out;
+      });
+      const joined = seen.join(' | ');
+      // 🔴 手机上没有 Ctrl+V 这个动作，给它就是给一句做不到的指引
+      assert.ok(
+        !joined.includes('Ctrl+V'),
+        '触屏成功文案里绝不许出现「Ctrl+V」（手机上没这个动作），实际=' + joined,
+      );
+      assert.ok(seen.length > 0, '导出过程中必须至少有一条状态提示（否则是"点了没反应"），实际=' + JSON.stringify(seen));
+    } finally {
+      await closeTouch(page);
     }
   });
 });

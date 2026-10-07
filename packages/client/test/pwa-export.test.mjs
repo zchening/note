@@ -174,9 +174,22 @@ test('EXP-W01 剪贴板档提示必须按平台分：手机没有 Ctrl+V 这个�
   // 另外两档两边一致
   assert.equal(COPY.exportOkMsgTouch('native'), COPY.exportOkMsg('native'));
   assert.equal(COPY.exportOkMsgTouch('share'), COPY.exportOkMsg('share'));
-  // 触屏判据必须是媒体查询（不用 UA sniff —— 国产内核 UA 常年不准）
+  // 🔴 触屏判据必须是媒体查询（不用 UA sniff —— 国产内核 UA 常年不准）。
+  // 🔴🔴 判据跟着 2026-10-07 那次重构改了指向：媒体查询字面量原先在
+  //   `export/index.ts` 里自己写了两遍（文案分档一处、预览层一处），
+  //   现在收敂到全项目唯一出处 `platform/touch.ts` 的 `isTouchDevice()`。
+  //   ⇒ 判据必须查**唯一出处**，否则这次重构会被判红，而它其实没削弱任何东西。
+  //   反向闸同时钉住"export/index.ts 不许自己再写一份"：
+  //   同一判据两处写法，matchMedia 缺失时行为会漂（`isTouchDevice` 吞异常、
+  //   字面量版会抛），迟早出现"文案说触屏、指引没加"这类症状。
+  const touch = readSrc('platform/touch.ts');
+  assert.match(touch, /\(hover: none\) and \(pointer: coarse\)/, '触屏判据要用同一套媒体查询');
   const idx = readSrc('export/index.ts');
-  assert.match(idx, /\(hover: none\) and \(pointer: coarse\)/, '触屏判据要用同一套媒体查询');
+  assert.ok(
+    !/\(hover: none\) and \(pointer: coarse\)/.test(idx),
+    'export/index.ts 不许自己再写一份触屏媒体查询（口径会漂）',
+  );
+  assert.match(idx, /isTouchDevice\(\)/, 'export/index.ts 必须走唯一出处 isTouchDevice()');
 });
 
 test('EXP-W02 全屏预览层必须给触屏一条"怎么进微信"的指引', () => {
@@ -188,11 +201,63 @@ test('EXP-W02 全屏预览层必须给触屏一条"怎么进微信"的指引', (
   // 🔴 反向：触屏指引不许只说"发送"却不点名去哪儿 —— "长按可发送"用户不知道发给谁
   assert.match(COPY.exportPreviewTipTouch, /长按/);
   const idx = readSrc('export/index.ts');
-  // 只在触屏加这一行（桌面端有分享面板与 Ctrl+V，加了是噪音）
-  assert.match(idx, /if \(touch\) box\.appendChild\(wechatTip\)/, '触屏才追加这行');
+  // 只在触屏加这一行（桌面端有分享面板与 Ctrl+V，加了是噪音）。
+  // 🔴🔴🔴 这条判据翻过两次车，两次都是**恒绿**，记录在此免得再犯：
+  //   ① 用 `lastIndexOf('isTouchDevice()')` + 找 `}` ⇒ 命中的是文件里**另一处**
+  //      isTouchDevice()（文案分档那行），位置关系是假的，把追加挪出 if 块也不红。
+  //   ② 改成从追加处**往前数花括号配平** ⇒ 同样恒绿。
+  //      真因：`const btnRow = document.createElement('div')` 这类**同一行**自带
+  //      一对花括号，逐字符回溯在 `{` 分支里先撞上它们，配平数错一位。
+  //   ⇒ 手写括号解析器在这个缩进风格下不可靠。改成**只取函数体**再判：
+  //      先切到 `showPreview` 的函数体（去掉此前一切代码），
+  //      块内出现 `}` 之前必须已出现 wechatTip 的追加 —— 这是纯字符串事实，
+  //      不需要解析嵌套。
+  const fnStart = idx.indexOf('export function showPreview');
+  assert.ok(fnStart > 0, '找不到 showPreview（判据自身失效，不许静默通过）');
+  const body = idx.slice(fnStart);
+  const appendAt = body.indexOf('box.appendChild(wechatTip)');
+  assert.ok(appendAt > 0, 'wechatTip 必须被追加进预览层');
+  const blockEnd = body.indexOf('\n}', appendAt);
+  assert.ok(blockEnd > 0, '找不到 showPreview 的收尾');
+  // 从函数体开头到块结束之间，追加语句必须与门控 if 处在**同一层**
+  //（同层 = 中间没有别的 `if (...) {` 把深度带下去）。
+  const head = body.slice(0, appendAt);
+  const gates = head.match(/if\s*\(/g) || [];
+  assert.equal(
+    gates.length,
+    1,
+    'wechatTip 追加必须只受一个 if 门控（当前读到 ' + gates.length + ' 个）',
+  );
+  assert.match(
+    head.slice(head.lastIndexOf('if (')),
+    /^if\s*\(\s*isTouchDevice\(\)\s*\)\s*\{/,
+    '唯一的那个门控必须是 isTouchDevice()',
+  );
+  // 🔴 门控行之后到追加语句之间，只允许"构造 wechatTip"的代码 ——
+  //   绝不许再出现别的 if（那说明追加已落到别的分支里，或门控早已闭合）。
+  //   判据不许钉"门控行紧邻追加"：中间隔着三行构造是正常的。
+  const afterGate = head.slice(head.lastIndexOf('if ('));
+  assert.equal(
+    (afterGate.slice(1).match(/\bif\s*\(/g) || []).length,
+    0,
+    '门控之后不许再出现新的 if（追加可能已落在门控之外）',
+  );
+  // 🔴🔴 最终判据：比门控**深一层**。
+  //   前三版都恒绿过（lastIndexOf / 括号配平 / if 计数），共同原因是
+  //   它们都在判"结构关系"，而"追加在不在 if 块内"这件事在缩进风格统一的
+  //   仓库里由**缩进层级**直接给出，且不会因为中间隔着几行构造代码而失真：
+  //   块内 4 空格，门控 2 空格，块外（函数体层）也是 2 空格。
+  //   把追加挪到 btnRow 那行（块外）时，这一行缩进从 4 变 2 ⇒ 判据转红（已实测）。
+  const lines = body.split('\n');
+  const gateLine = lines.findIndex((l) => /if\s*\(\s*isTouchDevice\(\)\s*\)/.test(l));
+  const appendLine = lines.findIndex((l) => l.includes('box.appendChild(wechatTip)'));
+  assert.ok(gateLine >= 0 && appendLine > gateLine, '门控必须在追加之前');
+  const indentOf = (s) => (s.match(/^ */) || [''])[0].length;
+  const gateIndent = indentOf(lines[gateLine]);
+  const appendIndent = indentOf(lines[appendLine]);
   assert.ok(
-    !/box\.appendChild\(wechatTip\);\s*\n\s*}/.test(idx.replace(/if \(touch\)[^\n]*/, '')),
-    'wechatTip 追加必须受 touch 门控',
+    appendIndent > gateIndent,
+    `wechatTip 追加必须缩进在 isTouchDevice() 块内（门控缩进 ${gateIndent}，追加缩进 ${appendIndent}）`,
   );
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "notesync-bj",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "private": true,
   "description": "NoteSync bj — 端到端加密笔记 PWA（模型 JSON 真源 + Lexical）",
   "license": "UNLICENSED",

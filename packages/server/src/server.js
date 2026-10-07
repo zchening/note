@@ -34,6 +34,9 @@ const PORT = Number(process.env.NS_BJ_PORT || 8090);
 const APP_DIR = path.resolve(__dirname, '..', '..', '..');
 const DATA_DIR = process.env.NOTESYNC_BJ_DATA_DIR || path.join(APP_DIR, 'data');
 const WWW_DIR = process.env.NOTESYNC_BJ_WWW || path.join(APP_DIR, 'www');
+// 🔴 OTA 元数据与 APK 的根目录。默认值与改动前逐字节一致（生产行为不变），
+//   单独可覆盖是为了让测试能隔离 deploy/ —— 否则判据只能往真实仓库写假 APK。
+const DEPLOY_DIR = process.env.NOTESYNC_BJ_DEPLOY || path.join(APP_DIR, 'deploy');
 const APP_VERSION = process.env.NS_BJ_VERSION || '0.0.0-dev';
 const BUILD_DATE = process.env.NS_BJ_BUILD_DATE || 'unknown';
 
@@ -325,7 +328,7 @@ async function route(req, res) {
 
   /* ---------- App 升级元数据（App 唯一查新版的地方） ---------- */
   if (method === 'GET' && p === '/api/latest') {
-    const f = path.join(APP_DIR, 'deploy', 'latest_app.json');
+    const f = path.join(DEPLOY_DIR, 'latest_app.json');
     try {
       const txt = await fsp.readFile(f, 'utf8');
       res.writeHead(200, {
@@ -630,6 +633,60 @@ async function route(req, res) {
       }
     }
     return sendJson(res, 405, { error: 'method not allowed' });
+  }
+
+  /* ---------- APK 直下（v9.3.2 同款，逻辑照搬老项目 server.js:685-728） ----------
+   *
+   * 🔴 为什么必须有本路由：bj 的 App 是 Capacitor 壳，`capacitor.config.json` 的
+   *   `server.url` 指向 https://bj.xuyinji.com.cn —— 壳加载**线上站**，网页体验随
+   *   www/ 部署即时生效（这正是"体验素材与老版本一致"的前提）。但壳自身的
+   *   在线升级（OTA）要去哪儿下 APK？原生 downloadApk 只校验 https 不锁域名，
+   *   所以由本路由直出 /dl/*.apk，无需改 Caddy、无需重编壳。
+   *
+   * 🔴🔴 Range 断点续传是**必备**不是加分项：安卓 DownloadManager 在低带宽
+   *   （实测 3Mbps）下靠 Range 分段续传，老项目踩过"续传跨发版读到新旧混装字节"
+   *   导致 packageInfo is null 的死循环。故新版本走**固定名 /dl/vX.Y.Z.apk
+   *   （发版上传、永不覆盖）**，latest_app.json 的下载 URL 指向它，URL 内容不可变。
+   *   同时保留 /dl/latest.apk（覆盖式）兼容旧壳与手输链接。
+   *
+   * 🔴 文件名走严格白名单正则，无路径穿越面（照搬老项目，不自己"优化"）。
+   */
+  const dlMatch = /^\/dl\/(latest|v\d+(?:\.\d+)*)\.apk$/.exec(p);
+  if (dlMatch && (method === 'GET' || method === 'HEAD')) {
+    const fname = dlMatch[1] + '.apk';
+    const f = path.join(DEPLOY_DIR, 'apk', fname);
+    let st;
+    try { st = await fsp.stat(f); } catch { return sendJson(res, 404, { error: 'no apk' }); }
+    const total = st.size;
+    const baseHdr = {
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Disposition': 'attachment; filename="NoteSync-' + fname + '"',
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-cache',
+      'Last-Modified': st.mtime.toUTCString(),
+    };
+    const rm = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+    if (rm) {
+      let start = rm[1] === '' ? null : parseInt(rm[1], 10);
+      let end = rm[2] === '' ? null : parseInt(rm[2], 10);
+      // bytes=-N  = 末尾 N 字节（后缀区间）
+      if (start === null && end !== null) { start = Math.max(0, total - end); end = total - 1; }
+      if (start === null) start = 0;
+      if (end === null || end >= total) end = total - 1;
+      if (start > end || start >= total) {
+        res.writeHead(416, Object.assign({ 'Content-Range': 'bytes */' + total }, baseHdr));
+        return res.end();
+      }
+      res.writeHead(206, Object.assign({
+        'Content-Range': 'bytes ' + start + '-' + end + '/' + total,
+        'Content-Length': String(end - start + 1),
+      }, baseHdr));
+      if (method === 'HEAD') return res.end();
+      return fs.createReadStream(f, { start, end }).pipe(res);
+    }
+    res.writeHead(200, Object.assign({ 'Content-Length': String(total) }, baseHdr));
+    if (method === 'HEAD') return res.end();
+    return fs.createReadStream(f).pipe(res);
   }
 
   /* ---------- 静态资源 ---------- */

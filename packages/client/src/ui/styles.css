@@ -252,11 +252,77 @@ svg .gf { fill: var(--accent); stroke: none; }
   opacity: 1;
 }
 .lrow button:disabled:hover { opacity: 1; }
-.warn { margin-top: 8px; font-size: 12px; color: var(--danger); }
+/* 🔴🔴🔴 落地页入场动画（用户报障第 6 条「刷新时没有从上到下依次出现的效果」）。
+   老项目 index.html:550-559 + :586 原文：
+     #landing>*{animation:rise .7s cubic-bezier(.2,.7,.3,1) both}
+     #landing>*:nth-child(2){animation-delay:.06s} … :nth-child(9){animation-delay:.48s}
+     @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+   🔴 为什么用 `#landing .landing-in > *` 而不是抄老项目的 `#landing > *`：
+     bj 多一层 `.landing-in`（见上面 `display:contents` 那段注释），
+     `#landing > *` 只会命中 **1 个** `.landing-in` 本身 —— 而 `display:contents`
+     的元素不生成盒子，动画对它**完全无效果**（实测 animationName 能读到 rise，
+     但用户眼前什么都不会动 —— 这类"声明在、效果无"最难查，必须钉子节点）。
+   🔴 nth-child 步进必须落在 `.landing-in` 的子节点上。老项目 `#landing` 下是 9 个子节点，
+     bj 的 `.landing-in` 下同样是 9 个（logo/h1/sub/lrow/warn/lurl/eggtip/lscan-row/scanMsg/trust
+     —— 注意 bj 把 .lscan 包进了 .lscan-row 以复刻老项目的 .scan-row 26px 上边距，
+     所以子节点数与老项目一致，步进序号才对得上）。 */
+#landing .landing-in > * { animation: nsLandingRise .7s cubic-bezier(.2, .7, .3, 1) both; }
+#landing .landing-in > *:nth-child(1) { animation-delay: 0s; }
+#landing .landing-in > *:nth-child(2) { animation-delay: .06s; }
+#landing .landing-in > *:nth-child(3) { animation-delay: .12s; }
+#landing .landing-in > *:nth-child(4) { animation-delay: .18s; }
+#landing .landing-in > *:nth-child(5) { animation-delay: .24s; }
+#landing .landing-in > *:nth-child(6) { animation-delay: .30s; }
+#landing .landing-in > *:nth-child(7) { animation-delay: .36s; }
+#landing .landing-in > *:nth-child(8) { animation-delay: .42s; }
+#landing .landing-in > *:nth-child(9) { animation-delay: .48s; }
+/* 🔴 命名用 nsLandingRise 而不是老项目的 rise：
+     `rise` 这个名字太通用，撞上别的库的同名 keyframes 会静默串味（@keyframes 全局作用域）。
+     值与老项目逐字一致（from opacity0+translateY(10px) → to opacity1+none）。 */
+@keyframes nsLandingRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+/* 🔴🔴 警示行逐值抄老项目 index.html:574
+     `#landing .warn{color:#C0453E;font-size:12px;margin:14px 0 0;letter-spacing:.04em}`
+   bj 原先是 `margin-top:8px` 且**整行无字距** —— 字距这条是"文案字体不一样"里最容易被忽略的一项：
+   12px × .04em = 0.48px，字号小的时候不写几乎看不出来，但整行的字距节奏会变。
+   ⚠️ 颜色仍走 var(--danger) 而非硬编码 #C0453E：老项目那行是被三处反色覆盖块
+     （:1094/:1196）覆写的，硬编码会绕过主题契约（bj 的判据 S4-T7 明令颜色只允许一个出处）。 */
+#landing .warn { color: var(--danger); font-size: 12px; margin: 14px 0 0; letter-spacing: .04em; }
 .hidden { display: none !important; }
-.lurl { margin-top: 10px; font-size: 12px; color: var(--muted);
-        font-family: var(--mono); word-break: break-all; min-height: 1em; }
-.legghint { margin-top: 4px; font-size: 12px; color: var(--accent); min-height: 1em; }
+/* 🔴🔴🔴 网址预览行逐值抄老项目 index.html:583-584
+     `#landing .urlline{color:var(--muted);font-size:12.5px;margin:16px 0 0;
+        line-height:1.7;letter-spacing:.03em;max-width:340px;word-break:break-all}`
+     `#landing .urlline .u-name{color:var(--accent);font-weight:600;letter-spacing:.02em}`
+   bj 改前实测：12px / letter-spacing:normal / line-height:19.2px / margin-top:10px / max-width:none，
+   而且**整行是一个纯文本节点** ⇒ 笔记名拿不到金黄（用户报障："老版本笔记名是金黄色"）。
+   🔴 max-width:340px 不能省：老项目整行锁 340 与输入行同宽，两侧留白相等；
+     不写的话长网址会拉满整屏，视觉重心整个偏掉。 */
+#landing .lurl {
+  margin: 16px 0 0; color: var(--muted);
+  font-size: 12.5px; line-height: 1.7; letter-spacing: .03em;
+  max-width: 340px; word-break: break-all;
+}
+#landing .lurl .u-name { color: var(--accent); font-weight: 600; letter-spacing: .02em; }
+/* 🔴🔴 彩蛋提示行逐值抄老项目 index.html:572-573
+     `#landing .eggtip{margin:12px 0 0;max-width:340px;width:100%;font-size:11px;
+        line-height:1.7;letter-spacing:.04em;color:var(--muted)}`
+     `#landing .eggtip b{color:var(--accent);font-weight:600}`
+   bj 原先是 `margin-top:4px;font-size:12px;color:var(--accent);min-height:1em` ——
+   **整行金黄**（老项目整行 muted，只有 <b> 门牌名金黄）、字号大一号、无限宽、无字距，
+   而且用 min-height 硬撑空行。老项目初始就带 hidden，空行压根不占位 ——
+   用 min-height 撑会在扫码胶囊上方多出一段空白，这正是"元素位置不一样"的一处来源。 */
+#landing .legghint {
+  margin: 12px 0 0; max-width: 340px; width: 100%;
+  color: var(--muted); font-size: 11px; line-height: 1.7; letter-spacing: .04em;
+}
+#landing .legghint b { color: var(--accent); font-weight: 600; }
+/* 🔴 扫码入口上方 26px（老项目 index.html:576 `#landing .scan-row{margin:26px 0 0}`）。
+   bj 此前把 .lscan 直接挂成 .landing-in 的子节点、没有任何上边距 ⇒
+   扫码胶囊紧贴上一行，一眼就"位置不对"。这里用一层 .lscan-row 复刻老项目的壳。 */
+#landing .lscan-row { margin: 26px 0 0; }
 .lscan {
   display: inline-flex; align-items: center; gap: 8px;
   color: var(--muted); font-size: 13px; letter-spacing: .1em;
@@ -274,15 +340,37 @@ svg .gf { fill: var(--accent); stroke: none; }
   display: flex; justify-content: center;
   color: var(--muted); font-size: 11.5px; letter-spacing: .05em;
   transition: opacity .25s ease;
-  /* 🔴 fill-mode 必须 backwards：入场动画的 to 帧 opacity:1 若被both 永久锁死，
-     聚焦输入时的淡出就被压过了（同位浮层动画覆盖动画的老事故）。 */
-  animation-fill-mode: backwards;
 }
-/* 老项目不用 flex gap 于 .trust 本身（老内核丢 gap 会让三图标粘连），margin 兜底 */
-.trust > span { display: flex; flex-direction: column; align-items: center;
+/* 🔴🔴🔴 入场动画的 fill-mode 补丁必须**单独一条、且特异性不低于入场规则**。
+   老项目 index.html:586 把它塞在 `#landing .trust{…animation-fill-mode:backwards}` 里，
+   紧跟 `#landing>*{animation:rise … both}` 之后，靠**源码顺序**压过那个 both。
+
+   bj 这里不能只靠顺序：`#landing .landing-in > *` 是 **(1,1,0)**，
+   裸 `.trust` 只有 **(0,1,0)** ⇒ shorthand 里的 `both` **结构性压过**后续声明，
+   `animation-fill-mode: backwards` 被吃得干干净净（实测 VVW-23 红：读到 both）。
+
+   后果不是样式细节：both 会把 to 帧 `opacity:1` 在动画结束后**永久锁死**，
+   于是"聚焦输入时信任行淡出"这条老项目 v7.9.1 闸R2/R3 修过的行为**完全失效** ——
+   用户点了输入框，底部三行图标不下去、压住软键盘。
+   ⇒ 必须堆到与入场规则同分（老项目靠 ID，这里给 `#landing .trust` = (1,1,0)）且写在后面。
+   ⚠️ 同理 animation-delay：`.trust` 是 .landing-in 的**第 10 个**子节点 ——
+      bj 比老项目多一个内部用的 #landingScanMsg 警示位（老项目 grep landingScanMsg = 0 命中），
+      排在 `.lscan-row` 之后、`.trust` 之前。老项目"最后一行可见元素"的步进值是 **.48s**，
+      那是用户眼睛看到的收尾节奏 ⇒ 这里把 .trust 显式钉回 .48s。
+      两条 :nth-child(9) 与这条都是 .48s（并列而非递增），不影响"自上而下依次出现"：
+      用户在正常路径下只看得到一行，.trust 仍是最后落位的那一行。 */
+#landing .trust { animation-fill-mode: backwards; animation-delay: .48s; }
+/* 老项目不用 flex gap 于 .trust 本身（老内核丢 gap 会让三图标粘连），margin 兜底。
+   🔴 用 `#landing .trust > span` 而不是裸 `.trust > span`：老项目原文是
+   `#landing .trust>span`（带 ID）。若 bj 留成裸类名 (0,1,0)，
+   将来任何一条 (0,2,0) 的 `.landing-x span` 规则都能压过它 —— 与 VVW-20
+   栽的 `.ns-rem-off` 被 `.box button:not(.box-x)` 吃掉是同一类事故。 */
+#landing .trust > span { display: flex; flex-direction: column; align-items: center;
                 gap: 7px; margin: 0 13px; }
-.trust svg { width: 17px; height: 17px; color: var(--muted); display: block; }
-/* 聚焦输入时信任行淡出：给软键盘留出视觉空间（老项目 .trust-away） */
+#landing .trust svg { width: 17px; height: 17px; color: var(--muted); display: block; }
+/* 聚焦输入时信任行淡出：给软键盘留出视觉空间（老项目 .trust-away）。
+   🔴 这条必须能压过入场动画的 to 帧 opacity:1 —— 靠上面那条 backwards 兜底
+   （both 会把 to 帧锁死，backwards 不会）。反向判据在 VVW-23。 */
 .landing.trust-away .trust { opacity: 0; }
 
 /* ---------- 口令页 / 首页 ---------- */
@@ -957,7 +1045,21 @@ footer.ns-foot .dot.off { background: var(--danger); }
 /* 列表行：与主菜单同族的胶囊行（老项目 .fav-row index.html:456）。
    🔴 三列各自定宽：图标列 / 名字列 / 右箭头列 —— 与主菜单的"112px 标签列"是同一种
    「定宽起线齐」的排版纪律；改成自适应的话长短名会让右箭头列参差不齐。 */
-.list-row { display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+/* 🔴🔴🔴 `flex-wrap: wrap` 是 `.hist-preview{width:100%}` 能换行的**唯一前提**。
+   老项目 index.html:465 `.hist-item{display:flex;flex-wrap:wrap;align-items:center;…}`
+   —— 那个 wrap 就是"预览文本框落到按钮下方独占一行"的成因。
+
+   🔴 缺它的症状（用户报障第 3 条「老版本是在预览按钮下方出现一个文本框」）：
+     `.hist-preview` 的 `width:100%` 在 nowrap 的 flex 行里**不是"占满一行"**，
+     而是"作为一个 flex 项被压到剩余空间"——量出来 263.39px（行内容宽 366），
+     挤在时间戳右边成一条窄文本；`max-height:120px` 的滚动条也随之难触发。
+   量化实测（390×844）：老项目 flex-wrap=wrap、预览块占满行内容宽；
+   bj 改前 flex-wrap=nowrap、预览块被压到 263.39px。
+
+   ⚠️ 这一条**不能**靠"给 .hist-preview 加 flex:0 0 100%"绕过去：
+     那会让预览块脱离文档流里的行内布局，与老项目的换行机制不同，
+     且在多按钮行下的对齐会漂。照抄 wrap 是唯一正解。 */
+.list-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; box-sizing: border-box;
             width: 100%; padding: 10px 12px; margin-bottom: 6px;
             min-height: 42px; font-size: 14px;
             border: 1px solid var(--line); border-radius: 10px;
@@ -1301,14 +1403,42 @@ body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
   gap: 10px; font-size: 13px; line-height: 1.5; text-align: left; color: var(--fg);
   background: none; border: 0; border-radius: 0; padding: 0; }
 /* 行内取消键：老项目 index.html:283 `padding:4px 12px;font-size:12px;
-   border:1px solid var(--line);border-radius:8px`（描边小钮，非实心方块）。 */
-.ns-rem-off { flex: none; padding: 4px 12px; font-size: 12px; line-height: 1.5;
-  color: var(--fg); background: none; border: 1px solid var(--line);
+   border:1px solid var(--line);border-radius:8px`（描边小钮，非实心方块）。
+   🔴🔴🔴 光有上面这条声明**不够** —— 它会被弹窗通栏按钮规则吃掉。
+
+   量化实测（真浏览器读 computed，不是推断）：
+     命中该元素的规则里，`.box button:not(.box-x){width:100%;height:46px;
+       padding:0 14px;border-radius:10px;background:var(--fg);color:var(--bg);
+       font-size:15px;…}` 是 **(0,2,1)**，而本条 `.ns-rem-off` 只有 **(0,1,0)**
+     ⇒ 结构性压不过，关闭钮实际渲染成：深底白字、15px、padding 0 14px、圆角 10px、高 46px。
+     这正是用户报障第 4 条「关闭按钮颜色和老版本不一样」的成因。
+
+   老项目靠什么保住？它的对应声明挂在 **ID 级**选择器上：
+     `#remBoxList .rem-row button` = **(1,2,1)** —— 有 ID，稳压 (0,2,1)。
+   bj 的 DOM 里没有那个 ID（容器是 `.ns-rem-list`），所以必须**自己堆出等价特异性**。
+   ⇒ `.box .ns-rem-list .ns-rem-row button.ns-rem-off` = (0,4,2)，结构性压过，
+     且不依赖源码顺序（以后有人在后面再加一条 .box 按钮规则也打不回来）。
+   🔴 为什么不用 `.box button.ns-rem-off`：(0,2,1) 与被压的规则**同分**，
+     只能靠"写在后面"取胜 —— 源码顺序一改就静默失效，这条本项目栽过。 */
+.box .ns-rem-list .ns-rem-row button.ns-rem-off {
+  flex: none; width: auto; height: auto; min-height: 0;
+  padding: 4px 12px; font-size: 12px; line-height: 1.5; font-weight: 400;
+  letter-spacing: normal;
+  color: var(--fg); -webkit-text-fill-color: var(--fg);
+  background: none; border: 1px solid var(--line);
   border-radius: 8px; cursor: pointer;
   transition: border-color .2s ease;
-  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
-.ns-rem-off:hover { border-color: var(--muted); }
-.ns-rem-off:active { opacity: .7; }
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+/* hover/active/disabled 同样要压过通栏按钮规则（老项目 :284 `button:hover{border-color:var(--muted)}`，
+   以及 styles.css 里 `.box button:hover{opacity:.85}` / `:active{opacity:.8}` 这两条）。 */
+.box .ns-rem-list .ns-rem-row button.ns-rem-off:hover {
+  opacity: 1; background: none; border-color: var(--muted); color: var(--fg);
+}
+.box .ns-rem-list .ns-rem-row button.ns-rem-off:active { opacity: .7; }
+.box .ns-rem-list .ns-rem-row button.ns-rem-off:disabled {
+  background: none; border-color: var(--line); color: var(--muted); cursor: not-allowed;
+}
 /* 🔴 老项目 index.html:281 `#remBoxList:empty{display:none}` —— 空列表**整个隐藏**。
    漏了它：无提醒时那条 1px 上边框 +14px 上内边距仍在，
    于是"设置行"下方凭空多一道横线与一段空白，弹窗凭空高一截。

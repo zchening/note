@@ -112,7 +112,14 @@ test('S4-C5 顶栏 7 键 title 逐字一致（含全角括号）', () => {
 });
 
 test('S4-C6 彩蛋门牌提示句式', () => {
-  assert.equal(COPY.eggReservedTip('pet'), 'pet 是彩蛋门牌，不会新建笔记');
+  // 🔴 口径变更（用户报障第 6 条「文案和颜色和老版本不一样」）：
+  //   老项目 index.html:10187-10192 把提示行拆成**两段**——
+  //   `<b>/门牌名</b>` + 裸文字「 是彩蛋门牌，不会新建笔记」，
+  //   因为 `.eggtip b{color:var(--accent);font-weight:600}` 要求**只有门牌名金黄**。
+  //   合成一整句就没法单独上色，bj 此前正是整行同一颜色。
+  //   拼接后的整行文本（用户实际看到的）必须逐字等于老项目。
+  assert.equal(COPY.eggReservedTipSuffix, ' 是彩蛋门牌，不会新建笔记');
+  assert.equal(`/${'pet'}${COPY.eggReservedTipSuffix}`, '/pet 是彩蛋门牌，不会新建笔记');
 });
 
 /* ---------------- 2. 键位与菜单结构 ---------------- */

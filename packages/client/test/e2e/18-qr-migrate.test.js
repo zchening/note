@@ -68,6 +68,23 @@ async function typeBody(page, lines) {
   );
 }
 
+/**
+ * 等同步回落idle。
+ * 🔴🔴 为什么需要它：扫码落地会 `unlock` **重拉云端**再挂编辑器。
+ *   若本地输入还没推上去，重拉回来的就是**旧版本** ⇒ 未同步的编辑被覆盖。
+ *   那是同步本身的时序，不是被测功能的行为；不加这道闸，判据会红在
+ *   一个与「甲案分流」毫无关系的竞态上（第一版 BAK-M05 就这样误红过一次）。
+ *   判据要钉的是"分流对不对"，不是"同步快不快"。
+ */
+const waitSyncIdle = (page, ms = 20_000) =>
+  withTimeout(
+    page.waitForFunction(() => document.querySelector('#shell')?.dataset.syncState === 'idle', null, {
+      timeout: ms,
+    }),
+    ms + 5_000,
+    '等同步状态 idle',
+  );
+
 /** 生成换机码（走生产实现本体）。 */
 const makeCode = (page, pass = PASS) =>
   page.evaluate((p) => window.__NOTESYNC_MIGRATE_MAKE__(p), pass);
@@ -135,14 +152,43 @@ test('QR-M 扫码换机', async (t) => {
       await withTimeout(
         page.waitForFunction(() => {
           const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
-          // 🔴🔴 前缀是 nsfav1:（收藏备份码），**不是** nsbak1:。
-          //   老项目只有一个「扫码换机」，备份的就是收藏夹全部（v10.1.7 定稿）；
-          //   旧 bj 把它接成了"只打包当前这一篇"（nsbak1:），那才是与老项目不一致的地方。
-          //   恢复侧两者分流（handleScanRaw 先判 isFavBackupCode），前缀不能混。
-          return c.startsWith('nsfav1:');
+          const id = window.__NOTESYNC_BAK_ID__?.() ?? '';
+          // 🔴🔴 前缀断言已随**甲案**改写（用户 2026-10-07 拍板「复刻老项目甲案」）。
+          //   老项目 v10.1.4 的「扫码换机」出的是**备份笔记的配对链接**（约 86 字节 / 41 格），
+          //   清单加密后写进云端那一篇 —— 码长与篇数**彻底解耦**，
+          //   这正是用户报障第 2 条「密度比老版本大得多」的正解。
+          //   这里判两件事：① 备份篇名符合 `nsbak-[a-z0-9]{6}`（老项目 BAK_ID_RE 逐字）
+          //                  ② 码本身是**一条配对链接**（能被生产解析器收下）
+          //   🔴 旧断言钉的是 `nsfav1:` —— 那是 bj 自己的旧路线（清单直接进码），
+          //     它已被甲案取代。旧码仍能解（isFavBackupCode 分支还在），
+          //     但**出码**不再走那条，所以这条判据必须跟着改。
+          return /^nsbak-[a-z0-9]{6}$/.test(id) &&
+            (window.__NOTESYNC_PARSE_PAIR__?.(c)?.ok === true);
         }, { timeout: 20_000 }),
         25_000,
         '本机已解锁时点扫码换机应直接出码（免口令，老项目同款）',
+      );
+      // 🔴 老项目 :9186 那行「备份笔记：nsbak-xxxxxx」是**独立一行**（#bakBakId），
+      //   不是拼进指引句。屏上用户要靠它对号/手输，混在一句里就找不到了。
+      const bakIdLine = await page.evaluate(() => {
+        const el = document.getElementById('migrateBakId');
+        return { text: el?.textContent ?? '', hidden: el ? el.classList.contains('hidden') : true };
+      });
+      assert.equal(bakIdLine.hidden, false, '出码后「备份笔记：」那一行必须可见（老项目 #bakBakId）');
+      assert.ok(
+        /^备份笔记：nsbak-[a-z0-9]{6}$/.test(bakIdLine.text),
+        '那一行必须逐字是「备份笔记：nsbak-xxxxxx」，实际=' + bakIdLine.text,
+      );
+      // 🔴 引导句必须说"篇名"而不是"密钥"：bj 的清单里**没有密钥**
+      //   （CryptoKey 是 extractable:false）。照抄老项目的"密钥都写进它"是谎报。
+      const leadText = await page.textContent('#migrateMask .hint');
+      assert.ok(
+        String(leadText || '').includes('篇名写进它'),
+        '引导句应说「篇名写进它」，实际=' + String(leadText || ''),
+      );
+      assert.ok(
+        !String(leadText || '').includes('密钥都写进它'),
+        '清单里没有密钥，引导句不许说"密钥都写进它"，实际=' + String(leadText || ''),
       );
       // 🔴 直出码后「取消」键是**隐藏**的（panel.ts:342 `renderCode` 里
       //   passWrap/go/cancel 一起 hidden，outWrap 接管 —— 与老项目 :9163 同款：
@@ -600,7 +646,11 @@ test('QR-M 扫码换机', async (t) => {
       await withTimeout(
         page.waitForFunction(() => {
           const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
-          return c.startsWith('nsfav1:');
+          // 🔴 同 QR-M01：出码已改走甲案（备份笔记链接），不再钉 `nsfav1:`。
+          //   判据钉的是**用户可见的形态**（配对链接 + 合法的备份篇名），
+          //   不是某个内部前缀 —— 前缀是实现细节，改一次就该改一次判据。
+          return /^nsbak-[a-z0-9]{6}$/.test(window.__NOTESYNC_BAK_ID__?.() ?? '') &&
+            (window.__NOTESYNC_PARSE_PAIR__?.(c)?.ok === true);
         }, { timeout: 20_000 }),
         25_000,
         '记忆解锁时点扫码换机应直接出码',
@@ -938,6 +988,656 @@ test('QR-F 收藏备份码（扫码换机备份全部收藏夹）', async (t) =>
       assert.ok(tip.includes('看不清就点一下码'), '末尾那半句必须有，实际=' + tip);
       // 🔴 反向：无 skipped 时不许凭空冒出空括号（老项目是三元，不是无条件拼）
       assert.ok(!tip.includes('（'), '无 skipped 时不许出现空括号，实际=' + tip);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 甲案：清单写进云端一篇「备份笔记」，二维码只装它的链接（BAK-M 系列）
+ *
+ * 用户报障第2 条原文：「新版生成的二维码密度要比老版本密度大得多，
+ * 我担心太密不容易识别出来」。
+ * 用户 2026-10-07 拍板：「复刻老项目甲案（推荐）」。
+ *
+ * 🔴 老项目权威事实（notesync/index.html，只读，逐行标注）：
+ *   - :801引导句「换机备份要用口令为专用的<b>备份笔记</b>派生密钥：<br>…」
+ *   - :805 出码区是**两个独立**的 `p.qr-warn`：`#bakBakId`（备份笔记名）+ `#bakTip`（指引）
+ *   - :817-827 `#bakRestMask` 只读恢复卡（清单绝不进 contenteditable，甲案闸①）
+ *   - :8966-8968 字码表 'abcdefghijkmnpqrstuvwxyz23456789'（去 l/o/1/0）
+ *   - :9043-9062 写云端三步顺序：①盐取自服务端 ②建档先写"空正文+带盐" ③解不开就作废本机钥
+ *   - :9186-9190 出码后那两行文案
+ *   - :9220-9234 enterBackupMode：只读卡、刻意不补焦点
+ *   - :9262 hadBefore 必须在**写入前**取（否则「覆盖 N 篇」成永远在喊的假警报）
+ *   - :9265-9267 合并顺序：**备份清单在前，本机已有并入尾部**
+ *
+ * 🔴🔴 为什么这组必须与 QR-F 分开（和 QR-F 自己那条注释同款理由）：
+ *   QR-F 恢复的是「清单码 → 收藏夹」，恢复面是**收藏夹**；
+ *   甲案恢复的是「备份笔记 → 只读卡 → 收藏夹」，中间多一层**只读卡**。
+ *   那层只读卡正是误编辑三闸的第①闸，它一旦漏掉，症状是
+ *   "备份清单变成一篇可编辑的普通笔记，用户改掉它，下次备份的就是改过的清单" ——
+ *   没有任何一条 QR-F 判据能钉住它。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('BAK-M 甲案换机备份（清单进云端备份笔记，码只装链接）', async (t) => {
+  const browser = h.browser();
+
+  await t.test('BAK-M01 🔴🔴🔴 码长与篇数解耦：备份 1 篇与备份多篇，二维码载荷**完全一致**', async () => {
+    // 🔴🔴 这是用户报障本身的直接判据。旧路线（清单进码）码长随篇数单调增长，
+    //   量化结果：1篇 299B/13版/69格 → 100篇 2043B/41版/169格。
+    //   老项目甲案恒定约 86B / 41 格。
+    // 判据做法：**同一台页面**先把收藏从 1 篇加到 3 篇，各出一次码，
+    //   断言两次码**逐字相等**（载荷恒定），且都不含清单内容。
+    const page = await openEditor(browser, h.baseUrl(), 'bakm01a', PASS);
+    let code1;
+    let id1;
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r1 = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r1.ok, '收藏 1 篇时应能出码，实际=' + JSON.stringify(r1));
+      assert.equal(r1.count, 1, '当次清单应是 1 篇，实际=' + r1.count);
+      code1 = await getCode(page);
+      id1 = r1.bakId;
+
+      // 加到 3 篇（同一台页面、同一个备份槽 ⇒ 篇数是唯一变量）
+      for (const n of ['bakm01b', 'bakm01c']) {
+        const p2 = await openEditor(browser, h.baseUrl(), n, PASS);
+        try {
+          await waitEditor(p2);
+          await favCurrent(p2);
+        } finally {
+          await p2.close();
+        }
+      }
+      // 🔴 收藏是**本机**数据：上面两台是别的 context，收藏不在这一台的 localStorage。
+      //   所以直接写本机收藏键（生产同一个键，见 07-fav 的 readFavs）。
+      await page.evaluate(() => {
+        const cur = JSON.parse(window.localStorage.getItem('notesync_bj_favs') || '[]');
+        window.localStorage.setItem(
+          'notesync_bj_favs',
+          JSON.stringify([...cur, 'bakm01b', 'bakm01c']),
+        );
+      });
+      const r3 = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r3.ok, '收藏 3 篇时应能出码，实际=' + JSON.stringify(r3));
+      assert.equal(r3.count, 3, '当次清单应是 3 篇，实际=' + r3.count);
+      const code3 = await getCode(page);
+      const id3 = r3.bakId;
+
+      // 🔴 备份槽是复用的（老项目 :9091-9094同款）⇒ 篇名应当**相同**。
+      //   不同的话，说明我们每次都新建了一篇备份笔记，云端会堆一堆孤儿。
+      assert.equal(id3, id1, '同一台机器重复备份应复用同一个备份笔记篇名（老项目备份槽）');
+      // 🔴🔴 核心承诺：载荷逐字恒定。篇数翻三倍，码一个字都不许变。
+      assert.equal(code3, code1, '二维码载荷必须与篇数无关（这正是用户报障第2 条的正解）');
+      // 反向：码里绝不许出现明文篇名（清单是加密的，篇名本身也是用户内容）
+      assert.ok(!code1.includes('bakm01a'), '码里不许出现明文篇名');
+      // 反向：也不许是旧路线的清单码前缀
+      assert.ok(!code1.startsWith('nsfav1:'), '出码不该再走旧路线的清单码');
+      assert.ok(!code1.startsWith('nsbak1:'), '出码不该是单篇换机码');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M02 🔴🔴 云端确实有那篇备份笔记，且清单在里面（不是只在本地）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'bakm02src', PASS);
+    let bakId;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok, '应能出码');
+      bakId = r.bakId;
+      assert.match(String(bakId), /^nsbak-[a-z0-9]{6}$/, '备份篇名形状不对（老项目 BAK_ID_RE 逐字）：' + bakId);
+    } finally {
+      await src.close();
+    }
+
+    // 🔴 从**另一台页面**直读服务端：那篇笔记必须真实存在、且是**信封**（密文）。
+    //   这一步不可省：前面所有判据都在同一台机器上，"写云端"这件事本身
+    //   可以完全没发生（写本地内存也能让判据全绿）。
+    const dst = await openEditor(browser, h.baseUrl(), 'bakm02dst', PASS);
+    try {
+      await waitEditor(dst);
+      const env = await dst.evaluate(async (id) => {
+        const res = await fetch('/api/note/' + encodeURIComponent(id), {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+        });
+        return { status: res.status, body: await res.text() };
+      }, bakId);
+      assert.equal(env.status, 200, '云端应能取到那篇备份笔记，实际=' + env.status);
+      // 零知识红线：服务端只见密文
+      const o = JSON.parse(env.body);
+      assert.equal(typeof o.ct, 'string', '服务端存的应是密文 ct');
+      assert.equal(typeof o.iv, 'string', '服务端存的应是 iv');
+      assert.equal(typeof o.kdf?.salt, 'string', '信封必须带盐（老项目 :9048 建档先落盐）');
+      // 🔴 反向：云端那份绝不许是明文清单
+      assert.ok(!env.body.includes('bakm02src'), '云端那篇绝不许出现明文篇名');
+      assert.ok(!/"k"|"key"|"rawKey"|"aesKey"/i.test(env.body), '云端那篇绝不许装密钥材料');
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('BAK-M03 🔴🔴🔴 扫到备份笔记链接 → 只读恢复卡，清单**绝不进 contenteditable**（甲案闸①）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'bakm03src', PASS);
+    let code;
+    let bakId;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+      bakId = r.bakId;
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'bakm03dst', PASS);
+    try {
+      await waitEditor(dst);
+      // 🔴 走**生产扫码落地链路**（不是直接调内部函数）。
+      //   headless 没有摄像头，__NOTESYNC_SCAN_RAW__ 是那条链路的正式入口。
+      assert.equal(
+        await dst.evaluate(() => typeof window.__NOTESYNC_SCAN_RAW__),
+        'function',
+        '扫码落地钩子必须存在（否则下面测的是另一条路）',
+      );
+      await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), code);
+      await withTimeout(
+        dst.waitForSelector('#bakRestMask', { timeout: 15_000 }),
+        20_000,
+        '等只读恢复卡',
+      );
+
+      // 🔴🔴 闸①的核心断言：**编辑器根本没挂**。
+      //   老项目 enterBackupMode 至少还要先 contentEditable=false，
+      //   bj 直接不挂 —— 那比"挂了再锁"少一整条漏锁的路径。
+      //
+      //   🔴🔴 判据自身踩过的坑（写下来防止有人"简化"回去）：
+      //   我第一版写成 `document.getElementById('editor-host') === null`，
+      //   而这条恒红 —— 因为 `openEditor` 打开的是一个**已经挂着编辑器**的页面
+      //   （它打开的是 `bakm03dst` 这篇自己的笔记，编辑器早就在了）。
+      //   扫到备份链接后编辑器**仍然在**（那篇笔记没被卸载，也没被替换）。
+      //   ⇒ "编辑器不存在"根本不是这条功能的判据；
+      //     真正的判据是**编辑器里没有清单**，且真源没被换成备份清单。
+      //   下面三条按这个口径钉：恢复卡在 / 清单不在可编辑区 / 真源仍是本机那篇。
+      const ed = await dst.evaluate(() => ({
+        exists: document.getElementById('editor-host') !== null,
+        text: document.getElementById('editor-host')?.textContent ?? '',
+        doc: JSON.stringify(window.__NOTESYNC_DOC__?.() ?? null),
+      }));
+      assert.ok(
+        !ed.text.includes('bakm03src'),
+        '清单里的篇名绝不许出现在可编辑区（甲案闸①），实际可编辑区文本=' + ed.text.slice(0, 120),
+      );
+      // 🔴 真源必须是**本机那篇自己的**（bakm03dst），绝不能被换成备份清单
+      const docObj = ed.doc ? JSON.parse(ed.doc) : null;
+      const blocks = docObj?.blocks ?? [];
+      const allText = blocks.map((b) => b.text || '').join('');
+      assert.ok(
+        !allText.includes('bakm03src') && !allText.includes('notesync-bak:1:'),
+        '真源绝不许被换成备份清单（甲案闸①），实际=' + allText.slice(0, 120),
+      );
+
+      // 卡里的内容逐项对老项目 :817-827
+      const card = await dst.evaluate(() => ({
+        title: document.querySelector('#bakRestMask h1.qr-title')?.textContent ?? '',
+        summary: document.getElementById('bakRestSummary')?.textContent ?? '',
+        list: document.getElementById('bakRestList')?.textContent ?? '',
+        warn: document.querySelector('#bakRestMask .ns-qr-warn')?.textContent ?? '',
+        go: document.getElementById('bakRestGo')?.textContent ?? '',
+        cancel: document.getElementById('bakRestCancel')?.textContent ?? '',
+        listStyle: document.getElementById('bakRestList')?.style.cssText ?? '',
+      }));
+      assert.equal(card.title, '换机备份', '标题应是「换机备份」（老项目 :819 逐字）');
+      assert.ok(card.summary.includes('含 1 篇笔记'), '摘要应报"含 N 篇笔记"，实际=' + card.summary);
+      assert.ok(card.summary.includes('生成于'), '摘要应含生成时间（老项目 :9227），实际=' + card.summary);
+      assert.equal(card.list, 'bakm03src', '清单应逐篇列出（老项目 #bakRestList）');
+      // 🔴 老项目那行内联样式逐字（少任何一条的症状是"清单挤成一片/撑破弹窗"）
+      for (const frag of [
+        'max-height: 28vh',
+        'overflow: auto',
+        'text-align: left',
+        'font-size: 12.5px',
+        'line-height: 1.9',
+        'white-space: pre-wrap',
+        'word-break: break-all',
+      ]) {
+        assert.ok(
+          card.listStyle.includes(frag),
+          `清单那行内联样式缺「${frag}」（老项目逐字），实际=${card.listStyle}`,
+        );
+      }
+      // 警示必须含那个 <br> 断句（老项目 :823 逐字）
+      assert.ok(card.warn.includes('这里只能读取，不能编辑'), '警示首句不对，实际=' + card.warn);
+      assert.ok(card.warn.includes('回到旧设备上点「扫码换机」'), '警示次句不对，实际=' + card.warn);
+      assert.equal(card.go, '恢复这 1 篇', '恢复键文案应为「恢复这 N 篇」，实际=' + card.go);
+      assert.equal(card.cancel, '先看看', '次键文案应为「先看看」（老项目 :825 逐字）');
+      // 恢复键是主键（不是 ghost-btn），次键才是 ghost-btn（老项目同款）
+      const btnCls = await dst.evaluate(() => ({
+        go: document.getElementById('bakRestGo')?.className ?? '',
+        cancel: document.getElementById('bakRestCancel')?.className ?? '',
+      }));
+      assert.ok(!btnCls.go.includes('ghost-btn'), '恢复键是主键，不该是 ghost-btn（老项目同款）');
+      assert.ok(btnCls.cancel.includes('ghost-btn'), '「先看看」是次键，该带 ghost-btn（老项目同款）');
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('BAK-M04 🔴 恢复卡点「恢复这 N 篇」→ 收藏夹并入，备份清单在前（老项目 :9265-9267）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'bakm04old', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'bakm04mine', PASS);
+    try {
+      await waitEditor(dst);
+      await favCurrent(dst);
+      assert.deepEqual(await readFavs(dst), ['bakm04mine'], '新设备本机收藏应只有自己那篇');
+
+      // 🔴 走真实用户路径：扫 → 点「恢复这 N 篇」（不是直接调内部合并函数）
+      await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), code);
+      await withTimeout(dst.waitForSelector('#bakRestGo', { timeout: 15_000 }), 20_000, '等恢复卡');
+      await withTimeout(dst.click('#bakRestGo'), 8_000, '点恢复');
+
+      // 老项目 :9274-9278：恢复完**整页跳第一篇**
+      await withTimeout(
+        dst.waitForFunction(() => location.pathname === '/bakm04old', null, { timeout: 15_000 }),
+        20_000,
+        '恢复后应整页跳第一篇（老项目 :9274-9278）',
+      );
+      const favs = await readFavs(dst);
+      // 🔴 合并顺序：备份清单在前，本机已有并入尾部
+      assert.deepEqual(
+        favs,
+        ['bakm04old', 'bakm04mine'],
+        '备份清单应在前、本机并入尾部（老项目 :9265-9267），实际=' + JSON.stringify(favs),
+      );
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('BAK-M05 🔴🔴 反向闸 A：普通笔记链接绝不许进只读恢复卡', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'bakm05plain', PASS);
+    try {
+      await waitEditor(page);
+      await typeBody(page, ['普通笔记正文']);
+      // 🔴 走**生产出码口**拿这条笔记的配对链接：点顶栏「扫码配对」（#qrBtn）。
+      //   我第一版写的是 `__NOTESYNC_MIGRATE_CODE__()` —— 那是**换机码**（nsbak1:），
+      //   不是配对链接，于是 `__NOTESYNC_PARSE_PAIR__` 判 not-pair，
+      //   判据自己先崩了（前置断言失败），测的根本不是这条功能。
+      await page.click('#qrBtn');
+      await withTimeout(page.waitForSelector('#pairMask', { timeout: 8000 }), 10_000, '等配对浮层');
+      await withTimeout(page.waitForSelector('#qrCanvas', { timeout: 15_000 }), 20_000, '等配对码');
+      // 🔴🔴 取码只能走 `__NOTESYNC_PAIR_CODE__`（本轮补的正式取码口）。
+      //   配对链接是**画在 canvas 上的**（`scan/panel.ts:227`），DOM 里读不到；
+      //   点码进的 `#qrLarge` 里那张 canvas 同样**不带 data-code**
+      //   （`showLarge` 只调 drawQr）—— 我第一版去那里摸data-code，
+      //   摸了 0 次才被迫回落，白写 20 行。
+      //   判据绝不许手写第二份 buildPairLink去"算出"那条链接。
+      const plainLink = await page.evaluate(() => window.__NOTESYNC_PAIR_CODE__?.() ?? '');
+      assert.ok(plainLink, '必须能从生产链路取到这条笔记的配对链接（否则这条判据是空转）');
+      const parsed = await page.evaluate((c) => window.__NOTESYNC_PARSE_PAIR__(c), plainLink);
+      assert.ok(parsed.ok, '生产链接应能被生产解析器收下，实际=' + JSON.stringify(parsed));
+      assert.equal(parsed.noteId, 'bakm05plain', '链接就该指向这篇普通笔记');
+      // 🔴 前置自证：这条链接的篇名**不符合**备份篇名形状（否则这条判据就是空转）
+      assert.ok(
+        !/^nsbak-[a-z0-9]{6}$/.test(parsed.noteId),
+        '前置：本条用的篇名不该是备份篇名形状',
+      );
+      await page.keyboard.press('Escape'); // 关配对浮层
+
+      // 🔴🔴 等同步落定再扫：扫码落地会重拉云端，本地没推上去的编辑会被旧版本覆盖。
+      //   那道闸加在这里，才让下面的正文断言钉的是"分流没吞正文"。
+      await waitSyncIdle(page);
+
+      await page.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), plainLink);
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      // 反向：恢复卡绝不许出现
+      await new Promise((r) => setTimeout(r, 1500));
+      assert.equal(
+        await page.evaluate(() => document.getElementById('bakRestMask') !== null),
+        false,
+        '普通笔记链接绝不许进只读恢复卡（那是备份笔记专属）',
+      );
+      // 正文必须还在（没被恢复卡吃掉）
+      const doc = await page.evaluate(() => JSON.stringify(window.__NOTESYNC_DOC__()));
+      assert.ok(doc.includes('普通笔记正文'), '普通笔记正文必须还在');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M06 🔴🔴 反向闸 B：错误口令既不进恢复卡，也**不许写任何东西**', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'bakm06src', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'bakm06dst', PASS);
+    try {
+      await waitEditor(dst);
+      await favCurrent(dst);
+      await typeBody(dst, ['口令错不许动我的正文']);
+      const before = await readFavs(dst);
+      const docBefore = await canon(dst);
+      // 把链接里的口令改错（老项目那条安全不变量：失败文案不区分原因）
+      const bad = code.replace(/#p=.*$/, '#p=' + encodeURIComponent('错的口令'));
+      assert.notEqual(bad, code, '前置：口令替换必须真的改动了链接');
+
+      await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), bad);
+      await new Promise((r) => setTimeout(r, 5000));
+
+      const st = await dst.evaluate(() => ({
+        card: document.getElementById('bakRestMask') !== null,
+        doc: window.__NOTESYNC_CANON__(window.__NOTESYNC_DOC__()),
+      }));
+      // 🔴 失败路径上不得有任何写入：收藏夹一个字节都不能变
+      assert.deepEqual(await readFavs(dst), before, '🔴 口令错时收藏夹必须原封不动');
+      // 🔴🔴 正文真源必须**逐字不变**（本项目最危险的故障形态：恢复失败但原文被清空）。
+      //   🔴 我第一版写的是 `st.doc.includes('bakm06dst')` —— 篇名根本不在真源 JSON 里
+      //   （真源只有 blocks），那条断言恒红，纯属判据自己写错前提。
+      //   正确口径是**与扫描前逐字比对**（canon 是生产那份 canonicalize）。
+      assert.equal(st.doc, docBefore, '🔴 口令错时正文真源必须逐字不变');
+      // 恢复卡绝不许开（清单根本没解开）
+      assert.equal(st.card, false, '口令错时绝不许开只读恢复卡');
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('BAK-M07 🔴🔴 反向闸 C：备份槽自身绝不出现在清单里（否则换机后凭空多一篇）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'bakm07', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      const bakId = r.bakId;
+      const slot = await page.evaluate(() => window.__NOTESYNC_BAK_SLOT__());
+      // 备份槽必须真被记下来了（否则下面那条断言是空转）
+      assert.ok(slot, '出码后本机必须记住备份槽（老项目 :9091-9094）');
+      assert.equal(slot.id, bakId, '备份槽记的篇名必须就是这次的备份篇名');
+
+      // 🔴 人为把备份槽塞进收藏夹，模拟"上一轮留下的收藏里混进了备份笔记"
+      await page.evaluate((id) => {
+        const cur = JSON.parse(window.localStorage.getItem('notesync_bj_favs') || '[]');
+        window.localStorage.setItem('notesync_bj_favs', JSON.stringify([...cur, id]));
+      }, bakId);
+      const src = await page.evaluate(() => window.__NOTESYNC_FAVBAK_SOURCE__());
+      assert.ok(src.includes(bakId), '前置：备份篇名此刻确实在收藏夹里');
+
+      // 再出一次码，清单里不该有它
+      const r2 = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r2.ok);
+      // 清单里仍只有那一篇真笔记（备份槽被剔掉）
+      assert.equal(r2.count, 1, '备份槽自身必须被剔出清单（否则换机后凭空多一篇），实际篇数=' + r2.count);
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M08 🔴🔴 清单容量必须**吃得下整个收藏夹**（收藏夹上限 100 = 清单上限 100）', async () => {
+    const cap = await (async () => {
+      const page = await openEditor(browser, h.baseUrl(), 'bakm08cap', PASS);
+      try {
+        await waitEditor(page);
+        return await page.evaluate(() => window.__NOTESYNC_BAK_CAP__());
+      } finally {
+        await page.close();
+      }
+    })();
+    // 老项目 BAK_MAX = 100（逐字，见 :9189 的「超 N 篇未含 M 篇」）
+    assert.equal(cap, 100, '甲案清单上限应为 100（老项目 BAK_MAX 逐字），实际=' + cap);
+
+    const page = await openEditor(browser, h.baseUrl(), 'bakm08', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      // 🔴🔴 造 150 篇收藏 —— **超过**清单上限。
+      //   🔴 我第一版在这里断言"必须被拒（too-long）"，恒红。查清原因是：
+      //   收藏夹自己就有 FAVS_MAX=100 的上限（fav/favs.ts:65 normalizeFavs 里 break），
+      //   于是无论塞多少篇，`collectBakEntries` 拿到的**永远 ≤ 100**，
+      //   而清单上限也正好是 100 ⇒ **超限分支在 bj 里根本不可达**。
+      //   ⇒ 这不是"实现漏了拒绝"，而是"两个上限相等，超限不可能发生"。
+      //   真正该钉的是这个**不变式**：清单装得下整个收藏夹，一个字节都不截。
+      //   （`encodeBakText` 那个超限返回 null 的分支由 bak-note.test.mjs BAK-NOTE-16/17 钉，
+      //   那里能直接喂超限数组，不必绕这一圈。）
+      await page.evaluate(() => {
+        const many = Array.from({ length: 150 }, (_, i) => 'bakm08n' + String(i).padStart(3, '0'));
+        window.localStorage.setItem('notesync_bj_favs', JSON.stringify(many));
+      });
+      const srcCount = await page.evaluate(() => window.__NOTESYNC_FAVBAK_SOURCE__().length);
+      assert.equal(srcCount, 100, '收藏夹应按FAVS_MAX=100 收口（收藏侧先截断）');
+
+      const r = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok, '满收藏夹必须能出码（清单容量吃得下收藏夹）');
+      // 🔴 关键：装进去的篇数必须与收藏夹**相等**，不许少一篇。
+      //   少一篇的症状极其隐蔽 —— 用户以为 100 篇全备份了，
+      //   换机后少了那几篇他自己永远不会知道（收藏夹里看不出区别）。
+      assert.equal(r.count, 100, '清单必须装下全部 100 篇，一个都不许截');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M09 🔴 备份槽缺失时能重建（老项目 :9048 建档先落盐再写真身）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'bakm09', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      // 人为清掉备份槽：模拟"换机后第一次生成"或"清过站点数据"
+      await page.evaluate(() => window.localStorage.removeItem('notesync_bak_slot'));
+      assert.equal(await page.evaluate(() => window.__NOTESYNC_BAK_SLOT__()), null, '前置：备份槽应已被清掉');
+
+      const r = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok, '没有备份槽也必须能出码（老项目允许首次建档），实际=' + JSON.stringify(r));
+      assert.match(String(r.bakId), /^nsbak-[a-z0-9]{6}$/, '新篇名形状不对');
+      // 🔴 建档那一枪必须**先落盐**（老项目 :9048）。
+      //   漏掉②的症状不是报错，而是"另一台设备打开这篇备份笔记时解不开" ——
+      //   它拿到的信封里没有 kdf.salt，无从派生。
+      const env = await page.evaluate(async (id) => {
+        const res = await fetch('/api/note/' + encodeURIComponent(id), { cache: 'no-store' });
+        return res.text();
+      }, r.bakId);
+      const o = JSON.parse(env);
+      assert.equal(typeof o.kdf?.salt, 'string', '新建的那篇必须带盐（老项目 :9048 建档先落盐）');
+      assert.ok(o.kdf.iter >= 600000, '迭代次数应不少于 600000，实际=' + o.kdf.iter);
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M10 🔴🔴 第二次备份必须复用盐（换盐 = 另一把钥匙，必然解不开）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'bakm10', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r1 = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r1.ok);
+      const env1 = JSON.parse(
+        await page.evaluate(async (id) => {
+          const res = await fetch('/api/note/' + encodeURIComponent(id), { cache: 'no-store' });
+          return res.text();
+        }, r1.bakId),
+      );
+      const salt1 = env1.kdf.salt;
+
+      // 同一篇、同一个口令，再出一次码
+      const r2 = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r2.ok);
+      const env2 = JSON.parse(
+        await page.evaluate(async (id) => {
+          const res = await fetch('/api/note/' + encodeURIComponent(id), { cache: 'no-store' });
+          return res.text();
+        }, r2.bakId),
+      );
+      // 🔴 盐取自服务端（有则必用，绝不用本机新盐冲掉服务端盐）——老项目 :9043。
+      //   换盐的症状：旧设备能扫（它有本机那把钥），新设备解不开（它只有口令）。
+      assert.equal(env2.kdf.salt, salt1, '第二次备份必须沿用服务端那把盐（老项目 :9043）');
+      // 反向：正文确实被换了（不能因为"盐没变"就整篇没写）
+      assert.notEqual(env2.ct, env1.ct, '第二次备份必须真的重写了正文（不能只更新版本号）');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('BAK-M11 🔴 恢复卡上「先看看」→ 关卡，**刻意不还编辑器焦点**（老项目 :9238）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'bakm11src', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'bakm11dst', PASS);
+    try {
+      await waitEditor(dst);
+      await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), code);
+      await withTimeout(dst.waitForSelector('#bakRestCancel', { timeout: 15_000 }), 20_000, '等恢复卡');
+      await withTimeout(dst.click('#bakRestCancel'), 8_000, '点先看看');
+      await withTimeout(
+        dst.waitForFunction(() => document.getElementById('bakRestMask') === null, null, { timeout: 5000 }),
+        8_000,
+        '等恢复卡关闭',
+      );
+      // 🔴 点遮罩空白**不关**（老项目 #bakRestMask 没有那条路径）。
+      //   误触关掉等于让用户以为自己扫了个空笔记，得重扫一次。
+      assert.equal(
+        await dst.evaluate(() => document.getElementById('bakRestMask') === null),
+        true,
+        '点「先看看」后恢复卡应关闭',
+      );
+      // 收藏夹一个字节都不能变（"先看看"就是先看看）
+      assert.deepEqual(await readFavs(dst), [], '「先看看」绝不许恢复任何东西');
+      // 🔴🔴 恢复卡关掉后绝不许把清单漏进编辑器/真源。
+      //   🔴 我第一版写的是 `editor-host === null`，恒红 —— 因为这一页
+      //   本来就打开着 `bakm11dst` 那篇自己的笔记（openEditor 已经挂了编辑器），
+      //   "编辑器不存在"根本不是这条功能的判据。
+      //   真正的判据是**清单一个字都没进可编辑区与真源**。
+      const after = await dst.evaluate(() => ({
+        text: document.getElementById('editor-host')?.textContent ?? '',
+        doc: window.__NOTESYNC_CANON__(window.__NOTESYNC_DOC__()),
+      }));
+      assert.ok(
+        !after.text.includes('bakm11src'),
+        '恢复卡关掉后清单绝不许漏进可编辑区，实际=' + after.text.slice(0, 120),
+      );
+      assert.ok(
+        !after.doc.includes('notesync-bak:1:') && !after.doc.includes('bakm11src'),
+        '恢复卡关掉后真源绝不许是备份清单，实际=' + after.doc.slice(0, 120),
+      );
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('BAK-M13 🔴🔴 甲案不许抢走**旧码**的分流：nsfav1: / nsbak1: 仍能解（历史码不能作废）', async () => {
+    // 🔴🔴 为什么必须钉这条：甲案把 `tryEnterBakMode` 插进了 `handleScanRaw`，
+    //   而旧收藏码（nsfav1:）与旧单篇码（nsbak1:）也走同一个入口。
+    //   判"前缀互不为前缀所以不会撞"是**读码推断**，不是判据 ——
+    //   一旦有人调整分流顺序，用户手里的历史码会静默变成一句"口令不对"，
+    //   症状与"口令输错"一模一样，用户会反复重输而永远查不出原因。
+    //   所以钉**用户可见的最终结果**：扫旧码必须打开旧恢复面板。
+    const src = await openEditor(browser, h.baseUrl(), 'bakm13src', PASS);
+    let favCode;
+    let oneCode;
+    try {
+      await waitEditor(src);
+      // 🔴 必须先有正文：旧单篇码走 `buildMigrateCode`，它对 `canonicalize(doc)===''`
+      //   直接返回 'empty'（migrate/code.ts:168）。空笔记造不出单篇码——
+      //   我第一版没打字就断言造码成功，判据自己先崩了。
+      await typeBody(src, ['旧单篇码的正文']);
+      await favCurrent(src);
+      // 旧收藏清单码（走生产实现本体）
+      const f = await src.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(f.ok, '前置：旧收藏码应生成成功');
+      favCode = await src.evaluate(() => window.__NOTESYNC_MIGRATE_CODE__());
+      assert.ok(favCode.startsWith('nsfav1:'), '前置：应是旧收藏码，实际前缀=' + favCode.slice(0, 8));
+      // 旧单篇换机码
+      const m = await src.evaluate((p) => window.__NOTESYNC_MIGRATE_MAKE__(p), PASS);
+      assert.ok(m.ok, '前置：旧单篇码应生成成功，实际=' + JSON.stringify(m));
+      oneCode = await src.evaluate(() => window.__NOTESYNC_MIGRATE_CODE__());
+      assert.ok(oneCode.startsWith('nsbak1:'), '前置：应是旧单篇码，实际前缀=' + oneCode.slice(0, 8));
+    } finally {
+      await src.close();
+    }
+
+    for (const [label, code, capId] of [
+      ['旧收藏码 nsfav1:', favCode, 'fav'],
+      ['旧单篇码 nsbak1:', oneCode, 'one'],
+    ]) {
+      const dst = await openEditor(browser, h.baseUrl(), 'bakm13' + capId, PASS);
+      try {
+        await waitEditor(dst);
+        await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), code);
+        // 旧码必须打开**旧恢复面板**（#migrateMask），不是只读恢复卡
+        await withTimeout(
+          dst.waitForSelector('#migrateMask', { timeout: 15_000 }),
+          20_000,
+          `${label} 必须打开旧恢复面板`,
+        );
+        const got = await dst.evaluate(() => ({
+          mask: !!document.getElementById('migrateMask'),
+          code: document.getElementById('migrateCodeIn')?.value ?? '',
+          bakCard: !!document.getElementById('bakRestMask'),
+        }));
+        assert.equal(got.mask, true, `${label} 应打开旧恢复面板`);
+        // 扫到的码必须**原样**填进输入框（用户只需输口令）
+        assert.equal(got.code, code, `${label} 必须被填进恢复面板的码框`);
+        // 🔴 反向：旧码绝不许被甲案分流劫持进只读恢复卡
+        assert.equal(got.bakCard, false, `${label} 绝不许被甲案分流进只读恢复卡`);
+      } finally {
+        await dst.close();
+      }
+    }
+  });
+
+  await t.test('BAK-M12 🔴 整轮零页面异常', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'bakm12', PASS);
+    const errs = [];
+    const cerrs = [];
+    page.on('pageerror', (e) => errs.push(String(e.message)));
+    page.on('console', (m) => {
+      if (m.type() === 'error') cerrs.push(m.text());
+    });
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r = await page.evaluate((p) => window.__NOTESYNC_BAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      const code = await getCode(page);
+      await page.evaluate((c) => window.__NOTESYNC_SCAN_RAW__(c), code);
+      await withTimeout(page.waitForSelector('#bakRestMask', { timeout: 15_000 }), 20_000, '等恢复卡');
+      assert.deepEqual(errs, [], `出现页面异常：${errs.join(' | ')}`);
+      assert.deepEqual(cerrs, [], `出现 console.error：${cerrs.join(' | ')}`);
     } finally {
       await page.close();
     }

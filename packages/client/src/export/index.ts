@@ -30,6 +30,7 @@ import {
   type DeliverDeps,
 } from './render.ts';
 import { COPY } from '../ui/copy.ts';
+import { isTouchDevice } from '../platform/touch.ts';
 
 export interface ExportDeps {
   editorHost: HTMLElement;
@@ -95,6 +96,10 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
       blobToB64,
       nativeCopyImage: deps.nativeCopyImage,
       showPreview: (b) => showPreview(b),
+      // 🔴 触屏判据取全项目唯一出处（`platform/touch.ts`）——
+      //   那个文件里记着"matchMedia 缺失/抛异常时按什么处理"的纪律，
+      //   本模块自己再写一份字面量就会漂移（它此前就在下面写了两处）。
+      isTouch: isTouchDevice(),
     } satisfies DeliverDeps);
 
     if (kind === 'cancelled') return 'cancelled';
@@ -109,10 +114,10 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
     if (kind === 'preview') return kind;
     // 🔴🔴 触屏上剪贴板档不能给「Ctrl+V」（手机没这个动作）。
     //   触屏判据与 dismissKeyboardForTouch 同一套，不用 UA sniff。
-    const touch =
-      typeof matchMedia === 'function' &&
-      matchMedia('(hover: none) and (pointer: coarse)').matches;
-    deps.onStatus('ok', (touch ? COPY.exportOkMsgTouch : COPY.exportOkMsg)(kind), deps.okMs);
+    // 🔴 顺带修一处**口径分裂**：文案分档与预览层补微信指引原先各写一遍
+    //   matchMedia 字面量，而 `isTouchDevice()` 那边还多一层 try/catch ——
+    //   同一件事三处写法，matchMedia 缺失时行为不一致。统一走唯一出处。
+    deps.onStatus('ok', (isTouchDevice() ? COPY.exportOkMsgTouch : COPY.exportOkMsg)(kind), deps.okMs);
     return kind;
   } catch (e) {
     // 🔴 SecurityError 是外链图片跨域的典型症状，必须说人话而不是回显英文
@@ -164,19 +169,20 @@ export function showPreview(blob: Blob): void {
   //   —— 与 .link-hint（11.5px/1.6）**不是**同一条规则，别混用。
   tip.setAttribute('style', 'font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0');
 
-  // 🔴🔴 触屏补一行「怎么进微信」（用户报障第 13 条）。
-  //   移动端几乎必然落在预览档：剪贴板被 WebView 拒、canShare 又常为 false。
+  // 🔴🔴 触屏补一行「怎么进微信」（用户报障第 5/13 条）。
+  //   移动端常落在预览档：剪贴板被 WebView 拒、canShare 又常为 false。
   //   而老项目那句「长按图片可保存或发送」没点名"转发给微信"，
   //   用户看到图只会以为导出失败。桌面端不加（桌面有分享面板与 Ctrl+V）。
-  const touch =
-    typeof matchMedia === 'function' &&
-    matchMedia('(hover: none) and (pointer: coarse)').matches;
-  const wechatTip = document.createElement('p');
-  wechatTip.textContent = COPY.exportPreviewTipTouch;
-  wechatTip.setAttribute(
-    'style',
-    'font-size:12px;color:var(--muted);line-height:1.7;margin:6px 0 0',
-  );
+  // 🔴 判据与上面文案分档、render.ts 的 isTouch 注入同源（唯一出处）。
+  if (isTouchDevice()) {
+    const wechatTip = document.createElement('p');
+    wechatTip.textContent = COPY.exportPreviewTipTouch;
+    wechatTip.setAttribute(
+      'style',
+      'font-size:12px;color:var(--muted);line-height:1.7;margin:6px 0 0',
+    );
+    box.appendChild(wechatTip);
+  }
 
   // 🔴 老项目 index.html:2982-2988：按钮行与两个按钮全是内联样式，
   //   描边胶囊 `padding:10px 22px;border:1px solid var(--line);border-radius:999px;font-size:13px`，
@@ -201,7 +207,6 @@ export function showPreview(blob: Blob): void {
   box.appendChild(h);
   box.appendChild(img);
   box.appendChild(tip);
-  if (touch) box.appendChild(wechatTip);
   box.appendChild(btnRow);
   overlay.appendChild(box);
   document.body.appendChild(overlay);

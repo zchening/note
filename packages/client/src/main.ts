@@ -45,7 +45,7 @@ import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
 import { $isFoldNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans } from './serialize.ts';
-import { canonicalize, deriveKey, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc } from '@bj/shared-schema';
+import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
 import { SyncClient } from './sync/client.ts';
 import {
   autoSnapshotThrottled,
@@ -66,6 +66,7 @@ import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
 import { ReminderUI } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
+import { bindImageViewer } from './image/viewer.ts';
 import { browserStore, favListOf, mergeFavs, readFavs, toggleFav, writeFavs, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
@@ -96,8 +97,27 @@ import {
   FAV_BACKUP_MAX,
 } from './migrate/fav-backup.ts';
 import { buildMigratePanel, closeMigratePanel } from './migrate/panel.ts';
+import {
+  BAK_MAX,
+  BAK_TEXT_PREFIX,
+  buildBakDoc,
+  buildBakLink,
+  collectBakEntries,
+  isBakNoteDoc,
+  newBakId,
+  parseBakLink,
+  readBakManifest,
+  readBakSlot,
+  writeBakSlot,
+} from './migrate/bak-note.ts';
+import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
+import {
+  dismissKeyboardForTouch as dismissKeyboard,
+  isTouchDevice as isTouch,
+  restoreEditorFocus,
+} from './platform/touch.ts';
 import type { ScanDiag } from './scan/engine.ts';
 
 declare global {
@@ -193,6 +213,26 @@ declare global {
      *   不回显口令本身 —— 免得这个钩子变成一个"把口令打印到控制台"的入口。
      */
     __NOTESYNC_PARSE_PAIR__?: (raw: string) => { ok: boolean; noteId?: string; passLen?: number; reason?: string };
+    /**
+     * 最近一次出码的**配对链接**。正式接口。
+     *
+     * 🔴 链接里带着口令，所以它和换机码一样**只由生产侧交出、供本机判据用**。
+     *🔴🔴 为什么必须有它：配对码画在 canvas 上，DOM 读不到；
+     *   没有这条口，e2e 判"配对链接往返无损"就只能手写一份 buildPairLink，
+     *   而那会在生产侧改 origin 归一/fragment 边界时与产物分叉却照样全绿。
+     */
+    __NOTESYNC_PAIR_CODE__?: () => string;
+    /**
+     * 喂一条扫码结果，走**生产落地链路** handleScanRaw。正式接口。
+     *
+     * 🔴🔴 headless 没有摄像头，e2e 判"扫到备份笔记链接会不会进只读恢复卡"
+     *   就只能靠它 —— 不给这条，判据只能去调内部函数，
+     *   测出来的是另一条路，测到的东西不作数。
+     *
+     * 🔴 只**吃**文本、**不吐**任何东西（不回口令、不回明文、不回解密结果）。
+     *   它不是读取口，是写入口 —— 与取景层 onResult 同款边界。
+     */
+    __NOTESYNC_SCAN_RAW__?: (raw: string) => void;
     /* ── 换机码（扫码换机）──────────────────────────────────────────────
        🔴🔴 四条钩子**一律不回显口令、也不回显笔记明文**。
          钩子挂在 window 上 = 任何页面脚本都能调；把口令或正文放进返回值，
@@ -230,6 +270,18 @@ declare global {
     __NOTESYNC_FAVBAK_OPEN_TAKE__?: (code?: string) => void;
     /** 清单容量上限。 */
     __NOTESYNC_FAVBAK_CAP__?: () => number;
+    /* ── 甲案（清单写进云端一篇备份笔记）────────────────────────────────
+       🔴 同上：一律不回显清单内容与口令。清单与口令正是这功能要保护的东西。 */
+    /** 当次甲案备份的备份笔记篇名（`nsbak-xxxxxx`）。空 = 还没出码。 */
+    __NOTESYNC_BAK_ID__?: () => string;
+    /** 走生产甲案链路出码。回显成败/篇名/篇数，**不回显清单**。 */
+    __NOTESYNC_BAK_MAKE__?: (
+      passphrase: string,
+    ) => Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number }>;
+    /** 本机备份槽（`{id, salt}` 或 null）。盐是公链上的东西，回显无害。 */
+    __NOTESYNC_BAK_SLOT__?: () => { id: string; salt: string | null } | null;
+    /** 甲案清单的篇数上限。 */
+    __NOTESYNC_BAK_CAP__?: () => number;
     /**
      * Capacitor 全局（App 壳注入）。
      *
@@ -325,20 +377,34 @@ function noteNameFromPath(): string {
  *   任何一处漏更新状态变量都会让这个守卫静默失效 —— 而症状是"打开面板时
  *   光标被链接重建弹走"，用户只会觉得"这软件的焦点有点莫名其妙"。
  *
- * 覆盖三类遮罩（与老项目remPanelOpen 单一遮罩的差异）：
+ *覆盖三类遮罩（与老项目remPanelOpen 单一遮罩的差异）：
  *   提醒面板 / 二维码配对 / 扫一扫。它们都是"挡住正文、抢走焦点"，
  *   对链接识别的意义完全相同。
+ *
+ * 🔴🔴🔴 三个判据必须**逐一对着真实 DOM 结构核过**（2026-10-07 全都核过一遍，
+ *   前两个此前是**恒不命中的死选择器**，守卫等于没有）：
+ *
+ *   ① 提醒面板：真实根元素是 `reminder/ui.ts:601 mask.className = 'mask hidden'`，
+ *      **既没有 `.ns-rem-mask` 也没有任何 id** ⇒ 此前那句
+ *      `querySelector('.ns-rem-mask:not(.hidden)')` 永远返回 null。
+ *      修法不是把选择器改成 `.mask:not(.hidden)`（那会连落地页/关于页/扫一扫一起命中，
+ *      过度覆盖），而是**给提醒遮罩补一个自己的 id**（`remMask`），
+ *      判据按 id 查 —— 与 pairMask 的口径一致。
+ *   ② 二维码配对：`getElementById('pairMask')` ✅ 正确（scan/panel.ts:170）。
+ *      之所以用"元素存在与否"而不是可见性：面板关闭走 `mask.remove()`，元素直接消失。
+ *   ③ 扫一扫：真实根元素是 `scan/layer.ts:66-67 overlay.className='mask';
+ *      overlay.id='scanMask'`，**没有 `.ns-scan` 这个类** ⇒ 此前那句同样恒 null。
+ *      且它关闭走 `removeChild`，同样用"存在即开"口径。
  */
 function hasOverlayPanelOpen(): boolean {
   if (typeof document === 'undefined') return false;
-  // 提醒面板（reminder/ui.ts 的 mask）
-  const remMask = document.querySelector('.ns-rem-mask:not(.hidden)');
-  if (remMask) return true;
-  // 二维码配对（scan/panel.ts 的 isPanelOpen 用 getElementById('pairMask')）
+  // 提醒面板（reminder/ui.ts:601 `mask.className = 'mask hidden'`，id 见 buildPanel）
+  const remMask = document.getElementById('remMask');
+  if (remMask && !remMask.classList.contains('hidden')) return true;
+  // 二维码配对（scan/panel.ts:170 id=pairMask，关闭走 remove()）
   if (document.getElementById('pairMask')) return true;
-  // 扫一扫图层
-  const scanLayer = document.querySelector('.ns-scan:not(.hidden)');
-  if (scanLayer) return true;
+  // 扫一扫图层（scan/layer.ts:67 id=scanMask，关闭走 removeChild）
+  if (document.getElementById('scanMask')) return true;
   return false;
 }
 
@@ -626,43 +692,162 @@ function pickImage(): void {
   // 🔴 开选前先收掉上一条提示：上一条失败提示还挂着（4.5 秒驻留）时
   //   又发起新上传，两条提示会在同一位置叠着、互相盖住失败原因。
   hideUploadNote();
-  ensureUploadInput().click();
+  // 🔴🔴 老项目 index.html:2825：
+  //   `uploadBtn.addEventListener('click', () => { if (CHIP_HOVER_OK) { pickUploadFile(false); return; } nsUpMenuOpen(); });`
+  //   ⇒ **有精确指针就直接开文件框，纯触屏才弹「插入图片方式」二选一**。
+  //   判据用 restoreEditorFocus 那套（any-pointer: fine / hover: hover）而不是 isTouchDevice，
+  //   理由同 touch.ts 的纪律：平板 + 触控笔 / 插了鼠标的触屏本 / 桌面触屏一体机
+  //   都不是"纯触屏"，它们要的是直开文件框（老项目管这叫 CHIP_HOVER_OK）。
+  //   判错的后果是双向的：用 isTouchDevice 会让带触控笔的 iPad 每次都多点一次；
+  //   反过来一律弹模态则桌面用户也得多点一次。
+  if (hasPrecisePointer()) {
+    pickUploadFile(false);
+    return;
+  }
+  openUploadWayModal();
+}
+
+/** 是否存在精确指针（鼠标/触控笔/桌面触屏一体机）。与 touch.ts restoreEditorFocus 同口径。 */
+function hasPrecisePointer(): boolean {
+  try {
+    const mq = window.matchMedia;
+    if (!mq) return true; // 判不准时按桌面处理（老项目同款保守取向）
+    return !!mq('(any-pointer: fine)').matches || !!mq('(hover: hover)').matches;
+  } catch {
+    return true;
+  }
+}
+
+/** 开文件框。`cam` 为真时带 `capture=environment` 直接调相机（老项目 :2799 同款）。 */
+function pickUploadFile(cam: boolean): void {
+  const el = ensureUploadInput();
+  if (cam) el.setAttribute('capture', 'environment');
+  else el.removeAttribute('capture');
+  try {
+    el.click();
+  } catch {
+    /* 老项目同款：click 抛了就不管（真机上是用户手势被系统拒绝，不是代码错） */
+  }
+}
+
+function closeUploadWayModal(): void {
+  document.getElementById('nsUpModal')?.remove();
 }
 
 /**
- * 触屏下收起软键盘。
+ * 「插入图片方式」二选一（拍照 / 从相册）—— 老项目 index.html:2807 `nsUpMenuOpen`。
  *
- * 🔴 移植自老项目 v9.5.1 `dismissKeyboardForTouch`：
- *   blur 是唯一能让移动端键盘收起的可靠手段（设 readonly 那些花招在
- *   新版 WebKit 上已失效）。但**桌面端不能 blur** ——
- *   用户正在打字时误触图片上传，编辑器一失焦、光标就丢了。
- *   判据用「粗指针 + 无精确指针」，即 (hover: none) 且 (pointer: coarse)。
+ * 🔴 文案与样式**逐字照抄**老项目，因为它们是用户已看过一眼的东西：
+ *   h1「插入图片」/副标题「选一种方式，图片会自动压缩上传」/「拍 照」/「从相册选择」。
+ *   「拍 照」中间那个空格是老项目 :2813 的原文（`bCam.textContent = '拍 照'`），
+ *   与弹窗里其它按钮「关 闭」「完 成」同款 —— 那是给空格留呼吸的老项目排版手法。
+ *
+ * 🔴 「从相册选择」挂 `ghost-btn`（老项目 :2814），但**不要**按 `.ghost-btn` 的声明去写视觉：
+ *   那个类的 background/color/font-weight 被 `.box button:not(:disabled):not(.box-x)`
+ *   （0,3,1，**带 !important**）吃回，只剩 `margin-top:10px` 与 `border` 活下来
+ *   —— 见 styles.css:421 的量化记录与 replication-discipline §2。
+ *
+ * 🔴 开模态前先收键盘（老项目 :2807 `dismissKeyboardForTouch()`）：
+ *   不收的话软键盘会压在「拍 照 / 从相册选择」底下 —— 用户报障第 7 条的现场之一。
  */
+function openUploadWayModal(): void {
+  closeUploadWayModal();
+  dismissKeyboardForTouch();
+
+  const mask = document.createElement('div');
+  mask.className = 'mask';
+  mask.id = 'nsUpModal';
+  const box = document.createElement('div');
+  box.className = 'box';
+  box.style.textAlign = 'center';
+  const h = document.createElement('h1');
+  h.textContent = COPY.insertImageTitle;
+  const sub = document.createElement('p');
+  sub.textContent = COPY.insertImageSub;
+  // 🔴 内联样式而非 class（老项目 :2811 就是内联）：
+  //   font-size:12.5px;line-height:1.7;color:var(--muted);margin:10px 4px 18px
+  sub.style.cssText = 'font-size:12.5px;line-height:1.7;color:var(--muted);margin:10px 4px 18px';
+  const bCam = document.createElement('button');
+  bCam.type = 'button';
+  bCam.id = 'nsUpCam';
+  bCam.textContent = COPY.insertImageShoot;
+  const bAlb = document.createElement('button');
+  bAlb.type = 'button';
+  bAlb.id = 'nsUpAlbum';
+  bAlb.className = 'ghost-btn';
+  bAlb.textContent = COPY.insertImageAlbum;
+
+  box.append(h, sub, bCam, bAlb);
+  mask.append(box);
+  document.body.append(mask);
+
+  bCam.addEventListener('click', () => {
+    closeUploadWayModal();
+    pickUploadFile(true);
+  });
+  bAlb.addEventListener('click', () => {
+    closeUploadWayModal();
+    pickUploadFile(false);
+  });
+  // 🔴 点遮罩空白取消（老项目 :2818）。
+  //   触屏下这条必须有，否则"想取消却关不掉"= 只能刷新页面。
+  mask.addEventListener('click', (e) => {
+    if (e.target === mask) closeUploadWayModal();
+  });
+}
+
 /**
  * 是不是触屏设备（决定手机号点下去拨不拨号）。
  *
- * 🔴 判据与上面 dismissKeyboardForTouch 同一套（`(hover: none) and (pointer: coarse)`），
- *   不另发明一套 UA 嗅探 —— 两套判定一定会漂移，而漂移的表现是
- *   "PC 上能拨号 / 手机上拨不了号"，两边都是用户一眼看穿的错。
- *   matchMedia 不可用（老 WebView）时按**桌面**处理：宁可点不动，也不要在 PC 上弹空白页。
+ * 🔴🔴 三条判据（收键盘 / 触屏判定 / 关闭后还焦点）此前是三份**各写一遍**的
+ *   matchMedia 字面量，其中 `dismissKeyboardForTouch` 还与 `isTouchDevice` 写得不一致
+ *   （前者 `window.matchMedia(...)` 直接调、后者 `?.`）——
+ *   两套判定一定会漂移，而漂移的表现是"PC 上能拨号 / 手机上拨不了号"，
+ *   两边都是用户一眼看穿的错。
+ *   ⇒ 现在全部收敛到 `platform/touch.ts`，这里只保留转发别名给本文件的既有调用点。
+ *   （老项目 v9.5.1 `dismissKeyboardForTouch` 原文：blur 是移动端唯一可靠收键盘的手段，
+ *    但桌面端绝不能 blur —— 用户打字时误触上传，编辑器一失焦光标就丢了。）
  */
 function isTouchDevice(): boolean {
-  try {
-    return !!window.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
-  } catch {
-    return false;
-  }
+  return isTouch();
 }
 
+/** 触屏下收起软键盘（转发到 platform/touch.ts）。 */
 function dismissKeyboardForTouch(): void {
-  try {
-    if (!window.matchMedia('(hover: none) and (pointer: coarse)').matches) return;
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-  } catch {
-    // 收起键盘失败绝不影响主流程
-  }
+  dismissKeyboard();
+}
+
+/**
+ * 🔴🔴🔴 关闭浮层后**把焦点还给编辑器** —— 只在桌面级设备上做。
+ *
+ * 老项目 `CHIP_HOVER_OK`（index.html:6490）的定义：
+ *   `!!(window.matchMedia && matchMedia('(hover: hover) and (pointer: fine)').matches)`
+ *
+ * 它出现在**每一个**收尾 focus 上，一处不漏：
+ *   :3377/:7628 二维码弹窗关闭   :6929/:9111 彩蛋层关闭
+ *   :8000 菜单遮罩点空白关闭     :8216 关于遮罩点空白关闭
+ *   :8244 关于页 × 关闭          :8249 菜单切主题
+ *   :8287 修改口令**取消**关闭   :4409 折叠三角开合收尾
+ *
+ * 🔴🔴🔴 **漏掉这个守卫就是用户报障第 8 / 10 / 11 条**：
+ *   手机上 `focus()` 就是弹软键盘。于是用户点一下关闭弹窗，键盘"啪"地弹出来 ——
+ *   而他刚才做的明明是"关掉一个浮层"，没打算打字。
+ *   bj 此前的对应位置全是裸 `editor?.focus()` / `host.focus()`。
+ *
+ * 🔴 实现本体在 `platform/touch.ts`（behaviors.ts 折叠开合也要用，
+ *   而 main.ts import behaviors.ts ⇒ 反向 import 就是循环依赖）。
+ *   这里只做本地转发，语义注释留在那一处，避免两处各写一份口径。
+ */
+function restoreEditorFocusOnClose(el?: HTMLElement | null): void {
+  // 🔴 `editor` 是 **LexicalEditor**，不是 DOM 元素 —— 把它塞进 HTMLElement 的
+  //   `??` 链里，运行时恰好也能工作（LexicalEditor 自己有 focus()，内部转给根元素），
+  //   但类型是错的，而且"恰好能工作"掩盖了真相：真出问题时定位不到。
+  //   正确口径是取它的**根元素**，再兜底按 id 找（根元素可能已卸载）。
+  restoreEditorFocus(() => {
+    if (el) return el;
+    const root = editor?.getRootElement?.();
+    return root ?? document.getElementById('editor-host');
+  });
 }
 
 /**
@@ -775,11 +960,9 @@ function ensureEggLayer(): EggLayer | undefined {
       curNote: () => currentNote,
       refocus: () => {
         // 图鉴/游戏关闭后把焦点还给编辑器（老项目红线10：桌面失焦光标不绘制）
-        try {
-          editor?.focus();
-        } catch {
-          /* 归还焦点失败不影响使用 */
-        }
+        // 🔴 老项目 :6929/:9111 的 `nsEggClose` 是
+        //   `if (CHIP_HOVER_OK) { editor.focus(); ensureCaret(); }` —— 触屏不还焦点。
+        restoreEditorFocusOnClose();
       },
       onGameClosed: () => {
         // 🔴 门牌路径（/snake）进游戏时落地页从未渲染过，退出后不重画就是空白页。
@@ -929,6 +1112,12 @@ function onTopbar(act: TopbarAction): void {
         passphrase: passForPair(),
         noteId: currentNote,
         origin: location.origin,
+        // 🔴 出码后把链接交出来（正式接口，供 e2e 判"这条码往返无损"）。
+        //   配对链接是画在 canvas 上的，DOM 里读不到；不给这条口，
+        //   判据就只能自己手写一份 buildPairLink —— 那正是禁止的"第二份实现"。
+        onCode: (link) => {
+          lastPairCode = link;
+        },
         // 🔴 本机没有口令时的唯一出口：锁定 → 解锁 → 出码。
         //   触发路径是「记忆解锁」进来的那次会话（route() 里 unlockIfRemembered 成功，
         //   从未经过口令，sessionPass 为空）。不给这个按钮，用户看到的就是
@@ -942,14 +1131,10 @@ function onTopbar(act: TopbarAction): void {
         onClosed: () => {
           // 🔴 关闭必须归还焦点（老项目红线）：否则用户关掉弹窗后
           //   光标停在 body 上，接着敲键盘什么都不会发生。
-          const host = document.getElementById('editor-host');
-          if (host) {
-            try {
-              host.focus();
-            } catch {
-              /* 极端环境无 focus */
-            }
-          }
+          // 🔴🔴 但**只在有精确指针的设备上还焦点**（老项目 :3377/:7628
+          //   `if (CHIP_HOVER_OK) { editor.focus(); ensureCaret(); }`）。
+          //   手机上无条件还焦点 = 每次关二维码弹窗都弹一次软键盘（用户报障第 8 条）。
+          restoreEditorFocusOnClose();
         },
       });
       return;
@@ -1037,11 +1222,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //     不改就是无限递归。**教训：把回调从"没人调"改成"有人调"时，
     //     必须重读它的实现** —— 死代码里往往藏着荒谬的接线。
     onClose: () => {
-      try {
-        editor?.focus();
-      } catch {
-        /* 归还焦点失败不该影响"菜单已关闭" */
-      }
+      // 🔴🔴 触屏不还焦点（老项目 :8000/:8216/:8244/:8249
+      //   全部是 `if (CHIP_HOVER_OK) { editor.focus(); ensureCaret(); }`）。
+      //   手机上点空白关菜单就弹键盘 —— 用户报障第 10 条前两项。
+      restoreEditorFocusOnClose();
     },
     onHome: () => {
       history.pushState({}, '', '/');
@@ -1304,6 +1488,19 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   为什么不用 ensureEggLayer 里的 bindTriggers：那条是**条件触发**
   //   （数字梗/烟花，跑在 update 真源文本上），与光标位置无关（见 layer.ts 注释）。
   ensureEggLayer()?.bindWordTrigger(editorHost);
+
+  // 🔴🔴 正文图片查看器 / 长按菜单接线（用户报障第 7 条后半段「移动端图片显示异常」）。
+  //   漏掉的表现与"没实现"一模一样：样式表里 #nsZoom / #nsImgMenu 的规则全在
+  //   （styles.css:1607-1670），但**没有一行 JS 建它们** ⇒ 死 CSS，
+  //   手机上点图片没反应、长按也没反应，且**零报错**（探针实测 `{zoom:false, menu:false}`）。
+  //   PC 端"正常"是因为 PC 一直就点不开，只是用户没在 PC 上试过长按。
+  //
+  //   为什么放这里而不是 uploadImageFromFile 里：图片是 DecoratorNode 渲染出的
+  //   `<figure class="ns-img"><img></figure>`（nodes.ts:353），
+  //   走事件委托挂一次就覆盖"新上传的"与"加载历史文档里的"两种来源。
+  //   closeOverlay 传 restoreEditorFocusOnClose：关掉查看器/菜单后把焦点还给编辑器，
+  //   否则在手机上关掉大图会留下"焦点在 body ⇒ 键盘行为诡异"的半死状态。
+  bindImageViewer(editorHost, () => restoreEditorFocusOnClose());
 
   /* ---- 提醒层接线 ---- */
   // 🔴 对账必须发生在 docToLexical **之前**：对账会把提醒的 rem 标记挂到
@@ -1854,6 +2051,17 @@ async function handleScanRaw(raw: string): Promise<void> {
     return;
   }
   const { noteId, passphrase } = parsed.link;
+  // 🔴🔴🔴 甲案分流**必须在 mountEditor 之前**（老项目 :3464 `enterBackupMode` 同款位置）：
+  //   扫到的这篇若篇名是 `nsbak-xxxxxx`，它是**备份清单**，用户看到的是只读恢复卡。
+  //   一旦先走 unlock+mountEditor，清单就进 contenteditable 了 ——
+  //   那就破了甲案误编辑三闸的第①闸，而症状极隐蔽：
+  //   "打开那篇笔记看到一串篇名，改了它，然后下次换机备份的就是被改过的清单"。
+  //   tryEnterBakMode 内部**自己**先按篇名形状判（零成本），返回 false = 普通笔记，
+  //   所以这里无条件调它，普通配对链接多走一次正则而已。
+  //
+  // 🔴 判据：走 A/B 两台页面扫码这台，A 上打开的必须是只读恢复卡
+  //   （`#bakRestMask` 在、`#editor` 的 contenteditable 不该有那串篇名）。
+  if (await tryEnterBakMode(noteId, passphrase)) return;
   showUploadNote('doing', COPY.pairLanded, 0);
   const r = await unlock({ noteId, passphrase });
   if (!r.ok) {
@@ -1882,6 +2090,23 @@ async function handleScanRaw(raw: string): Promise<void> {
 let scanDiag: ScanDiag | null = null;
 window.__NOTESYNC_SCAN_DIAG__ = (): ScanDiag | null => (scanDiag ? { ...scanDiag } : null);
 window.__NOTESYNC_PARSE_PAIR__ = (raw: string) => resolveScan(raw).shape;
+/**
+ * 喂一条扫码结果，走**生产落地链路** `handleScanRaw`（正式接口，不是调试后门）。
+ *
+ * 🔴🔴 为什么必须有它：甲案落地要判三件事 ——
+ *   备份笔记链接进只读恢复卡、普通笔记链接照旧进编辑器、错误口令不写任何东西。
+ *   这三条全都发生在 `handleScanRaw` 那个分流里，而 e2e 在 headless 下**没有摄像头**，
+ *   不给钩子就只能"直接调内部函数"⇒ 判的全是另一条路，测出来的东西不作数。
+ *   （QR-F06 此前写的是 `window.__NOTESYNC_SCAN_RAW__ ? … : null`，
+ *   而这个钩子**当时根本不存在** ⇒ 那条判据一直在走 fallback 分支，
+ *   实际测的是 `__NOTESYNC_FAVBAK_OPEN_TAKE__`，与扫码落地无关。已修。）
+ *
+ * 🔴 安全边界：与取景层 `onResult` 完全同款 —— 只**吃**一条文本，**不吐**任何东西
+ *   （不回口令、不回明文、不回解密结果）。它不是读取口，是写入口。
+ */
+window.__NOTESYNC_SCAN_RAW__ = (raw: string): void => {
+  void handleScanRaw(raw);
+};
 
 /** 扫码结果的形状：能不能解得开 + 笔记名 + 口令长度。
  *
@@ -1922,6 +2147,14 @@ function resolveScan(raw: string): { parsed: ReturnType<typeof parsePairLink>; s
 /** 当前会话最后一次生成的换机码（仅码，无口令无明文）。 */
 let lastMigrateCode = '';
 /**
+ * 当前会话最后一次出码的**配对链接**（正式接口，供 e2e 判往返）。
+ *
+ * 🔴 它含口令，所以只由生产侧 `buildPairPanel` 的 onCode 回写，
+ *   绝不由任何"从 canvas 反解"的路径生成 —— 那会引入第二份编码实现。
+ */
+let lastPairCode = '';
+window.__NOTESYNC_PAIR_CODE__ = (): string => lastPairCode;
+/**
  * 收藏备份码的出码提示（老项目 :9187 口径，逐字）。
  *
  * 🔴 为什么要单独存而不是让面板现算：清单码出码时，篇数与 skipped 都只在
@@ -1939,6 +2172,14 @@ let lastMigrateTip = '';
  *   老项目 :9187 的 `col.f.length` 就是同一个口径。
  */
 let lastMigrateFavCount = 0;
+/**
+ * 当次甲案备份的**备份笔记篇名**（`nsbak-xxxxxx`）。
+ *
+ * 🔴 与 lastMigrateCode / lastMigrateFavCount 同款理由：老项目 :9186 在出码那一刻
+ *   把它写进 `#bakBakId`（独立一行），屏上用户要靠它对号/手输。
+ *   它只能在 `onMake` 成功后才知道 ⇒ 不能从闭包里的 ids 推。
+ */
+let lastMigrateBakId = '';
 /** 恢复尝试的形状：成没成、失败原因、以及**恢复后真源是否变了**。 */
 let lastMigrateRestore: { ok: boolean; reason?: string; docChanged?: boolean } | null = null;
 /** 收藏备份的恢复结果：篇数、覆盖数、丢弃数（供提示与e2e 断言）。 */
@@ -2043,6 +2284,42 @@ window.__NOTESYNC_FAVBAK_LAST__ = () =>
 window.__NOTESYNC_FAVBAK_OPEN_TAKE__ = (code?: string): void => openFavBackupTake(code);
 /** 清单容量上限（e2e 断言"超限明说不截断"）。 */
 window.__NOTESYNC_FAVBAK_CAP__ = (): number => FAV_BACKUP_MAX;
+
+/* ── 甲案（备份笔记）的正式接口 ──────────────────────────────────────────
+ * 🔴 只回**篇名与码**，绝不回清单内容与口令：那两样正是这个功能要保护的东西，
+ *   而钩子挂在 window 上、任何页面脚本都能调（与本组上面几条同款理由）。 */
+
+/** 当次甲案备份的备份笔记篇名（`nsbak-xxxxxx`）。空 = 还没出码。 */
+window.__NOTESYNC_BAK_ID__ = (): string => lastMigrateBakId;
+
+/**
+ * 走**生产甲案链路**出码（与 openMigrateMake 的 onMake 同一条）。
+ * e2e 绝大多数判据走真实用户路径（菜单 → 扫码换机），这条只给
+ * "要先出码、再拿码去另一台页面扫"这类**跨设备**判据用 ——
+ * 那类判据没法只靠一台页面完成，才需要这条捷径。
+ */
+window.__NOTESYNC_BAK_MAKE__ = async (
+  passphrase: string,
+): Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number }> => {
+  const slot = readBakSlot();
+  const ids = collectBakEntries(favBackupSourceIds(), slot ? slot.id : null);
+  const r = await makeBakBackup(ids, passphrase);
+  if (!r.ok) return { ok: false, reason: r.reason };
+  lastMigrateCode = r.link;
+  lastMigrateBakId = r.bakId;
+  lastMigrateFavCount = r.count;
+  lastMigrateTip = COPY.migrateBakScanTip(r.count);
+  return { ok: true, bakId: r.bakId, count: r.count };
+};
+
+/** 本机备份槽（`{id, salt}` 或 null）。e2e 用来确认"备份槽自身被剔出清单"。 */
+window.__NOTESYNC_BAK_SLOT__ = (): { id: string; salt: string | null } | null => {
+  const s = readBakSlot();
+  return s ? { id: s.id, salt: s.salt } : null;
+};
+
+/** 甲案清单能装的篇数上限（e2e 断言"超限明说不截断"）。 */
+window.__NOTESYNC_BAK_CAP__ = (): number => BAK_MAX;
 
 /**
  * 打开取景层。
@@ -2162,6 +2439,325 @@ function openScanner(): void {
  *   「恢复失败但原文被清空」比直接报错糟糕得多（用户内容没了还不知道）。
  * ───────────────────────────────────────────────────────────────────────── */
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 甲案：把清单写进云端一篇专用「备份笔记」（老项目 writeBackupNote，:9023-9094）
+ *
+ * 🔴🔴🔴 存在的理由是**用户报障第 2 条**（二维码密度比老项目大得多）。
+ *   旧路线把清单直接打进码里，实测（tools 量化，见 bak-note.ts 文件头）：
+ *   1 篇 299B / 100 篇 2043B，而老项目甲案恒定约 86B —— 1 篇就1.7 倍、100 篇 4.1 倍。
+ *   甲案把清单搬到云端那篇 `nsbak-xxxxxx` 里，码里只剩它的配对链接 ⇒ 恒定。
+ *
+ * 🔴 加密边界：**密钥派生与正文加密全部走 shared-schema 那唯一一份**
+ *   （deriveKey / encryptString(..., 'note', dk)），与正常笔记同一个 AAD 域。
+ *   ⇒ 服务端从头到尾只见密文（零知识不变），这是本项目的核心红线。
+ *
+ * 🔴🔴 为什么**不**把本篇挂进 SyncClient：备份笔记有自己的生命周期
+ *   （不出现在笔记列表、不跑提醒、不进历史版本的常规语义）。
+ *   走 SyncClient 会顺带开 SSE 轮询与去抖推送，而那篇笔记的用户根本不会打开它。
+ *   ⇒ 这里直接 fetch，**不经** `saveLocal`/SyncClient（与老项目 apiPutTo 同款）。
+ * ─────────────────────────────────────────────────────────────────═══════════════════════════════════ */
+
+/** 拉备份笔记的远端信封。老项目 apiGetTo（:9028）同款。 */
+async function fetchBakNote(id: string, f: typeof fetch = fetch): Promise<{ salt: string | null; env: Envelope | null }> {
+  let res: Response;
+  try {
+    res = await f(`/api/note/${encodeURIComponent(id)}`, {
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    });
+  } catch {
+    throw { msg: COPY.bakWriteOffline };
+  }
+  if (res.status === 429) throw { msg: COPY.bakWriteOffline };
+  if (!res.ok) throw { msg: COPY.bakWriteFail };
+  const text = await res.text();
+  if (text.trim() === '') return { salt: null, env: null };
+  try {
+    const o = JSON.parse(text) as Partial<Envelope>;
+    if (typeof o.iv !== 'string' || typeof o.ct !== 'string' || !o.kdf || typeof o.kdf.salt !== 'string') {
+      throw { msg: COPY.bakWriteFail };
+    }
+    return { salt: o.kdf.salt, env: o as Envelope };
+  } catch (e) {
+    //🔴 JSON.parse 的 SyntaxError 与我们自己抛的 {msg} 在这里混在一起，
+    //   必须区分：前者是"云端数据坏了"，后者已经带好了面向用户的句子。
+    if (e && typeof e === 'object' && 'msg' in e) throw e;
+    throw { msg: COPY.bakWriteFail };
+  }
+}
+
+/** 写备份笔记（建档 + 覆盖同一把枪）。老项目 apiPutTo（:9063/:9088）同款。 */
+async function putBakNote(id: string, env: Envelope, plainLen: number, f: typeof fetch = fetch): Promise<void> {
+  let res: Response;
+  try {
+    res = await f(`/api/note/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...env, n: plainLen }),
+    });
+  } catch {
+    throw { msg: COPY.bakWriteOffline };
+  }
+  if (!res.ok) throw { msg: COPY.bakWriteFail };
+}
+
+export type BakMakeFail = 'empty' | 'too-long' | 'offline' | 'write' | 'key-lost' | 'crypto';
+
+export interface BakMakeOk {
+  ok: true;
+  /** 二维码载荷 = 备份笔记的配对链接（**恒定约 86 字节，与篇数无关**）。 */
+  link: string;
+  /** 备份篇名（出码后屏上要报「备份笔记：nsbak-xxxxxx」）。 */
+  bakId: string;
+  /** 清单里的篇数（出码提示与只读恢复卡都要报它）。 */
+  count: number;
+}
+
+export interface BakMakeErr {
+  ok: false;
+  reason: BakMakeFail;
+  message: string;
+}
+
+/**
+ * 生成换机备份（甲案）：清单 → 加密 → 写进云端一篇 `nsbak-xxxxxx` → 出它的链接。
+ *
+ * 🔴 口令的边界（与 code.ts 唯一不同，且是有意的）：
+ *   口令会进 `link`（配对链接的 `#p=` 装的就是口令）。
+ *   老项目的 `#k=` 装的也是一把"扫到即能解锁"的秘密（老项目装密钥，本项目装口令）。
+ *   风险等级与配对码完全一致（用户扫的是自己的屏幕），
+ *   而收益是"码密度与篇数彻底解耦"（用户报障第 2 条）。
+ *
+ * 🔴🔴 建档顺序逐字承接老项目（:9043-9062，v10.0.0 三轮复核实锤）：
+ *   ① **盐取自服务端**（有则必用，绝不用本机新盐冲掉服务端盐）
+ *   ② 新建那一枪先写"空正文 + 带盐"，随后再写真身
+ *      —— 漏掉②的症状是"另一台设备打开这篇备份笔记时解不开"，因为它拿不到盐。
+ *   ③ 已有正文却解不开 = 密钥/口令不对 ⇒ **当场把本机那把钥作废**，
+ *      否则"本机有钥→免口令→又失败"成死循环，而口令框永远读不到（老项目闸 R1）。
+ *
+ * @param ids 要备份的篇名（已过滤）
+ * @param passphrase 用户口令
+ * @param now 生成时刻（毫秒）。显式传入便于判据固定时间戳。
+ * @param fetchImpl 注入 fetch，便于判据
+ */
+export async function makeBakBackup(
+  ids: readonly string[],
+  passphrase: string,
+  now: number = Date.now(),
+  fetchImpl: typeof fetch = fetch,
+): Promise<BakMakeOk | BakMakeErr> {
+  const slot = readBakSlot();
+  const entries = collectBakEntries(ids, slot ? slot.id : null);
+  if (entries.length === 0) return { ok: false, reason: 'empty', message: COPY.migrateNoFav };
+  if (entries.length > BAK_MAX) {
+    return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
+  }
+
+  const doc = buildBakDoc(entries, now);
+  if (doc === null) return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
+
+  const id = slot ? slot.id : newBakId();
+  const plain = canonicalize(doc);
+
+  let remote: { salt: string | null; env: Envelope | null };
+  try {
+    remote = await fetchBakNote(id, fetchImpl);
+  } catch (e) {
+    const msg = e && typeof e === 'object' && 'msg' in e ? String((e as { msg: unknown }).msg) : COPY.bakWriteFail;
+    return { ok: false, reason: navigator.onLine ? 'write' : 'offline', message: msg };
+  }
+
+  // ① 盐取自服务端。有则必用 —— 换盐就是另一把钥匙，必然解不开。
+  const saltB64 = remote.salt ?? null;
+  let dk: DerivedKey;
+  try {
+    dk = await deriveKey(passphrase, saltB64 ?? undefined);
+  } catch {
+    return { ok: false, reason: 'crypto', message: COPY.migrateNeedPass };
+  }
+
+  // ③ 已有正文却解不开 = 密钥/口令不对。老项目 :9053-9059：
+  //   presetKey 那把（本机存的）要**当场作废**，否则下一次仍然是"免口令→又失败"死循环。
+  if (remote.env) {
+    try {
+      await decryptString(remote.env, dk.key, 'note');
+    } catch {
+      return { ok: false, reason: 'key-lost', message: COPY.bakKeyLost };
+    }
+  }
+
+  // ② 建档那一枪：先落盐（正文留空），随后再写真身。
+  //   🔴 漏掉它的症状不是报错，而是"另一台设备打开这篇备份笔记解不开"——
+  //     它拿到的信封里没有 kdf.salt，无从派生。老项目 v10.0.0 为这三轮顺序复核过。
+  if (!remote.env) {
+    const seed = await encryptString('', dk.key, 'note', dk);
+    try {
+      await putBakNote(id, seed, 0, fetchImpl);
+    } catch (e) {
+      const msg = e && typeof e === 'object' && 'msg' in e ? String((e as { msg: unknown }).msg) : COPY.bakWriteFail;
+      return { ok: false, reason: 'write', message: msg };
+    }
+  }
+
+  let env: Envelope;
+  try {
+    env = await encryptString(plain, dk.key, 'note', dk);
+  } catch {
+    return { ok: false, reason: 'crypto', message: COPY.migrateRenderFail };
+  }
+  try {
+    await putBakNote(id, env, plain.length, fetchImpl);
+  } catch (e) {
+    const msg = e && typeof e === 'object' && 'msg' in e ? String((e as { msg: unknown }).msg) : COPY.bakWriteFail;
+    return { ok: false, reason: 'write', message: msg };
+  }
+
+  // 🔴 本机记住"备份槽 + 那把钥"：下次生成可以免口令（老项目 :9091-9094）。
+  //   写不进去不失败（下一句 writeBakSlot 内部已catch）—— 槽只是加速器。
+  writeBakSlot(id, saltB64 ?? dk.saltB64);
+  await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+
+  return { ok: true, link: buildBakLink(location.origin, id, passphrase), bakId: id, count: entries.length };
+}
+
+/** 篇名形状闸：`nsbak-xxxxxx`。零成本，老项目 BAK_ID_RE 同款。 */
+export function isBakNoteId(noteId: string): boolean {
+  return /^nsbak-[a-z0-9]{6}$/.test(noteId);
+}
+
+/**
+ * 已解开一篇之后：若它是备份笔记，**开只读恢复卡并吃掉这次落地**。
+ *
+ * 🔴🔴 三条进入路径必须共用它（老项目 applyUnlocked:3464 只有那一处）：
+ *   ① 扫码落地 handleScanRaw ② 手输口令 showPass ③ 记忆解锁 route()
+ *   漏掉②③的症状与"功能没实现"一模一样，但更隐蔽：**在旧设备上刷新一下
+ *   `/nsbak-xxxxxx` 这个 URL**，route() 走记忆解锁直接 mountEditor，
+ *   清单就落进了 contenteditable —— 甲案误编辑三闸的第①闸被从后门打开。
+ *
+ * @returns true = 这是备份笔记，已进恢复卡，调用方**不要**再挂编辑器
+ */
+export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey): boolean {
+  if (!isBakNoteId(noteId)) return false;
+  const manifest = readBakManifest(doc);
+  if (manifest === null) {
+    // 形状对但清单解不开：老项目 :9124 的口径。它与"普通笔记"要分开说 ——
+    //   后者根本不会走到这里（篇名形状已经挡住了）。
+    showUploadNote('bad', COPY.bakRestBroken, COPY.uploadFailMs);
+    return true;
+  }
+  // 🔴 三闸之①：清单**绝不进 contenteditable**。这里根本不挂编辑器，
+  //   恢复卡是唯一呈现。老项目 enterBackupMode 还要先 contentEditable=false，
+  //   bj 直接不挂 —— 那比"挂了再锁"少一整条漏锁的路径。
+  history.replaceState({}, '', '/' + encodeURIComponent(noteId));
+  showBakRestoreCard(manifest.ids, manifest.ts, dk);
+  return true;
+}
+
+/**
+ * 恢复侧：扫到备份笔记链接 → 解开清单 → **只读恢复卡**（老项目 enterBackupMode，:9220-9234）。
+ *
+ * 🔴🔴 失败时**不写任何东西**：不 merge 收藏、不写 key-store、不动编辑器。
+ * 🔴 这条路**必须**在 mountEditor 之前判完（见 handleScanRaw 的接线）：
+ *   备份笔记一旦挂上编辑器，用户就能编辑它 —— 那就破了甲案误编辑三闸的第①闸。
+ *
+ * @returns true = 这是备份笔记，已进恢复卡（或已报错），调用方**不要**再挂编辑器
+ */
+export async function tryEnterBakMode(noteId: string, passphrase: string, f: typeof fetch = fetch): Promise<boolean> {
+  // 🔴🔴 必须**先按篇名形状**判，而不是"解开看看是什么"：
+  //   逐篇解密去问"你是不是备份笔记"会给每个篇名白跑一次 PBKDF2，
+  //   而且失败文案会变成"口令不对" —— 用户扫的是一篇正常笔记也会看到那句。
+  //   篇名形状是**零成本、可判定**的第一道闸（老项目 BAK_ID_RE 同款）。
+  if (!isBakNoteId(noteId)) return false;
+
+  let doc: Doc;
+  let dk: DerivedKey;
+  try {
+    const r = await unlock({ noteId, passphrase, fetchImpl: f });
+    if (!r.ok) {
+      // 🔴 与手输口令**同一句文案**（ARCH 安全不变量）：绝因为"是从二维码来的"
+      //   就换成更具体的原因 —— 那等于给暴力破解一个 oracle。
+      showUploadNote('bad', r.message, COPY.uploadFailMs);
+      return true;
+    }
+    doc = r.doc;
+    dk = r.dk;
+  } catch {
+    showUploadNote('bad', PASS_ERROR, COPY.uploadFailMs);
+    return true;
+  }
+
+  // 判定与呈现交给同一个函数 —— 扫码/手输/记忆三条路共用它（见 presentBakDoc 的注释）。
+  return presentBakDoc(noteId, doc, dk);
+}
+
+/** 开只读恢复卡，并把「恢复这 N 篇」接到生产合并链路。 */
+function showBakRestoreCard(ids: readonly string[], ts: number, _dk: DerivedKey): void {
+  buildBakRestoreCard({
+    ids,
+    ts,
+    onGo: async () => {
+      const r = applyBakRestore(ids);
+      if (!r.ok) throw new Error(r.message);
+      // 🔴 与老项目 :9274-9278 同款：恢复完整页跳第一篇。
+      //   理由与老项目一致 —— 只 setStatus 的话，首页页脚会被落地页盖住，
+      //   用户看着"粘完没反应"（老项目闸 R2-P1-2 的事故形状）。
+      location.href = '/' + encodeURIComponent(r.first as string);
+      return r.message;
+    },
+    onCancel: () => {
+      // 🔴 只读态**刻意不归还编辑器焦点**（老项目 :9238 原话「故刻意不补」）：
+      //   这篇根本不该编辑，还焦点等于把光标放进一篇锁死的笔记里。
+      showUploadNote('ok', COPY.bakRestReadonly, COPY.uploadFailMs);
+    },
+  });
+}
+
+interface BakRestoreOutcome {
+  ok: boolean;
+  message: string;
+  first?: string;
+}
+
+/**
+ * 把清单并进本机收藏夹。与 applyFavBackupRestore **同一条生产合并口径**。
+ *
+ * 🔴🔴 为什么不复用 applyFavBackupRestore 那个函数本体：
+ *   那条路的第一步是"解一个 nsfav1: 码"，而甲案的清单是从**云端那篇笔记**读出来的
+ *   （已经解开了）。硬套会把"已经解开的清单"再塞进一个码里解一遍 ——
+ *   600,000 次 PBKDF2 白跑一次，而且形状不合还会直接判 not-migrate。
+ *   ⇒ 复用的是它**之后**那一段（合并 + 覆盖统计 + 写盘 + 如实报数），
+ *     抽成本函数，两条路共用，绝不各写一份合并逻辑。
+ */
+function applyBakRestore(ids: readonly string[]): BakRestoreOutcome {
+  if (ids.length === 0) return { ok: false, message: COPY.migrateNothingRestored };
+
+  // 🔴 hadBefore 必须在**写入前**取（老项目 :9262 v7.7.0「对抗审」）。
+  //   写完再查就永远是 true ⇒ renewed 恒等于条数 ⇒
+  //   「（覆盖 N 篇旧密钥）」成永远在喊的假警报，几次之后用户就不看了。
+  const before = new Set(readFavs(favStore));
+  let renewed = 0;
+  for (const id of ids) if (before.has(id)) renewed++;
+
+  // 合并顺序：备份优先序在前，本机已有并入尾部（老项目 :9265-9267）
+  const merged = mergeFavs(ids, readFavs(favStore));
+  const count = Math.min(merged.length, FAVS_MAX);
+  const capped = merged.length > FAVS_MAX ? merged.length - FAVS_MAX : 0;
+
+  const stored = writeFavs(favStore, merged);
+  // 🔴 落盘后必须以**真存下去的东西**为准。writeFavs 在隐私模式/配额满时
+  //   静默写不进去，此时报"已恢复 N 篇"就是**谎报**。
+  if (stored.length === 0) return { ok: false, message: COPY.migrateFavWriteFail };
+
+  menuState.favList = favListOf(favStore);
+  menuRef?.render();
+
+  return {
+    ok: true,
+    first: merged[0] as string,
+    message: favRestoreTip(count, renewed, capped, FAVS_MAX),
+  };
+}
+
 /**
  * 备份侧：菜单「扫码换机」进来。
  *
@@ -2189,36 +2785,49 @@ function openMigrateMake(): void {
     setFootStatus?.('offline', COPY.migrateNeedUnlock);
     return;
   }
-  // 本机收藏原序 = 用户优先级；剔掉备份槽自身与非法名（老项目 collectBackupEntries 同款）
-  const ids = favBackupSourceIds();
+  // 本机收藏原序 = 用户优先级。🔴 甲案的清单要**剔掉备份槽自身**
+  //   （老项目 collectBackupEntries 同款）—— 否则上一次备份生成的那篇 `nsbak-xxxxxx`
+  //   会被当成一条普通笔记写进清单，换机后用户收藏夹里多出一篇他没收藏过的笔记。
+  //   剔的动作交给 `makeBakBackup` 内部的 collectBakEntries（与钩子同源），
+  //   这里只负责"有没有可备份的"这一层预判。
+  const slot = readBakSlot();
+  const ids = collectBakEntries(favBackupSourceIds(), slot ? slot.id : null);
   buildMigratePanel({
     mode: 'make',
+    // 🔴 甲案的引导句（老项目 :801 那句的「密钥」改「篇名」，理由见 panel.ts 的注释）
+    makeLeadHtml: COPY.migrateBakLeadHtml,
     // 🔴🔴 免口令直出码：本机当前会话**已持有口令**时直接出码，不再要口令框
     //   （老项目 index.html `if (preKey) { await doBakGenerate(preKey); return; }` 同款）。
     //   本项目口令在 `sessionPass` 里、面板不持有，所以由这里传进去；
     //   「记忆解锁」进来的会话 sessionPass 为空 ⇒ 传 null ⇒ 仍要口令框（与老项目一致）。
     preKey: sessionPass === '' ? null : sessionPass,
-    // 🔴 预判放在生成之前：收藏夹是空的就别白跑 600,000 次 PBKDF2。
+    // 🔴 预判放在生成之前：收藏夹是空的就别白跑 600,000 次 PBKDF2，
+    //   也别往云端白写一篇 `nsbak-xxxxxx`（写了就是一篇谁也没备份的空笔记）。
     //   超限时**明说装不下**，绝不静默截断（截断 = 用户以为全备份了、实际丢了收藏且不会知道）。
     precheck: () => (ids.length > 0 ? null : COPY.migrateNoFav),
     onMake: async (passphrase) => {
-      // 🔴🔴 必须回写 lastMigrateCode —— 「取最近一次生成的码」只有一个真源。
+      // 🔴🔴 必须回写 lastMigrateCode ——「取最近一次生成的码」只有一个真源。
       //   此前只有测试钩子 __NOTESYNC_MIGRATE_MAKE__ 会写它，而**面板走的不是那条路**
       //   ⇒ 走真实用户路径（点菜单 → 扫码换机）生成的码，从取码口读回来是空串。
       //   探针实测：DOM 里码明明在（#migrateQrHolder[data-code] 有完整内容），
-      //   `__NOTESYNC_MIGRATE_CODE__()` 却返回 "" —— 判据与产物脱节。
+      //   `__NOTESYNC_MIGRATE_CODE__()` 却返回 "" ——判据与产物脱节。
       //   免口令直出码（preKey）那条路同样经过这里，所以一并修好。
-      const r = await buildFavBackupCode(ids, passphrase);
-      if (r.ok) {
-        lastMigrateCode = r.code;
-        lastMigrateTip = favBackupTip(r.ids.length, 0);
-        lastMigrateFavCount = r.ids.length;
-        return { ok: true, code: r.code };
+      //
+      // 🔴🔴 传**本机清单**（ids，上面已剔掉备份槽），不是重新调 favBackupSourceIds()：
+      //   precheck 判的是 ids 非空，若两处口径不同，会出现"预判说有、生成说没有"
+      //   或者反过来 —— 而那只有点一次菜单才能复现。
+      const r = await makeBakBackup(ids, passphrase);
+      if (!r.ok) {
+        // 🔴 失败文案按 reason 分派，**不**全部塌成一句"生成失败"：
+        //   'key-lost'（本机那把备份钥失效）与 'offline'（离线）是两条完全不同的
+        //   用户动作，前者要重输口令、后者要联网。塌成一句用户就只能反复重试。
+        return { ok: false, reason: r.message };
       }
-      return {
-        ok: false,
-        reason: r.reason === 'too-long' ? COPY.migrateTooManyFav : COPY.migrateRenderFail,
-      };
+      lastMigrateCode = r.link;
+      lastMigrateBakId = r.bakId;
+      lastMigrateFavCount = r.count;
+      lastMigrateTip = COPY.migrateBakScanTip(r.count);
+      return { ok: true, code: r.link };
     },
     // 🔴 出码提示的篇数**取自当次出码的真实结果**（lastMigrateFavCount，由上面那次
     //   onMake 写入），而不是闭包里那份 ids ——
@@ -2227,14 +2836,14 @@ function openMigrateMake(): void {
     //   同样是**出码那一刻**的清单，不是开面板那一刻的）。
     scanTip: () =>
       lastMigrateFavCount > 0
-        ? favBackupTip(lastMigrateFavCount, 0)
+        ? COPY.migrateBakScanTip(lastMigrateFavCount)
         : lastMigrateTip || COPY.migrateScanTip,
+    // 🔴 老项目 :9186 那行「备份笔记：nsbak-xxxxxx」是**独立一行**（#bakBakId），
+    //   不是拼进 tip —— 换机时用户要靠它对号/手输，混在一句指引里就找不到了。
+    scanIdLine: () => (lastMigrateBakId ? COPY.migrateBakIdLine(lastMigrateBakId) : ''),
     onClosed: () => {
-      try {
-        editor?.focus();
-      } catch {
-        /* ignore */
-      }
+      // 🔴 扫码换机弹层关闭：与其它浮层同款守卫（触屏不还焦点 = 不弹键盘）。
+      restoreEditorFocusOnClose();
     },
   });
 }
@@ -2301,11 +2910,8 @@ function openMigrateTake(initialCode?: string): void {
     mode: 'take',
     onTake: (code, passphrase) => applyMigrateRestore(code, passphrase),
     onClosed: () => {
-      try {
-        editor?.focus();
-      } catch {
-        /* ignore */
-      }
+      // 🔴 扫码换机弹层关闭：与其它浮层同款守卫（触屏不还焦点 = 不弹键盘）。
+      restoreEditorFocusOnClose();
     },
   });
   if (initialCode) {
@@ -2416,11 +3022,8 @@ function openFavBackupTake(initialCode?: string): void {
       };
     },
     onClosed: () => {
-      try {
-        editor?.focus();
-      } catch {
-        /* ignore */
-      }
+      // 🔴 扫码换机弹层关闭：与其它浮层同款守卫（触屏不还焦点 = 不弹键盘）。
+      restoreEditorFocusOnClose();
     },
   });
   if (initialCode) {
@@ -2483,6 +3086,11 @@ function showPass(name: string): void {
       // 🔴 会话口令在**解锁成功之后**才记：失败的尝试不该把口令留在内存里。
       sessionPass = pass;
       pendingFresh = r.fresh;
+      // 🔴🔴 甲案分流（老项目 applyUnlocked:3464 同款）：手输口令打开一篇
+      //   `nsbak-xxxxxx` 时，看到的必须是只读恢复卡而不是可编辑的清单。
+      //   漏这条的症状：在旧设备上敲 URL 打开备份笔记 → 清单进 contenteditable
+      //   → 用户改掉它 → 下次换机备份的就是被改过的清单（甲案三闸①被从后门打开）。
+      if (presentBakDoc(name, r.doc, r.dk)) return null;
       mountEditor(name, r.doc);
       // 🔴 解锁成功才弹 PWA 安装引导（老项目 index.html:3476 同位置）：
       //   落地页就弹 = 一进门先推安装广告，是最招人烦的那种。
@@ -2539,11 +3147,12 @@ async function doChangePassphrase(): Promise<void> {
     onClose: () => {
       // 弹窗关掉就把焦点还给编辑器（老项目 :8287 `cpCancel` 里 `editor.focus()` 同款动作）。
       // 🔴 桌面端失焦时光标不绘制（老项目红线10），不还焦点会看到"框还在但不能直接打字"。
-      try {
-        editor?.focus();
-      } catch {
-        /* 归还焦点失败不影响使用 */
-      }
+      // 🔴🔴 但**触屏必须不还焦点** —— 这正是老项目 :8287 那行的 `if (CHIP_HOVER_OK)`。
+      //   手机上"取消修改口令"就弹键盘（用户报障第 10 条第三条）。
+      //   注意与"打开时聚焦当前口令框"配对：老项目 openChangePass 里
+      //   `cpOld.focus()` 是**无条件**的（用户报障第 9 条要求聚焦），
+      //   而取消时的还焦点是**有条件的** —— 两者方向相反，别抄反。
+      restoreEditorFocusOnClose();
     },
   });
 }
@@ -2594,6 +3203,10 @@ function route(): void {
       //   口令来自本机保险箱（./sync/pass-vault.ts），与密钥同生共死、锁定即失效。
       if (rec.passphrase) sessionPass = rec.passphrase;
       pendingFresh = false;
+      // 🔴🔴 甲案分流（同 showPass 那条）：记忆解锁也要在挂编辑器之前判。
+      //   这条路径**最容易被漏** —— 它不经过任何用户动作，
+      //   只要在旧设备上刷新一下 `/nsbak-xxxxxx` 就会走到。
+      if (presentBakDoc(name, rec.doc, rec.dk)) return;
       mountEditor(name, rec.doc);
       // 🔴 同上：记忆解锁也是"解锁成功"，同样该弹安装引导
       tryShowInstallBar();

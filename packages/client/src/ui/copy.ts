@@ -23,8 +23,10 @@ export const COPY = {
   trustCipher: '服务器只见密文',
   trustNoAccount: '无需账号',
   trustScan: '扫码跨设备',
-  /** 彩蛋门牌提示：`{name} 是彩蛋门牌，不会新建笔记` */
-  eggReservedTip: (name: string): string => `${name} 是彩蛋门牌，不会新建笔记`,
+  /** 彩蛋门牌提示的**后半句**（老项目 index.html:10190 裸文字节点，逐字照抄）。
+   *  前半句是 `/门牌名` 进 `<b>`（金黄 600，老项目 `.eggtip b`）——
+   *  所以不能合成一整句文案，否则门牌名就没法单独上色。 */
+  eggReservedTipSuffix: ' 是彩蛋门牌，不会新建笔记',
 
   /* 口令页 */
   passTitle: '输入口令',
@@ -205,6 +207,43 @@ export const COPY = {
   //   统一回老项目那一句。
   migrateNeedUnlock: '请先解锁',
 
+  /* 甲案：清单写进云端一篇专用「备份笔记」，二维码只装它的链接。
+     🔴 这一段文案大量是**老项目逐字**，出处标在每一行后面 ——
+       出码后的那两句（老项目 index.html:9195/9199）与只读恢复卡（:816-826）
+       在 bj 之前压根不存在（清单直接进码，见 migrate/bak-note.ts 文件头）。
+     🔴🔴 但**入口引导句必须改**：老项目写「收藏夹里笔记的密钥都写进它」，
+       本项目的清单里**没有密钥**（CryptoKey 是 extractable:false，导不出 raw 字节）——
+       照抄这句就是**谎报**，用户会以为码里带着钥匙。 */
+  migrateBakLeadHtml:
+    '换机备份要用口令为专用的<b>备份笔记</b>派生密钥：<br>收藏夹里的篇名写进它，扫一扫整体带走。',
+  /** 出码后那行「备份笔记：nsbak-xxxxxx」（老项目 index.html:9195 逐字） */
+  migrateBakIdLine: (id: string): string => '备份笔记：' + id,
+  /** 出码后屏上指引（老项目 :9187-9190 逐字，本项目把入口指向真正能扫它的按钮） */
+  migrateBakScanTip: (n: number): string =>
+    '新设备首页「扫码换机」对准它，一键恢复 ' + n + ' 篇。看不清就点一下码',
+  /** 只读恢复卡的标题（老项目 :819 `换机备份` 逐字） */
+  bakRestTitle: '换机备份',
+  /** 只读恢复卡的摘要（老项目 :9227 口径：生成于 + 含 N 篇） */
+  bakRestSummary: (tsText: string, n: number): string =>
+    (tsText ? tsText + '，' : '') + '含 ' + n + ' 篇笔记。',
+  /** 🔴 只读恢复卡的警示（老项目 :823 逐字，含那个 <br>） */
+  bakRestWarnHtml: '这里只能读取，不能编辑。<br>要更新备份，回到旧设备上点「扫码换机」。',
+  /** 恢复按钮（老项目 :824 `恢复` 逐字；实际文案是「恢复这 N 篇」，见 bakRestGo） */
+  bakRestGo: (n: number): string => '恢复这 ' + n + ' 篇',
+  bakRestCancel: '先看看',
+  /** 「先看看」之后的那句（老项目 :9236 逐字） */
+  bakRestReadonly: '这是换机备份笔记，只能读；要更新请回旧设备点「扫码换机」',
+  /** 正在恢复（老项目 :9242 逐字） */
+  bakRestWorking: '正在恢复…',
+  /** 备份笔记上再点「扫码换机」而清单解不开（老项目 :9124 逐字） */
+  bakRestBroken: '这篇备份笔记的清单没能解开，请回旧设备重新生成',
+  /** 出码失败（网络/离线）。老项目 :9107/:9093 同款口径 */
+  bakWriteOffline: '当前离线，换机备份要联网',
+  bakWriteFail: '备份写入服务器失败，请检查网络后重试',
+  bakWriteUnconfirmed: '备份写入未被服务器确认，请稍后重试',
+  /** 本机存的备份密钥已失效，请输入口令（老项目 :9090 逐字） */
+  bakKeyLost: '本机存的备份密钥已失效，请输入口令',
+
   /* 菜单：二级视图 */
   back: '返回',
   favEmpty: '暂无收藏',
@@ -375,6 +414,17 @@ export const COPY = {
   titleQr: '二维码配对',
   titleMenu: '菜单',
   titleRefresh: '刷新',
+
+  /* 「插入图片方式」二选一（纯触屏点上传才出现，老项目 index.html:2807-2818） */
+  insertImageTitle: '插入图片',
+  insertImageSub: '选一种方式，图片会自动压缩上传',
+  /** 🔴 「拍 照」中间那个空格是老项目 :2813 原文，不是打字错。 */
+  insertImageShoot: '拍 照',
+  insertImageAlbum: '从相册选择',
+
+  /* 正文图片查看器提示（老项目 index.html:5459 按nsHoverPointer 分两支，逐字） */
+  imgZoomTipFine: '滚轮缩放 · 双击 1:1 · 点空白关闭',
+  imgZoomTipTouch: '双指缩放 · 点图片即回笔记',
 
   /* 图片上传（老项目原文；失败文案必须自带"未插入 + 请重试"） */
   /** 压缩阶段提示 */
