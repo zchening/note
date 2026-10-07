@@ -165,13 +165,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 创建 GitHub Release（仅 tag 触发）
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: android/app/build/outputs/apk/release/app-release.apk
 
   # ─────────────────────────────────────────────────────────────────────
   # 云构建出包之后**自动**同步到腾讯云服务器，闭环 OTA。
@@ -185,7 +178,7 @@ jobs:
   #   让它做唯一权威。重复实现一份 = 两份都会漂移。
   # ─────────────────────────────────────────────────────────────────────
   deploy:
-    name: 同步 APK 到腾讯云（闭环 OTA）
+    name: 发布 APK（腾讯云 OTA + GitHub Releases）
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -227,3 +220,19 @@ jobs:
         # assets[0].name 以 .apk 结尾（客户端 pickApk 只认这个）、
         # /dl/vX.Y.Z.apk 与 /dl/latest.apk 都 HEAD 200。任一不满足即非零退出。
         run: python3 tools/push_bj_apk.py "${{ needs.build.outputs.ver }}"
+
+      - name: 发布 GitHub Release
+        # 🔴🔴 这一步原来挂在 build 作业末尾且带 `if: startsWith(github.ref,'refs/tags/')`
+        #   ⇒ **手动触发时整步被跳过**：腾讯云已经更新，GitHub Releases 还停在上一版，
+        #   两处不一致，从 Release 页下载的仍是旧包（v1.13.1 就是这么漏掉的）。
+        #   现在挪到本作业**最后**：上传腾讯云成功并校验通过之后才发 GitHub，
+        #   ⇒ 两处**同进同退**，不会出现"一处新一处旧"。
+        # 🔴 tag_name 必须显式给：不指定的话 action 会拿 git ref 猜，手动触发时那是
+        #   分支名 "main" ⇒ 凭空多出一个叫 main 的 Release（版本号单调，污染了要再发一版才盖得掉）。
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.ver }}
+          name: ${{ needs.build.outputs.ver }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: android/app/build/outputs/apk/release/app-release.apk
