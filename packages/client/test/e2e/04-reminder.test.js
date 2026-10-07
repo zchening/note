@@ -383,3 +383,137 @@ test('REM-10 🔴 XSS：提醒事项含 HTML 时不得执行', async () => {
     await page.close();
   }
 });
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * REM-11 提醒 chip 的 DOM 形态（用户报障第 2 条的 DOM 侧）
+ *
+ * 🔴🔴 为什么纯逻辑判据不够：rem-format.test.mjs 的 F1/F5 钉的是
+ *   `fmtChipTime`/`fmtChipDay` 两个**函数返回值**（今天几点几分、周几、X天后），
+ *   但用户截图里看到的是**排版**：时间在不在最左、是不是加粗、右边有没有留白、
+ *   事项和按钮之间有没有那条线。这些全是 DOM 顺序 + CSS，jsdom 测不了。
+ *
+ * 🔴🔴 判据一律读**真浏览器 getComputedStyle / getBoundingClientRect**：
+ *   读 CSS 源文本会踩"选择器 specificity 算错 ⇒ 恒绿"的坑（本仓已栽过，
+ *   v1.8.0 导出折叠补丁就是这么漏过一整批）。
+ *
+ * ── 老项目的权威形态（index.html:6410-6424，只读）────────────────────────
+ *   hd行：[clock(绝对时间，加粗)]  ......  [rel(相对日)]
+ *   下一行：事项（截断）
+ *   然后：sep 分隔线
+ *   然后：「添加提醒」CTA
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('REM-11 🔴 提醒 chip：时间在首行最左且加粗、同日不挂相对日、事项与按钮之间有分隔线', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem11', 'pw');
+  try {
+    // 用「明天」：老项目对同日的口径是**不显示**右侧（if (dayTxt) 才挂），
+    // 那条分支没有相对日元素可测；要测"最左且加粗"用非今日更稳（不会被秒跳）。
+    const tomorrow = await page.evaluate(() => {
+      const d = new Date(Date.now() + 24 * 3600000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `会议 ${tomorrow} 开始`);
+    // 光标压在时间串上（时间串前有「会议 」3 个字）
+    await caretTo(page, 3 + 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+
+    // ── ① 首行顺序 + 加粗：时间必须在最左（老项目 index.html:6410-6418）──
+    const hd = await page.evaluate(() => {
+      const h = document.querySelector('#timeChip .ns-chip-hd');
+      if (!h) return null;
+      const kids = Array.from(h.children).map((el) => {
+        const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return { cls: el.className, text: el.textContent, weight: cs.fontWeight, left: r.left };
+      });
+      return { kids, hdLeft: h.getBoundingClientRect().left };
+    });
+    assert.ok(hd, '首行 .ns-chip-hd 必须存在');
+    assert.equal(hd.kids[0].cls, 'ns-chip-clock', '首行第一个必须是时间（老项目时间在最左）');
+    const clockWeight = Number(hd.kids[0].weight);
+    assert.ok(
+      clockWeight >= 600,
+      '时间必须加粗（老项目 :6410 b标签），实测 fontWeight=' + hd.kids[0].weight,
+    );
+    assert.ok(
+      hd.kids[0].left < hd.hdLeft + 2,
+      '时间必须贴首行左缘（实测 left=' + hd.kids[0].left + ' vs 行左缘 ' + hd.hdLeft + '）',
+    );
+
+    // 🔴 反向：相对日必须挂在**右边**且不与时间重叠。
+    //   老项目是 space-between 的两端；bj 此前是「相对日左 / 时间右」——
+    //   那是用户截图里"左小右大、主次颠倒"的直接原因。
+    if (hd.kids.length > 1) {
+      assert.equal(hd.kids[1].cls, 'ns-chip-rel', '第二个应是相对日');
+      assert.ok(
+        hd.kids[1].left > hd.kids[0].left,
+        '🔴 相对日必须在时间右侧（实测 ' + hd.kids[0].left + ' vs ' + hd.kids[1].left + '）',
+      );
+    }
+
+    // ── ② 分隔线：.ns-chip-sep 节点必须真的存在且有高度 ──
+    //   🔴 这条是本轮真正的漏项：bj 的样式表**早就有** .ns-chip-sep 规则
+    //   （styles.css:1108），但 showChip() 从没创建过这个元素 ——
+    //   典型的「有样式没节点」，规则恒不命中，症状恰好是"老项目有、bj 没有"。
+    const sep = await page.evaluate(() => {
+      const s = document.querySelector('#timeChip .ns-chip-sep');
+      if (!s) return null;
+      const r = s.getBoundingClientRect();
+      const cs = getComputedStyle(s);
+      return { h: r.height, border: cs.borderTopWidth + ' ' + cs.borderTopStyle, mt: cs.marginTop };
+    });
+    assert.ok(sep, '🔴 .ns-chip-sep 节点必须存在（老项目 :6424 有这条分隔线）');
+    assert.ok(sep.h > 0, '分隔线必须有高度，实际=' + sep.h + '（有节点但没高度= 规则没命中）');
+
+    // 🔴 反向：分隔线必须在**事项与 CTA 之间**（不是随便塞在哪儿）
+    const order = await page.evaluate(() => {
+      const chip = document.querySelector('#timeChip');
+      if (!chip) return null;
+      return Array.from(chip.children).map((el) => el.className);
+    });
+    const iItem = order.indexOf('ns-chip-item');
+    const iSep = order.indexOf('ns-chip-sep');
+    const iCta = order.indexOf('ns-chip-cta');
+    assert.ok(iItem >= 0 && iSep >= 0 && iCta >= 0, 'chip 必须有事项行/分隔线/CTA 三段，实际=' + order.join('|'));
+    assert.ok(iItem < iSep && iSep < iCta, `分隔线必须夹在事项与 CTA 之间，实际顺序 ${order.join('>')}`);
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-12 🔴 同日的提醒：首行右侧不挂相对日元素（老项目 if (dayTxt) 口径）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'rem12', 'pw');
+  try {
+    // 今天稍晚一刻钟（避开跨分钟/跨小时的抖动，也确保未过期）
+    const today = await page.evaluate(() => {
+      const d = new Date(Date.now() + 15 * 60000);
+      const p = (x) => String(x).padStart(2, '0');
+      return `今天${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `提醒 ${today} 交`);
+    await caretTo(page, 3 + 5);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+
+    const got = await page.evaluate(() => {
+      const h = document.querySelector('#timeChip .ns-chip-hd');
+      if (!h) return null;
+      const rel = h.querySelector('.ns-chip-rel');
+      return {
+        clockText: (h.querySelector('.ns-chip-clock') || {}).textContent || '',
+        hasRel: !!rel,
+        // 首行右侧的横向位置：老项目同日是「时间独占一行、右边全空」
+        clockRight: ((h.querySelector('.ns-chip-clock') || {}).getBoundingClientRect() || {}).right || 0,
+        hdRight: h.getBoundingClientRect().right,
+      };
+    });
+    assert.ok(got, '首行必须存在');
+    // 🔴 同日：绝对时间必须带「今天」前缀（老项目 :6410 的 today 分支）
+    assert.ok(got.clockText.includes('今天'), '同日必须显示「今天几点几分」，实际=' + got.clockText);
+    // 🔴🔴 同日**不许挂**相对日元素：挂一个空 span 会在 space-between 下
+    //   把加粗时间挤离左缘，症状是"今天的提醒时间不贴左、和明天的不一样"。
+    assert.equal(got.hasRel, false, '同日不许挂 .ns-chip-rel（老项目 if (dayTxt) 才挂）');
+  } finally {
+    await page.close();
+  }
+});

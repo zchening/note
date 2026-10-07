@@ -23,10 +23,20 @@
  *  2. **出码成功即抹掉口令框**（老项目 index.html:9192 `bakPass.value = ''`）
  *  3. **点码全屏放大**（复用 scan/qr-draw.ts 的 largeTargetPx，与配对码同一套）
  *
- * ── 一条**不承接**的老项目行为 ───────────────────────────────────────────
- * 老项目的备份范围是「收藏夹里全部笔记的密钥清单」（collectBackupEntries），
- * 本项目只搬**当前这一篇**。理由不是省事，而是那条路要求把 raw key 写进清单，
- * 而本项目的 CryptoKey 物理上导不出（见 migrate/code.ts 文件头的分叉说明）。
+ * ── 两种码，共用这一个浮层 ─────────────────────────────────────────────
+ * 🔴🔴 **本项目有两张换机码，形态刻意做成同款浮层**（老项目只有一张）：
+ *   ① 单篇换机码 `nsbak1:` —— 打包**当前这一篇**正文。**老项目没有这个功能**，
+ *      是本项目的额外能力（旧版 bj 的「扫码换机」错误地只打包了当前这一篇）。
+ *   ② 收藏备份码 `nsfav1:` —— 打包**收藏夹全部**（老项目 v10.1.7 定稿的唯一口径，
+ *      index.html:8997-8998 逐字：「备份范围（v10.1.7 定稿）：**只备份收藏夹**，
+ *      没有例外、也没有开关。」）。
+ *   ⇒ 菜单「扫码换机」现在走**②**（与老项目一致），①保留为"旧码仍能解"的兼容读。
+ *   实现见 migrate/fav-backup.ts（含"为什么不装密钥"的架构性分叉论证）。
+ *
+ * ── 一处**不承接**的老项目行为 ───────────────────────────────────────────
+ * 老项目把清单加密后写进**云端一篇专用笔记**，二维码只装那篇的链接（甲案）。
+ * 本项目不写那篇笔记，清单直接进码 —— 少一个"往云端写特殊笔记"的副作用，
+ * 少一份"那篇笔记被误当普通笔记编辑"的风险。论证见 fav-backup.ts 文件头。
  */
 
 import { COPY } from '../ui/copy.ts';
@@ -56,10 +66,35 @@ export interface MigratePanelDeps {
    * 为 null 时行为与老项目一致（要口令框）。
    */
   preKey?: string | null;
-  /** 恢复侧：拿码 + 口令去恢复。 */
-  onTake?: (code: string, passphrase: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * 恢复侧：拿码 + 口令去恢复。
+   *
+   * 🔴 `reason` 在 `ok:true` 时是**成功文案**（老项目 :9270 口径逐字，
+   *   「已恢复 N 篇收藏（覆盖 N 篇旧密钥）」），`ok:false` 时才是失败原因。
+   *   两态共用一个字段是有意的：面板只要把文案丢进同一个 .ns-qr-warn 里，
+   *   成功/失败的**呈现位置**就永远一致 —— 分成两个字段就会出现
+   *   "成功时那句在 A 处、失败时那句在 B 处"，样式迟早会分叉。
+   */
+  onTake?: (
+    code: string,
+    passphrase: string,
+  ) => Promise<{ ok: true; reason?: string } | { ok: false; reason: string }>;
   /** 生成前的预判（文档太长等），返回非空即拒绝生成。 */
   precheck?: () => string | null;
+  /**
+   * 🔴 出码后的提示文案。**整句**（含篇数与那两个括号分支）。
+   *
+   * 🔴 为什么不让面板自己算：老项目 :9187-9190 那句里有「一键恢复 N 篇」+ skipped 括号，
+   *   而 N 与 skipped 都只在**生成那一瞬间**、在调用方手里算得出来（收藏夹随时会变）。
+   *   面板拿到的只有码字符串，它硬算就必然要么恒 0、要么与码里的真实清单不符 ——
+   *   后者更糟：屏幕上报"一键恢复 6 篇"，扫回来是3 篇。
+   *
+   * 🔴🔴 传**函数**而不是字符串：篇数要等 `onMake` 跑完（解完密、拿到 ids）才知道，
+   *   而 `buildMigratePanel` 的实参早于那一刻求值。传字符串就只能是提前算好的死值 ——
+   *   用户在面板开着的时候改一下收藏夹，屏上那句就跟码里的清单对不上了。
+   *   不传则退回通用提示（单篇换机走那条）。
+   */
+  scanTip?: (code: string) => string;
   /** 关闭后归还焦点（老项目红线：关弹窗必须让光标回到编辑器）。 */
   onClosed: () => void;
   /** 恢复成功后要跳的提示文案（由调用方决定，因为要带上篇名）。 */
@@ -341,7 +376,10 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
     go.classList.add('hidden');
     cancel.classList.add('hidden');
     outWrap.classList.remove('hidden');
-    hint(tip, COPY.migrateScanTip);
+    // 🔴 优先用调用方给的整句（老项目 :9187 口径，带"一键恢复 N 篇"）；
+    //   没有就给通用那句（单篇换机）。见 MigratePanelDeps.scanTip 的注释。
+    //   scanTip 传的是函数：篇数要等 onMake 跑完才知道（见该字段注释）。
+    hint(tip, (deps.scanTip && deps.scanTip(code)) || COPY.migrateScanTip);
     void acquireWakeLock();
   }
 
@@ -419,7 +457,9 @@ export function buildMigratePanel(deps: MigratePanelDeps): MigratePanel {
       cancel.classList.add('hidden');
       outWrap.classList.add('hidden');
       doneWrap.classList.remove('hidden');
-      hint(doneMsg, COPY.migrateDoneMsg);
+      // 🔴 成功文案优先用调用方给的（老项目 :9270 的「已恢复 N 篇收藏…」逐字）；
+      //   没有就退回通用那句「已恢复，可以继续编辑了」——单篇换机走的就是后者。
+      hint(doneMsg, r.reason || COPY.migrateDoneMsg);
       deps.onRestored?.();
     } finally {
       go.disabled = false;

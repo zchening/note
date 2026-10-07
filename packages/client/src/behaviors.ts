@@ -56,13 +56,15 @@
  *   所以兜底必须**最后**注册，前面的专用处理器（list / link）自然优先。
  */
 
-import type { LexicalEditor } from 'lexical';
+import type { LexicalEditor, ElementNode } from 'lexical';
 import {
   $createParagraphNode,
   $createPoint,
   $createRangeSelection,
   $createTextNode,
   $getNearestNodeFromDOMNode,
+  $getNodeByKey,
+  $getRoot,
   $getSelection,
   $insertNodes,
   $isElementNode,
@@ -698,23 +700,244 @@ function $promoteFoldMarks(editor: LexicalEditor): void {
 
   const head = $createParagraphNode();
   head.append($createTextNode(headText));
-  const body = $createParagraphNode();
   const fold = $createFoldNode(JSON.stringify(titleSpans), true);
-  fold.append(head, body);
+  fold.append(head);
+
+  // 🔴🔴🔴 吸收：把手以下的块要搬进这个 FoldNode（用户报障第 6 条）。
+  //
+  // 老项目权威判据**不是读源码推的**，是真浏览器实测（Playwright 打开老项目
+  // index.html，逐字符固定节奏敲键盘，读 `#editor` 直接子块的 className）。
+  // 场景与实测结果（详见 test/fold-absorb.test.mjs 文件头）：
+  //   [折叠] / 内容一 / 内容二 / (空)      → 组内 = 内容一 + 内容二
+  //   [折叠]买菜清单 / 内容一 / 内容二     → 同上
+  //   [折叠] / 内容一 / (空) / 组外        → 组内 = 内容一；**空行与其后内容留在组外**
+  //   [折叠]组一 / 甲 / [折叠]组二 / 丙→ 组一只吃到「甲」，下一个把手截断
+  //   [折叠]买菜 / 1、橙子 / 2、苹果 / [/折叠] → 独立行锚**不进正文**，它前面那些才是
+  //
+  // ⇒ 三条边界规则：
+  //   R1 从把手的**下一块**开始吸（不是从把手本身）
+  //   R2 遇**空行**停 —— 口径是老项目 **v10.1.2**（`index.html:4382-4388`，
+  //      「建组那一刻按『空行切』定界，并立刻落一枚闭合锚把边界冻住」）
+  //   R3 遇**下一个把手**停（两组不串味）；无空行则一路收到文末
+  //
+  // 🔴🔴 **v10.0.3 与 v10.1.2 不是新旧取代，别只读源码就下结论**：
+  //   `index.html:4034-4040`（v10.0.3）写着「空行彻底退出边界判定 → 标题以下全归组」，
+  //   `applyFolds:4289-4298` 的定界循环也确实只有两个 break。看起来 v10.1.2 已被取代 —— **错**。
+  //   v10.1.2 版本号更大、且注释明写「（用户拍板）」，它由 `applyFolds:4286` 在
+  //   `seedArmed && 本帧新增把手` 时调 `seedFoldGroup:4399-4404`，**保留了
+  //   `isBlankFoldLine` break 并立刻补锚把边界冻住**。
+  //   ⇒ 现行口径 = v10.1.2：**建组帧**按空行切，之后组内可自由打空行（边界已冻结）。
+  //   沿革注释描述的是被 v10.1.2 **收紧过**的那条路径，不是被删掉了。
+  //   （Agent 在这条上两次栽相反的错，两次都是只读源码下结论 —— 详见
+  //    `$collectFoldAbsorb` 里那段长注释。）
+  //
+  // 🔴 为什么不能靠 `$insertNodes` 之后再"找后面的兄弟"：本函数此刻
+  //   `para` 还在 root 上、其后兄弟也都还在，中途改结构会让 `para` 的
+  //   `getNextSibling()` 链在遍历过程中失效（Lexical 节点是不可变快照，
+  //   边搬边取下一兄弟会拿到已 detach 的节点）。所以**先收集、后一次性搬**。
+  const absorb = $collectFoldAbsorb(para);
+  for (const node of absorb.absorbed) {
+    fold.append(node);
+  }
+  if (absorb.absorbed.length === 0) {
+    // 一个都没吸到 ⇒ 补一个空正文段，否则 FoldNode 只有标题、
+    // 用户点开无处可打字（老项目是 `ns-fold-body` 的 gap 段）。
+    fold.append($createParagraphNode());
+  }
+  if (absorb.anchorRemoved && absorb.anchorNode && absorb.anchorNode.isAttached()) {
+    absorb.anchorNode.remove();
+  }
 
   // 🔴🔴🔴 判据：`para.getFirstChild()?.getKey() === anchor.getKey()` 之后
-  //   **不能**直接 para.replace(fold)。实测（探针记录）：
+  //   **不能**直接 `para.replace(fold)`。实测（探针记录）：
   //     enter → anchorType=text → raw="[折叠]" → firstKey=2 anchorKey=2 → REPLACED-OK
   //   探针说替换成功，但**真源与 DOM 一字未变**。
-  //   原因：fold / head / body 三个节点都是**游离**的（从未append 进 root），
+  //   原因：fold / head / body 三个节点都是**游离**的（从未 append 进 root），
   //   `Node.replace()` 在 Lexical 里是 "replace this node with that node"，
-  //   对未挂载的目标节点走的是 `removeNode` +一次 no-op 插入，
+  //   对未挂载的目标节点走的是 `removeNode` + 一次 no-op 插入，
   //   **不抛错、不告警** —— 又是静默降级。
-  //   正确姿势：走 `$insertNodes`（由 Lexical 负责挂载 + 选区落到新节点），
-  //   再把原段落删掉。顺序不能反：先插后删，光标才不会被弹到文档开头。
-  $insertNodes([fold]);
-  if (para.isAttached()) para.remove();
-  dbg('INSERTED-OK');
+  //
+  // 🔴🔴🔴 顺序：**先删 para，再插 fold**。
+  //
+  //   早先写的是 `$insertNodes([fold]); para.remove();`（注释里还写"顺序不能反"）——
+  //   **错的方向**。它在 headless 单测里 4/4 全绿，但挂载 rootElement 的真实编辑器里
+  //   `$insertNodes` 会把 fold 插到 para **之前**并接管选区，
+  //   此后 `para` 已不是可稳定 remove 的挂载节点 ⇒ `para.remove()` **静默不生效**
+  //   （不抛错、不告警 —— 又是静默降级）。
+  //   e2e 实测症状：**原文凭空多出一份**（内容复制损坏，最严重的一类）：
+  //     DOM: DIV.ns-fold:"内容一内容二"   ← 折叠块
+  //          P.ns-p:"内容一"              ← 🔴 原文残留，复制粘贴会带出两份
+  //   FOLD-14（11-fold-autocreate.test.js）钉的就是这条。
+  //
+  //   🔴 教训：**headless 单测绿 ≠ 真编辑器绿**。`$insertNodes` 的行为分叉点在
+  //     "有没有 rootElement"，而 headless 夹具永远测不到那一支。
+  //     凡涉及挂载/选区/DOM 顺序的判据，必须落在 e2e。
+  //
+  //   反过来先删再插就干净：`para.remove()` 先把原段落摘出树，
+  //   `$insertNodes([fold])` 按**当前树**算插入点 ⇒ fold 落到 para 原来的位置。
+  //   光标也不会弹到文档开头：$insertNodes 会把选区放进新插入的 fold。
+  // 🔴🔴🔴 必须用**树上重新取到的节点**来删，不能用闭包里那个 `para` 引用。
+  //
+  //   踩坑过程（每一版都被 e2e FOLD-14 抓住，全部报"内容一"残留）：
+  //     v1 `$insertNodes([fold]); para.remove();`
+  //        → 插到 para 之前并接管选区，para 引用失效 ⇒ 静默不删
+  //     v2 `para.remove(); $insertNodes([fold]);`（以为只是顺序问题）
+  //        → 顺序对了，但**这个 `para` 是 `$isElementNode(anchor.getParent())`
+  //           那一轮拿到的快照引用**；本函数中间又做了 `$collectFoldAbsorb`
+  //           与多次 `fold.append(...)`，Lexical 的节点在 update 期间会
+  //           被换成新版本的对象 ⇒ `para.remove()` 作用在一个**旧版本**上，
+  //           静默不生效（不抛错）。
+  //   正解：记下 `para.getKey()`，删之前用 `$getNodeByKey(key)` 取**当前版本**。
+  //   `$getNodeByKey` 在 update 内返回的是可写（getLatest）节点。
+  //
+  // 🔴🔴🔴 但光"删 para 再 $insertNodes" 还不够 —— **会插到文档开头，凭空多出空壳块**。
+  //   探针 G 实测（场景 组一/甲内容/[折叠]组二/乙内容，dbg: absorbed=1 吸收本身是对的）：
+  //     FINAL 真源: fold(折叠块1)[]  fold(组一)[甲内容]  fold(折叠块1)[组二|乙内容]
+  //     DOM:        ["", "组一甲内容", "折叠块1组二乙内容"]
+  //   ⇒ 最前面多了一个**空的** fold(折叠块1)，真正的组一被挤到第二位。
+  //   原因：`para.remove()` 会把**选区一起摘掉**（选区锚点就在 para 内），
+  //   `$insertNodes([fold])` 按"当前选区"算插入点 ⇒ 选区已失效 ⇒ 落到 root 开头。
+  //   ⇒ 必须**显式指定插入位置**：删 para 之前记住它在 root 里的**下一个兄弟**，
+  //     删完把 fold 插到那个兄弟**之前**；没有下一个兄弟就 append 到 root末尾。
+  //   （不能用 `para.insertAfter(fold)`：fold 是游离节点，
+  //     ElementNode.insertAfter 要求目标已挂载 —— 那正是上面记的"replace 对游离目标 no-op"同款坑。）
+  const paraKey = para.getKey();
+  const anchorNext = para.getNextSibling();
+  const anchorNextKey = anchorNext === null ? null : anchorNext.getKey();
+  para.remove();
+  const live = $getNodeByKey(paraKey);
+  if (live !== null) live.remove();
+
+  if (anchorNextKey === null) {
+    $getRoot().append(fold);
+  } else {
+    const anchor = $getNodeByKey(anchorNextKey);
+    if (anchor === null) $getRoot().append(fold);
+    else anchor.insertBefore(fold);
+  }
+  // 🔴 光标必须显式落进新块。`para.remove()` 把选区一起摘了，
+  //   不重落的话用户会看到"打完了标记，光标不见了"—— 下一次按键会打到未知位置。
+  //   落点用 `commands.ts` 的 placeCaret 同款口径：**update 内用节点 API 落选区**，
+  //   落点选"正文第一段的末尾"（buildHead 刚建的那一段还没有孩子，
+  //   所以要用 paragraph 的 end-of-line point，不是 text point）。
+  try {
+    const firstBody = fold.getChildAtIndex(1) ?? fold.getFirstChild();
+    if ($isElementNode(firstBody)) {
+      const sel2 = $createRangeSelection();
+      const p = $createPoint(firstBody.getKey(), firstBody.getChildrenSize(), 'element');
+      sel2.anchor = p;
+      sel2.focus = p;
+      $setSelection(sel2);
+    }
+  } catch (eCaret) {
+    // 光标落点失败**不许**影响建组本身（正文已经正确成形）
+  }
+  dbg('INSERTED-OK absorbed=' + absorb.absorbed.length + ' paraRemoved=' + (live === null));
+}
+
+/**
+ * 收集「把手以下、到边界为止」应当被吸进折叠组的块。老项目 `applyFolds`
+ * （index.html:4289-4298）的 Lexical 等价物，边界规则见 `$promoteFoldMarks` 里
+ * R1~R3 的注释（判据来自源码 + 真浏览器实测，不是猜）。
+ *
+ * @param handlePara 把手所在段落（它的下一块才是正文起点）
+ */
+function $collectFoldAbsorb(handlePara: ElementNode): {
+  absorbed: ElementNode[];
+  anchorNode: ElementNode | null;
+  anchorRemoved: boolean;
+} {
+  const absorbed: ElementNode[] = [];
+  let anchorNode: ElementNode | null = null;
+  let anchorRemoved = false;
+
+  let cur = handlePara.getNextSibling();
+  while (cur !== null) {
+    if (!$isElementNode(cur)) break;
+    const node: ElementNode = cur;
+    const text = node.getTextContent();
+
+    // R2 独立行锚：`[/折叠]`。老项目把它排除在正文外（ns-fold-endline 压 0 高）。
+    //   注意必须在 R3 之前判：`[/折叠]` 与 `[折叠]` 前缀相似但**不是**把手。
+    if (text.trim() === FOLD_CLOSE_MARK) {
+      anchorNode = node;
+      anchorRemoved = true;
+      dbgAbsorb('stop-anchor');
+      break;
+    }
+
+    // R3 下一个把手截断（两组不串味）。
+    //
+    // 🔴🔴🔴 必须**同时认两种把手**，这是 e2e 探针抓到的结构损坏级 bug：
+    //   老项目 `applyFolds:4290` 判的是 `foldLeadInfo(blocks[k])`，
+    //   而 `foldLeadInfo`（index.html:4079-4080）对**已渲染**的把手块同样命中
+    //   ——它认的是「首子是 ns-fold-mark span」或「行首 [折叠] 文本」两条。
+    //   ⇒ 一个**已经建好的 FoldNode** 就是把手，必须截断。
+    //
+    //   我第一版只判文本前缀 `startsWith('[折叠]')`，漏了 FoldNode 这一支。
+    //   症状（探针E 实测，场景 组一/甲内容/[折叠]组二/乙内容）：
+    //     敲完第3 行时它自己建了一个 fold（title=折叠块1, children=[组二, 乙内容]），
+    //     之后我回首行补 `[折叠]` 建组一 ⇒ **R3 没命中**，
+    //     整个第二个 fold 被吞进组一，DOM 变成：
+    //       DIV.ns-fold:"组一甲内容折叠块1组二乙内容"   ← 一个块里塞了两组
+    //     而组一的标题还退化成占位符 `折叠块1`（= 把第二个 fold 的标题当成了自己标题）。
+    //   这是内容损坏 + 标题错位，比"吞掉几行正文"严重得多。
+    if ($isFoldNode(cur) || text.replace(/^[‌‍⁠﻿]+/, '').startsWith(FOLD_OPEN_MARK)) {
+      dbgAbsorb('stop-next-handle');
+      break;
+    }
+
+    // R2 空行截断 —— 口径是**老项目 v10.1.2**（`index.html:4382-4388`，
+    // 「v10.1.2（用户拍板）：建组那一刻按『空行切』定界，并立刻落一枚闭合锚把边界冻住」）：
+    //   「在标题行行首敲 [折叠] 时只吞紧邻的连续非空行 —— 紧随的空行与其后的内容留在组外；
+    //     但组内此后可以自由打空行（边界由锚冻结，不再重算）。」
+    //   配例（老项目逐字）：
+    //     甲 / 空 / A          → 空组，锚挂把手行尾，空行与 A 全在组外
+    //     甲 / 乙 / 丙丁 / 空 / A → 组内＝乙、丙丁，空行与 A 在组外
+    //
+    // 🔴🔴 **别被 v10.0.3 那段沿革注释骗了**（`index.html:4034-4040` 写着
+    //   「空行彻底退出边界判定 → 标题以下全归组」）。那是**每帧重算**路径
+    //   （`applyFolds:4289-4298` 只有两个 break，空行走 `:4307` 被标
+    //   `ns-fold-gap`，靠引导线表达"组内的可见空隙"）。
+    //   而 v10.1.2 比它**更晚**，走的是 `seedFoldGroup:4399-4404`（由
+    //   `applyFolds:4286` 在 `seedArmed && 本帧新增把手` 时调一次）：
+    //   它保留 `isBlankFoldLine` break，并**立刻补一枚 `[/折叠]` 锚把边界冻住**。
+    //   ⇒ 两者不是"新旧取代"，而是"v10.1.2 用锚把 v10.0.3 的空行宽松限制在正确处"：
+    //     **建组那一刻**按空行切，之后组内可以自由打空行（不再重算边界）。
+    //
+    // 🔴 我（Agent）在这条上栽过两次相反的错，两次都是**只读源码就下结论**：
+    //   第一次照抄 seedFoldGroup 写了空行 break，却没意识到判据文件头钉的是
+    //   「空行不截断」，红的是判据；
+    //   第二次反向"纠错"，把 break 删掉并断言 v10.1.2 是遗留路径 —— 方向正好反了。
+    //   真判据：**版本号更大的那次拍板才是现行口径**；v10.0.3 的沿革注释
+    //   描述的是被 v10.1.2 收紧过的那条路径，不是把它删掉了。
+    //
+    // bj 侧等价实现：FoldNode 的边界由 children 范围天然表达，
+    //   不需要可见锚文本（老项目要落锚只是因为它是 contenteditable，
+    //   边界得靠 DOM 标记冻结）—— 但**"建组帧按空行切"这个时序必须照做**，
+    //   否则「打完标题随手敲个空行、后面正文全掉出组」正是用户报障第 6 条的原症状。
+    const blank = text.replace(/[‌‍⁠﻿]/g, '').trim() === '' && !$hasImageChild(node);
+    if (blank) {
+      dbgAbsorb('stop-blank');
+      break;
+    }
+
+    absorbed.push(node);
+    cur = node.getNextSibling();
+  }
+
+  return { absorbed, anchorNode, anchorRemoved };
+}
+
+/** 折叠块里是否含图片（空行判定用；老项目 isBlankFoldLine 的 img 排除项）。 */
+function $hasImageChild(node: ElementNode): boolean {
+  return node.getChildren().some((c) => c.getType() === 'image' || c.getType() === 'decorator');
+}
+
+/** 吸收边界的调试记录（与 $promoteFoldMarks 共用同一个 __FOLD_DBG__ 通道）。 */
+function dbgAbsorb(s: string): void {
+  const DBG = (window as unknown as { __FOLD_DBG__?: string[] }).__FOLD_DBG__;
+  if (DBG) DBG.push('absorb:' + s);
 }
 
 /**
@@ -758,7 +981,7 @@ function registerFoldAutoCreate(editor: LexicalEditor): () => void {
     //   判据记忆口诀：listener 里只"读+记"，改写一律 setTimeout 出去。
     setTimeout(() => {
       if (editor.isEditable() === false) return;
-      editor.update(() => $promoteFoldMarks(editor), { discrete: true });
+      promoteFoldMarksNow(editor);
     }, 0);
   });
 
@@ -766,6 +989,23 @@ function registerFoldAutoCreate(editor: LexicalEditor): () => void {
     unregisterUpdate();
     root?.removeEventListener('beforeinput', onBeforeInput);
   };
+}
+
+/**
+ * 🔴 触发一次折叠自动建组 —— **生产路径与测试判据共用的唯一入口**。
+ *
+ *   为什么要专门抽这个函数：自动建组的真实链路是
+ *     beforeinput(armed) → registerUpdateListener → setTimeout → editor.update
+ *   单元测试（headless Lexical，不挂 rootElement）**走不到 beforeinput**，
+ *   所以判据没法驱动真实链路。
+ *   早先我在判据里自己写 `globalThis.__NOTESYNC_FOLD_PROMOTE__` 钩子，
+ *   结果判据红的原因只是"钩子不存在"—— **红得没有意义**，
+ *   那种红证明不了bug 存在，是自欺欺人（违反"恒真/假红断言等于没有断言"）。
+ *   现在这个包装函数与setTimeout 里调的是**同一个函数**，
+ *   判据红 ⇒ 生产实现真的没做吸收，判据绿 ⇒ 生产实现真的做了。
+ */
+export function promoteFoldMarksNow(editor: LexicalEditor): void {
+  editor.update(() => $promoteFoldMarks(editor), { discrete: true });
 }
 
 /**

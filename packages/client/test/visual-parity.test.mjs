@@ -152,8 +152,17 @@ test('VP-06 弹窗按钮底色由老项目 :1063 的 !important 决定（非禁�
   //
   //   ⇒ 判据改成钉这条：非禁用按钮**没有**单独的覆写规则，底色由
   //     `.box button:not(.box-x)` 的 --upload-bg（≡ --fg/--bg 二选一）决定。
-  const ghostless = CSS_BODY.match(/\.box button\.ghost-btn\s*\{/g) ?? [];
-  assert.deepEqual(ghostless, [], '老项目那条 ghost-btn 实际不生效，不许照字面实现');
+  // 🔴🔴🔴 追加（2026-10-07 真浏览器取证）：VP-06 末尾原先还断言
+  //   「`.box button.ghost-btn{` 一条都不许存在」——**那条是错的**。
+  //   上一批据源码字面推断「整条 ghost-btn 都被吃回」，但 :1063 的覆盖层
+  //   只声明 background/color/-webkit-text-fill-color，**不碰 margin-top 与 border**。
+  //   Playwright 实读老项目 #cpCancel：marginTop=10px、border=1px solid、底 --fg、字 --bg、字重 400。
+  //   ⇒ ghost-btn 规则**必须存在**，但只准含 margin-top/border，背景与字色一律照抄就会做过头。
+  const ghost = rule('.box button.ghost-btn');
+  assert.ok(ghost, '缺 .box button.ghost-btn 规则（用户报障第 5 条：两枚按钮贴死）');
+  assert.match(ghost, /margin-top:\s*10px/, '老项目 #cpCancel 实测 marginTop=10px');
+  assert.match(ghost, /border:\s*1px solid var\(--line\)/, '老项目 #cpCancel 实测 border=1px solid');
+  assert.doesNotMatch(ghost, /background/, 'ghost-btn 的 background 被 :1063 !important 吃回，不许照字面写');
 
   // 反向钉死：不得存在任何"非禁用按钮另刷底色"的规则。
   // 这是本条判据的**金标**——把 --upload-bg 改成 --hover 就会红，避免再次回归。

@@ -66,7 +66,7 @@ import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
 import { ReminderUI } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
-import { browserStore, favListOf, readFavs, toggleFav, FAVS_MAX } from './fav/favs.ts';
+import { browserStore, favListOf, mergeFavs, readFavs, toggleFav, writeFavs, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
 import { dayGreet } from './egg/fx.ts';
@@ -86,6 +86,15 @@ import {
   restoreMigrateCode,
   MIGRATE_PAYLOAD_CAP,
 } from './migrate/code.ts';
+import {
+  buildFavBackupCode,
+  collectFavBackupIds,
+  favBackupTip,
+  favRestoreTip,
+  isFavBackupCode,
+  restoreFavBackupCode,
+  FAV_BACKUP_MAX,
+} from './migrate/fav-backup.ts';
 import { buildMigratePanel, closeMigratePanel } from './migrate/panel.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
@@ -201,6 +210,26 @@ declare global {
     __NOTESYNC_MIGRATE_OPEN_TAKE__?: (code?: string) => void;
     /** 定长容量（供 e2e 断言"超长被如实拒绝"）。 */
     __NOTESYNC_MIGRATE_CAP__?: () => number;
+    /* ── 收藏备份码（nsfav1:）专用，与上面那组同款形态 ──
+       🔴 之所以单独一组而不在上面那组上加参数：两种码的**恢复副作用完全不同** ——
+         单篇码动正文（挂编辑器、推同步），收藏码只动收藏夹名单。
+         混在一个函数里，e2e 就没法分别断言"恢复收藏码绝不该碰正文"。 */
+    /** 本机收藏清单（已剔备份槽与非法名）。 */
+    __NOTESYNC_FAVBAK_SOURCE__?: () => string[];
+    /** 走生产备份链路出收藏清单码。 */
+    __NOTESYNC_FAVBAK_MAKE__?: (passphrase: string) => Promise<{ ok: boolean; reason?: string }>;
+    /** 出码提示整句（老项目 :9187 口径，带"一键恢复 N 篇"）。 */
+    __NOTESYNC_FAVBAK_TIP__?: () => string;
+    /** 走生产恢复链路喂清单码。 */
+    __NOTESYNC_FAVBAK_TAKE__?: (code: string, passphrase: string) => Promise<boolean>;
+    /** 上次收藏备份恢复的结果（篇数/覆盖/丢弃）。 */
+    __NOTESYNC_FAVBAK_LAST__?: () =>
+      | { ok: boolean; count?: number; renewed?: number; capped?: number }
+      | null;
+    /** 打开收藏备份恢复面板（e2e 走真实用户路径）。 */
+    __NOTESYNC_FAVBAK_OPEN_TAKE__?: (code?: string) => void;
+    /** 清单容量上限。 */
+    __NOTESYNC_FAVBAK_CAP__?: () => number;
     /**
      * Capacitor 全局（App 壳注入）。
      *
@@ -963,6 +992,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   留到 onMenu 回调里算就晚了（那时 innerHTML 已经渲染完，用户会先看到
   //   「收藏笔记」点一下才变「取消收藏」）。
   menuState.faved = readFavs(favStore).indexOf(name) >= 0;
+  syncRef?.noteEdit();
   menuState.favList = favListOf(favStore);
 
   const shell = buildShell(app, {
@@ -1803,6 +1833,14 @@ async function handleScanRaw(raw: string): Promise<void> {
   //   两者的失败文案天差地别（换机码是"口令不对"、配对链接是"这不是配对链接"），
   //   而它们都是一串 base64 —— 若先试配对链接，换机码会走进 URL 解析，
   //   报出"这不是配对链接"，用户完全想不到真正原因（他手里确实是一张换机码）。
+  // 🔴 收藏备份码（nsfav1:）必须**先于**单篇换机码（nsbak1:）判。
+  //   两者都走 restoreMigrateCode 那条路的话，扫到清单码会被当成单篇码硬解，
+  //   报出来的是"口令不对"—— 而口令其实是对的，用户会反复重输。
+  //   （前缀互不为前缀，fav-backup.test.mjs BAK-FAV-01 钉着这条。）
+  if (isFavBackupCode(raw)) {
+    openFavBackupTake(raw);
+    return;
+  }
   if (isMigrateCode(raw)) {
     openMigrateTake(raw);
     return;
@@ -1883,9 +1921,41 @@ function resolveScan(raw: string): { parsed: ReturnType<typeof parsePairLink>; s
    靠"拿码去搜明文"来做，不需要钩子吐明文。 */
 /** 当前会话最后一次生成的换机码（仅码，无口令无明文）。 */
 let lastMigrateCode = '';
+/**
+ * 收藏备份码的出码提示（老项目 :9187 口径，逐字）。
+ *
+ * 🔴 为什么要单独存而不是让面板现算：清单码出码时，篇数与 skipped 都只在
+ *   那一瞬间算得出来（收藏夹随时可能变）。面板拿到的只有码字符串。
+ *   而"一键恢复 N 篇"这句话是**出码后唯一告诉用户这张码干什么的文案** ——
+ *   少它，用户对着码不知道该扫几篇。
+ */
+let lastMigrateTip = '';
+/**
+ * 收藏备份码当次装进码里的**真实篇数**。
+ *
+ * 🔴 为什么单独存：面板的 `scanTip()` 在 `onMake` 成功之后才被调用（同一轮同步链），
+ *   它要报的是「一键恢复 N 篇」—— 这个 N 必须来自**出码那一刻**的清单，
+ *   不能来自开面板那一刻的收藏夹快照（用户可以在面板开着时改收藏）。
+ *   老项目 :9187 的 `col.f.length` 就是同一个口径。
+ */
+let lastMigrateFavCount = 0;
 /** 恢复尝试的形状：成没成、失败原因、以及**恢复后真源是否变了**。 */
 let lastMigrateRestore: { ok: boolean; reason?: string; docChanged?: boolean } | null = null;
-/** 手动生成换机码（e2e 与将来的"分享到另一台设备"入口共用同一实现）。 */
+/** 收藏备份的恢复结果：篇数、覆盖数、丢弃数（供提示与e2e 断言）。 */
+let lastFavBackupRestore: { ok: boolean; count?: number; renewed?: number; capped?: number } | null = null;
+/**
+ * 🔴 手动生成**单篇**换机码（`nsbak1:`）—— **已不是用户路径**。
+ *
+ * 🔴🔴 菜单「扫码换机」现在出的是**收藏备份码**（`nsfav1:`，见 openMigrateMake）：
+ *   老项目只有一个「扫码换机」，备份的就是收藏夹全部（v10.1.7 定稿，index.html:8997-8998），
+ *   压根没有"备份当前这一篇"这个功能。旧 bj 把它接成了单篇，那是与老项目不一致的地方。
+ *
+ *   那单篇码还留在这儿的原因只有两个：
+ *     ① **旧码仍能解** —— 之前发给用户的码不能作废（`applyMigrateRestore` 那条完整保留）。
+ *     ② QR-M 系列判据要靠它造单篇码，验"旧码链路没被收藏码改坏"。
+ *   ⇒ 判"用户能不能造出单篇码"时要看**菜单**，不要看这个钩子；
+ *     它的存在只说明兼容层在，不说明功能对用户可见。
+ */
 window.__NOTESYNC_MIGRATE_MAKE__ = async (passphrase: string): Promise<{ ok: boolean; reason?: string }> => {
   const doc = window.__NOTESYNC_DOC__?.();
   if (!doc) return { ok: false, reason: 'empty' };
@@ -1920,6 +1990,59 @@ window.__NOTESYNC_MIGRATE_LAST__ = () => (lastMigrateRestore ? { ...lastMigrateR
 window.__NOTESYNC_MIGRATE_OPEN_TAKE__ = (code?: string): void => openMigrateTake(code);
 /** 定长容量（供 e2e 断言"超长被如实拒绝"）。 */
 window.__NOTESYNC_MIGRATE_CAP__ = (): number => MIGRATE_PAYLOAD_CAP;
+
+/* ── 收藏备份码（nsfav1:）的正式接口 ─────────────────────────────────────
+ * 🔴 形态与上面那组**刻意同款**：都是"正式接口，不是调试后门"，
+ *   e2e 靠它们走生产链路而不是调内部函数。
+ *   菜单入口面板那边已能收清单码（handleScanRaw 先判 isFavBackupCode）。 */
+
+/** 本机收藏清单（已剔备份槽与非法名）。备份侧与钩子共用它 —— **单一真源**。
+ *🔴 为什么不让钩子去读 `window.__NOTESYNC_FAVBAK_SOURCE__`：
+ *   那样会出现"两个都叫'本机收藏清单'的东西"，钩子读的是 window 上的快照、
+ *   备份侧用的是闭包里的 —— 用户在面板开着时改收藏，两边就会分叉。
+ *   一律走这个函数，两处永远同一份。 */
+function favBackupSourceIds(): string[] {
+  return collectFavBackupIds(readFavs(favStore), null);
+}
+
+/** 本机收藏清单（已剔备份槽与非法名）。e2e 用来确认"备份范围=收藏全部"。 */
+window.__NOTESYNC_FAVBAK_SOURCE__ = (): string[] => favBackupSourceIds();
+
+/** 走**生产备份链路**出收藏清单码。 */
+window.__NOTESYNC_FAVBAK_MAKE__ = async (
+  passphrase: string,
+): Promise<{ ok: boolean; reason?: string }> => {
+  const ids = favBackupSourceIds();
+  if (ids.length === 0) return { ok: false, reason: 'empty' };
+  const r = await buildFavBackupCode(ids, passphrase);
+  if (!r.ok) return { ok: false, reason: r.reason };
+  lastMigrateCode = r.code;
+  lastMigrateTip = favBackupTip(r.ids.length, 0);
+  lastMigrateFavCount = r.ids.length;
+  return { ok: true };
+};
+
+/** 出码提示（老项目 :9187 口径，逐字）。e2e 断言"文案与老项目一致"。 */
+window.__NOTESYNC_FAVBAK_TIP__ = (): string => lastMigrateTip;
+
+/** 走**生产恢复链路**（applyFavBackupRestore）喂清单码。 */
+window.__NOTESYNC_FAVBAK_TAKE__ = async (
+  code: string,
+  passphrase: string,
+): Promise<boolean> => {
+  const r = await applyFavBackupRestore(code, passphrase);
+  lastFavBackupRestore = r.ok
+    ? { ok: true, count: r.count, renewed: r.renewed, capped: r.capped }
+    : { ok: false };
+  return r.ok;
+};
+/** 上次收藏备份恢复的结果（e2e 断言篇数/覆盖/丢弃）。 */
+window.__NOTESYNC_FAVBAK_LAST__ = () =>
+  lastFavBackupRestore ? { ...lastFavBackupRestore } : null;
+/** 打开收藏备份恢复面板（e2e 走真实用户路径）。 */
+window.__NOTESYNC_FAVBAK_OPEN_TAKE__ = (code?: string): void => openFavBackupTake(code);
+/** 清单容量上限（e2e 断言"超限明说不截断"）。 */
+window.__NOTESYNC_FAVBAK_CAP__ = (): number => FAV_BACKUP_MAX;
 
 /**
  * 打开取景层。
@@ -2039,13 +2162,35 @@ function openScanner(): void {
  *   「恢复失败但原文被清空」比直接报错糟糕得多（用户内容没了还不知道）。
  * ───────────────────────────────────────────────────────────────────────── */
 
-/** 备份侧：菜单「扫码换机」进来。 */
+/**
+ * 备份侧：菜单「扫码换机」进来。
+ *
+ * 🔴🔴🔴 备份范围 = **收藏夹全部**（老项目 v10.1.7 定稿，index.html:8997-8998
+ *   逐字：「备份范围（v10.1.7 定稿）：**只备份收藏夹**，没有例外、也没有开关。」）。
+ *   本函数此前只打包**当前这一篇**（buildMigrateCode(doc)）——
+ *   那是本项目自造的形态，老项目**根本没有"备份当前这一篇"这个功能**，
+ *   所以它不是"多了一个功能"，而是**备份范围与老项目不一致**（用户报障第 4 条）。
+ *
+ * 🔴 沿革（写下来防止有人"顺手加个开关回来"）：老项目 v10.1.4 擅自把范围扩到全部笔记，
+ *   v10.1.5 回退成"默认只收藏"并加了勾选框，v10.1.7 用户明确「只备份收藏夹」，
+ *   勾选框一并删除 —— **少一个开关就是少一条状态**，多一个勾选框就多一份
+ *   "上次备份和这次备份范围不一样"的悬念。
+ *
+ * 🔴 清单里**只有笔记名、不装密钥**（与老项目的架构性分叉，理由见 fav-backup.ts 文件头）：
+ *   本项目的 CryptoKey 是 extractable:false，WebCrypto 层面物理上导不出raw 字节。
+ *   恢复端按 PBKDF2(口令, 该篇信封里的 salt) 现派生，与 unlock.ts:174 同一条路。
+ *
+ * 🔴 锁定态仍要拦：老项目 index.html:9117 `if (!cryptoKey) { setStatus(false,'解锁后才可生成换机码') }`。
+ *   本项目沿用既有口径 COPY.migrateNeedUnlock（「请先解锁」，老项目同款，不自造句子）。
+ */
 function openMigrateMake(): void {
   const doc = window.__NOTESYNC_DOC__?.();
   if (!doc) {
     setFootStatus?.('offline', COPY.migrateNeedUnlock);
     return;
   }
+  // 本机收藏原序 = 用户优先级；剔掉备份槽自身与非法名（老项目 collectBackupEntries 同款）
+  const ids = favBackupSourceIds();
   buildMigratePanel({
     mode: 'make',
     // 🔴🔴 免口令直出码：本机当前会话**已持有口令**时直接出码，不再要口令框
@@ -2053,24 +2198,37 @@ function openMigrateMake(): void {
     //   本项目口令在 `sessionPass` 里、面板不持有，所以由这里传进去；
     //   「记忆解锁」进来的会话 sessionPass 为空 ⇒ 传 null ⇒ 仍要口令框（与老项目一致）。
     preKey: sessionPass === '' ? null : sessionPass,
-    // 🔴 预判放在生成之前：超长就别白跑600,000 次 PBKDF2。
-    //   超限时**如实说装不下**，绝不静默截断（截断 = 恢复出被腰斩的笔记）。
-    precheck: () => (fitsInMigrateCode(canonicalize(doc)) ? null : COPY.migrateTooLong),
+    // 🔴 预判放在生成之前：收藏夹是空的就别白跑 600,000 次 PBKDF2。
+    //   超限时**明说装不下**，绝不静默截断（截断 = 用户以为全备份了、实际丢了收藏且不会知道）。
+    precheck: () => (ids.length > 0 ? null : COPY.migrateNoFav),
     onMake: async (passphrase) => {
-      const latest = window.__NOTESYNC_DOC__?.() ?? doc;
-      const r = await buildMigrateCode(latest, passphrase);
+      // 🔴🔴 必须回写 lastMigrateCode —— 「取最近一次生成的码」只有一个真源。
+      //   此前只有测试钩子 __NOTESYNC_MIGRATE_MAKE__ 会写它，而**面板走的不是那条路**
+      //   ⇒ 走真实用户路径（点菜单 → 扫码换机）生成的码，从取码口读回来是空串。
+      //   探针实测：DOM 里码明明在（#migrateQrHolder[data-code] 有完整内容），
+      //   `__NOTESYNC_MIGRATE_CODE__()` 却返回 "" —— 判据与产物脱节。
+      //   免口令直出码（preKey）那条路同样经过这里，所以一并修好。
+      const r = await buildFavBackupCode(ids, passphrase);
       if (r.ok) {
-        // 🔴🔴 必须回写 lastMigrateCode —— 「取最近一次生成的码」只有一个真源。
-        //   此前只有测试钩子 __NOTESYNC_MIGRATE_MAKE__ 会写它，而**面板走的不是那条路**
-        //   ⇒ 走真实用户路径（点菜单 → 扫码换机）生成的码，从取码口读回来是空串。
-        //   探针实测：DOM 里码明明在（#migrateQrHolder[data-code] 有完整 nsbak1:...），
-        //   `__NOTESYNC_MIGRATE_CODE__()` 却返回 "" —— 判据与产物脱节。
-        //   免口令直出码（preKey）那条路同样经过这里，所以一并修好。
         lastMigrateCode = r.code;
-        return r;
+        lastMigrateTip = favBackupTip(r.ids.length, 0);
+        lastMigrateFavCount = r.ids.length;
+        return { ok: true, code: r.code };
       }
-      return { ok: false, reason: r.reason === 'too-long' ? COPY.migrateTooLong : COPY.migrateRenderFail };
+      return {
+        ok: false,
+        reason: r.reason === 'too-long' ? COPY.migrateTooManyFav : COPY.migrateRenderFail,
+      };
     },
+    // 🔴 出码提示的篇数**取自当次出码的真实结果**（lastMigrateFavCount，由上面那次
+    //   onMake 写入），而不是闭包里那份 ids ——
+    //   面板开着的时候用户可能又收藏/取消收藏，闭包那份 ids 已经过期，
+    //   屏上会报"一键恢复 3 篇"而码里其实是 4 篇（老项目 :9187 用的是 col.f.length，
+    //   同样是**出码那一刻**的清单，不是开面板那一刻的）。
+    scanTip: () =>
+      lastMigrateFavCount > 0
+        ? favBackupTip(lastMigrateFavCount, 0)
+        : lastMigrateTip || COPY.migrateScanTip,
     onClosed: () => {
       try {
         editor?.focus();
@@ -2142,6 +2300,121 @@ function openMigrateTake(initialCode?: string): void {
   buildMigratePanel({
     mode: 'take',
     onTake: (code, passphrase) => applyMigrateRestore(code, passphrase),
+    onClosed: () => {
+      try {
+        editor?.focus();
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+  if (initialCode) {
+    const el = document.getElementById('migrateCodeIn') as HTMLTextAreaElement | null;
+    if (el) el.value = initialCode;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 收藏备份码的恢复侧（用户报障第 4 条的另一半）
+ *
+ * 🔴🔴🔴 与单篇换机恢复**根本不同**：
+ *   单篇恢复动的是**当前这一篇正文**（decrypt → 挂编辑器 → 推同步）；
+ *   收藏恢复动的是**收藏夹名单**，**一个字正文都不碰**。
+ *   把两条路混起来写会出现最恶心的症状：扫一次收藏码，当前正在写的笔记被覆盖。
+ *   ——所以这里是独立函数，不是 applyMigrateRestore 加个分支。
+ *
+ * 🔴 老项目形状（index.html:9218-9280，三段照抄）：
+ *   ① 只读恢复卡：先列篇名 + 「恢复这 N 篇」，用户**确认后**才写盘
+ *   ② applyBackupEntries：先算覆盖（写前取）→ 合并收藏 → 写 → 如实报提示
+ *   ③ 提示逐字：'已恢复 N 篇收藏' +（覆盖 N 篇旧密钥）+（收藏夹满…已丢弃最旧 N 项）
+ *
+ * 🔴🔴 **本项目的密钥不写回**（与老项目的架构性分叉，见 fav-backup.ts 文件头）：
+ *   清单里只有笔记名，密钥在新设备上按 PBKDF2(口令, 该篇信封里的 salt) 现派生。
+ *   所以"恢复"在本项目就是**把收藏名单装回去**这一步 ——
+ *   用户随后打开其中任一篇时，走 unlock 那条路自然解开。
+ *   ⇒ 因此**不写 key-store、不写缓存、不动编辑器、不推同步**。
+ *   （动了反而危险：推同步会把"收藏夹变了"当正文编辑发上云端。）
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 喂收藏备份码 + 口令 → 合并进本机收藏夹。
+ *
+ * 🔴🔴 失败时**不写任何东西**（同 applyMigrateRestore 的硬要求）：
+ *   {ok:false} 分支上没有 writeFavs 调用。
+ *   「恢复失败但收藏夹被清空」比直接报错糟糕得多 ——
+ *   用户会因为"看起来恢复成功过"而删掉旧设备上的收藏。
+ */
+async function applyFavBackupRestore(
+  code: string,
+  passphrase: string,
+): Promise<
+  | { ok: true; count: number; renewed: number; capped: number }
+  | { ok: false; reason: string }
+> {
+  const r = await restoreFavBackupCode(code, passphrase);
+  if (!r.ok) {
+    // 口令错/码被改 → 同一句文案，不区分（ARCH 安全不变量）
+    if (r.reason === 'pass') return { ok: false, reason: PASS_ERROR };
+    if (r.reason === 'not-migrate') return { ok: false, reason: COPY.migrateNotMigrate };
+    return { ok: false, reason: COPY.migrateRenderFail };
+  }
+  if (r.ids.length === 0) {
+    return { ok: false, reason: COPY.migrateNothingRestored };
+  }
+
+  // 🔴🔴 hadBefore 必须在**写入前**取（老项目 index.html:9262 v7.7.0「对抗审」）。
+  //   写完再查就永远是 true ⇒ renewed 恒等于条数 ⇒
+  //   「（覆盖 N 篇旧密钥）」这句话就成了永远在喊的假警报，几次之后用户就不看了。
+  const before = new Set(readFavs(favStore));
+  let renewed = 0;
+  for (const id of r.ids) {
+    if (before.has(id)) renewed++;
+  }
+
+  // 合并顺序：备份优先序在前，本机已有并入尾部（老项目 :9265-9267；实现在 favs.ts mergeFavs）
+  const merged = mergeFavs(r.ids, readFavs(favStore));
+  // 老项目口径：'已恢复 ' + Math.min(ok.length, FAVS_MAX) + ' 篇收藏'，
+  //   丢弃数 = 超出的那几篇（如实说，不静默）。
+  const count = Math.min(merged.length, FAVS_MAX);
+  const capped = merged.length > FAVS_MAX ? merged.length - FAVS_MAX : 0;
+
+  const stored = writeFavs(favStore, merged);
+  // 🔴 落盘后必须以**真存下去的东西**为准，不是以算出来的数为准。
+  //   writeFavs 在隐私模式/配额满时会静默写不进去（favs.ts 有注释），
+  //   此时报"已恢复 N 篇"就是**谎报**——用户以为收藏搬过来了，回头一看没有。
+  if (stored.length === 0) {
+    return { ok: false, reason: COPY.migrateFavWriteFail };
+  }
+
+  // 🔴 收藏夹变了 ⇒ 菜单的收藏视图必须重算（favs.ts:25 那条纪律的同一根）。
+  //   不刷的症状：收藏夹视图还是旧列表，用户刚"恢复"完点开菜单看到的还是空。
+  menuState.favList = favListOf(favStore);
+  menuRef?.render();
+
+  return { ok: true, count, renewed, capped };
+}
+
+/**
+ * 收藏备份的恢复卡（老项目 index.html:9231 enterBackupMode 形态）。
+ *
+ * 🔴 老项目是**只读恢复卡**：先列篇名 + 「恢复这 N 篇」，用户点确认才写盘。
+ *   理由不是谨慎过度 —— 恢复会**覆盖本机同名收藏的密钥**（老项目 v7.7.0 如实报"覆盖 N 篇"），
+ *   不让用户先看一眼清单就直接写，等于让他在不知情下放弃本机那几篇。
+ *   bj 的收藏恢复**只合并名单、不覆盖任何内容**（密钥现派生），
+ *   风险低得多，但仍保留"先看清再点"的形状：多一次确认，代价是半秒。
+ */
+function openFavBackupTake(initialCode?: string): void {
+  buildMigratePanel({
+    mode: 'take',
+    onTake: async (code, passphrase) => {
+      const r = await applyFavBackupRestore(code, passphrase);
+      if (!r.ok) return { ok: false, reason: r.reason };
+      // 老项目 :9270-9273 逐字（含覆盖与丢弃两个括号）
+      return {
+        ok: true,
+        reason: favRestoreTip(r.count, r.renewed, r.capped, FAVS_MAX),
+      };
+    },
     onClosed: () => {
       try {
         editor?.focus();

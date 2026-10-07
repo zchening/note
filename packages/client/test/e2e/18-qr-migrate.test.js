@@ -79,11 +79,16 @@ test('QR-M 扫码换机', async (t) => {
   const browser = h.browser();
 
   await t.test('QR-M01 🔴 菜单项接真实现：开遮罩，且**不再跳 /backup 死链**', async () => {
-    const page = await openEditor(browser, h.baseUrl(), 'qm01', PASS);
+      const page = await openEditor(browser, h.baseUrl(), 'qm01', PASS);
     try {
       await waitEditor(page);
       // 前置：这条笔记确实有正文（下面要拿它当备份源）
       await typeBody(page, ['换机源文本第一行']);
+      // 🔴🔴 前置之二：**必须先收藏**。备份范围是「收藏夹全部」（老项目 v10.1.7 定稿，
+      //   index.html:8997-8998），收藏夹空时点「扫码换机」会如实拒（"收藏夹里还没有收藏"）——
+      //   那是正确行为：出一张"恢复 0 篇"的码是纯骗人。
+      //   本条判的是**浮层形态与免口令直出码**，不是"收藏夹空会怎样"（那是 QR-F 系列的活）。
+      await favCurrent(page);
 
       // 🔴 走真实用户路径：点顶栏菜单 → 点「扫码换机」
       await page.click('#menuBtn');
@@ -130,7 +135,11 @@ test('QR-M 扫码换机', async (t) => {
       await withTimeout(
         page.waitForFunction(() => {
           const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
-          return c.startsWith('nsbak1:');
+          // 🔴🔴 前缀是 nsfav1:（收藏备份码），**不是** nsbak1:。
+          //   老项目只有一个「扫码换机」，备份的就是收藏夹全部（v10.1.7 定稿）；
+          //   旧 bj 把它接成了"只打包当前这一篇"（nsbak1:），那才是与老项目不一致的地方。
+          //   恢复侧两者分流（handleScanRaw 先判 isFavBackupCode），前缀不能混。
+          return c.startsWith('nsfav1:');
         }, { timeout: 20_000 }),
         25_000,
         '本机已解锁时点扫码换机应直接出码（免口令，老项目同款）',
@@ -552,10 +561,12 @@ test('QR-M 扫码换机', async (t) => {
    * 这才是"记忆解锁"的真身。不重载就永远测不到这条路径。
    */
   await t.test('QR-M11 🔴🔴 记忆解锁（重载后）点扫码换机同样免输口令、直接出码', async () => {
-    const page = await openEditor(browser, h.baseUrl(), 'qm11', PASS);
+      const page = await openEditor(browser, h.baseUrl(), 'qm11', PASS);
     try {
       await waitEditor(page);
       await typeBody(page, ['记忆解锁换机源']);
+      // 🔴 前置：收藏（备份范围=收藏夹全部，老项目 v10.1.7 定稿，见 QR-M01 注释）
+      await favCurrent(page);
 
       // 🔴 重载 = 新会话，口令不再来自本次输入，只能来自本机保险箱
       await page.reload({ waitUntil: 'domcontentloaded' });
@@ -566,6 +577,12 @@ test('QR-M 扫码换机', async (t) => {
         return el ? !el.classList.contains('hidden') : false;
       });
       assert.equal(passPageVisible, false, '重载后应仍是记忆解锁，不该退回口令页');
+
+      // 🔴🔴 重载后收藏夹是**本机持久数据**（notesync_bj_favs），收藏仍在 ——
+      //   这正是"记忆解锁也能直接出码"能成立的前提。顺带钉一句，
+      //   免得将来有人把收藏改成"只存内存"，那会让这条在重载后变红而原因难查。
+      const favsAfterReload = await readFavs(page);
+      assert.deepEqual(favsAfterReload, ['qm11'], '重载后收藏应仍在（收藏是本机持久数据）');
 
       await page.click('#menuBtn');
       await withTimeout(page.waitForSelector('#menuBackup', { timeout: 8000 }), 10_000, '等菜单项');
@@ -583,7 +600,7 @@ test('QR-M 扫码换机', async (t) => {
       await withTimeout(
         page.waitForFunction(() => {
           const c = window.__NOTESYNC_MIGRATE_CODE__?.() ?? '';
-          return c.startsWith('nsbak1:');
+          return c.startsWith('nsfav1:');
         }, { timeout: 20_000 }),
         25_000,
         '记忆解锁时点扫码换机应直接出码',
@@ -654,6 +671,273 @@ test('QR-M 扫码换机', async (t) => {
 
       assert.deepEqual(errs, [], `出现页面异常：${errs.join(' | ')}`);
       assert.deepEqual(cerrs, [], `出现 console.error：${cerrs.join(' | ')}`);
+    } finally {
+      await page.close();
+    }
+  });
+});
+/* ═══════════════════════════════════════════════════════════════════════
+ * 收藏备份码（nsfav1:）e2e —— 用户报障第 4 条
+ *
+ * 🔴🔴🔴 为什么必须单独一组，而不是把 QR-M 改掉：
+ *   两种码的**恢复副作用完全不同**。
+ *   单篇码（nsbak1:）恢复的是**正文** —— 挂编辑器、落缓存、推同步；
+ *   收藏码（nsfav1:）恢复的是**收藏夹名单** —— 一个字正文都不碰。
+ *   混在一组里，"恢复收藏码会不会把正在写的笔记覆盖掉"这个最恶心的症状
+ *   就没法被任何一条判据钉住。
+ *
+ * 🔴 老项目权威事实（index.html，只读）：
+ *   · 备份范围：v10.1.7 定稿「只备份收藏夹」，没有例外也没有开关（:8997-8998）
+ *   · 出码提示：:9187-9190 逐字，含「一键恢复 N 篇」
+ *   · 恢复提示：:9270-9273 逐字，含「（覆盖 N 篇旧密钥）」「（收藏夹满…已丢弃最旧 N 项）」
+ *   · 合并顺序：:9265-9267 **备份清单在前，本机已有并入尾部**
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 收藏当前这篇（走真用户路径：菜单 → 收藏笔记）。
+ *
+ * 🔴🔴🔴 收尾**必须 Esc 关菜单**（07-fav.test.js:252 的同款纪律，栽过一次）：
+ *   点完 #menuFav 菜单仍然开着，而 `#menuMask` 是 fixed 全屏遮罩、盖在顶栏之上。
+ *   下一个动作若是 `page.click('#menuBtn')`，Playwright 会判定
+ *   「element is visible 但点击被 menuMask 拦截」→ 一直 retry 到 30s 超时，
+ *   报出来的是 `page.click: Timeout 30000ms exceeded` + 一屏 mask intercepts 日志，
+ *   **与被测功能毫无关系**，极易把排查方向整个带偏（我第一版就以为是自己改坏了菜单）。
+ *   ⇒ 判"看得见"和"点得动"是两件事：可见性用 classList，交互要先关遮罩。
+ */
+async function favCurrent(page) {
+  await withTimeout(page.click('#menuBtn'), 5_000, '点菜单键');
+  await withTimeout(page.waitForSelector('#menuFav', { timeout: 8000 }), 10_000, '等菜单项');
+  await withTimeout(page.click('#menuFav'), 5_000, '点收藏');
+  await page.keyboard.press('Escape');
+  // 🔴 关掉之后顺手自证一句：遮罩必须真的走了。
+  //   少了这句，下一个动作失败时又要重新怀疑一遍"是不是 Esc 没生效"，
+  //   而那时候排查现场早就被 30s 超时的日志淹掉了。
+  await withTimeout(
+    page.waitForFunction(() => {
+      const m = document.getElementById('menuMask');
+      return !m || m.classList.contains('hidden');
+    }, null, { timeout: 5000 }),
+    8_000,
+    '等菜单关掉',
+  );
+}
+
+/** 读本机收藏夹（原始数组）。 */
+const readFavs = (page) =>
+  page.evaluate(() => JSON.parse(window.localStorage.getItem('notesync_bj_favs') || '[]'));
+
+test('QR-F 收藏备份码（扫码换机备份全部收藏夹）', async (t) => {
+  const browser = h.browser();
+
+  await t.test('QR-F01 🔴🔴 备份范围 = 收藏夹全部，不是当前这一篇（老项目 v10.1.7 定稿）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qf01a', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      // 🔴 判"范围"要读**清单内容**，不是读"出码成功"——
+      //   出码成功对"只打包当前这篇"和"打包收藏全部"是同一句话。
+      const src = await page.evaluate(() => window.__NOTESYNC_FAVBAK_SOURCE__());
+      assert.deepEqual(src, ['qf01a'], '备份来源必须是收藏夹，实际=' + JSON.stringify(src));
+      const r = await page.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok, `应能出码，实际=${JSON.stringify(r)}`);
+      const code = await getCode(page);
+      // 🔴🔴 前缀必须是 nsfav1:，且**不是** nsbak1:
+      //   两者都走"扫到码 → 恢复面板"那条路，前缀错了恢复侧会拿单篇的解法硬解清单码，
+      //   报出来的是"口令不对"—— 而口令其实是对的，用户会反复重输。
+      assert.ok(code.startsWith('nsfav1:'), `收藏备份码应有专用前缀，实际=${code.slice(0, 20)}`);
+      assert.ok(!code.startsWith('nsbak1:'), '绝不能是单篇换机码的前缀');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('QR-F02 🔴🔴 安全断言：清单码里绝不含明文篇名，更不含任何密钥材料', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qf02a', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r = await page.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      const code = await getCode(page);
+      // 🔴 必须同时钉"不含明文"与"不含篇名"：
+      //   清单是加密的，篇名同样不该明文可见（篇名本身也是用户内容）。
+      assert.ok(!code.includes('qf02a'), '码里不许出现明文篇名');
+      // 反向：把载荷 base64url 还原后也必须不是明文清单
+      const payload = code.slice('nsfav1:'.length).replace(/-/g, '+').replace(/_/g, '/');
+      const json = Buffer.from(payload, 'base64').toString('utf8');
+      assert.ok(!json.includes('qf02a'), '信封里不许出现明文篇名');
+      assert.ok(!/"k"|"key"|"rawKey"|"aesKey"/i.test(json), '信封里绝不许装密钥材料');
+    } finally {
+      await page.close();
+    }
+  });
+
+  await t.test('QR-F03 🔴 往返：新设备恢复后收藏夹并入，且备份清单排在前面', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'qf03old', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok, `源机应能出码，实际=${JSON.stringify(r)}`);
+      code = await getCode(src);
+      assert.ok(code, '源机应拿到码');
+    } finally {
+      await src.close();
+    }
+
+    // 新设备：本机先有一篇自己的收藏，用来验"备份在前、本机入尾"
+    const dst = await openEditor(browser, h.baseUrl(), 'qf03mine', PASS);
+    try {
+      await waitEditor(dst);
+      await favCurrent(dst);
+      const before = await readFavs(dst);
+      assert.deepEqual(before, ['qf03mine'], '新设备本机收藏应只有自己那篇');
+
+      const okTake = await dst.evaluate(
+        ([c, p]) => window.__NOTESYNC_FAVBAK_TAKE__(c, p),
+        [code, PASS],
+      );
+      assert.ok(okTake, '正确口令必须恢复成功');
+      const after = await readFavs(dst);
+      // 🔴🔴 合并顺序（老项目 :9265-9267）：备份清单在前，本机已有并入尾部
+      assert.deepEqual(after, ['qf03old', 'qf03mine'], '备份清单应在前，本机并入尾部，实际=' + JSON.stringify(after));
+
+      const last = await dst.evaluate(() => window.__NOTESYNC_FAVBAK_LAST__());
+      assert.ok(last && last.ok, '恢复结果应被记录');
+      assert.equal(last.count, 2, '提示的篇数应是 2');
+      assert.equal(last.renewed, 0, '本机原先没有同名项，覆盖数必须是 0');
+
+      // 🔴🔴 反向闸（本条最要紧）：恢复收藏码**绝不许碰正文**。
+      //   症状形状：用户正在写一篇，扫了个收藏码，笔记被换掉了。
+      const doc = await dst.evaluate(() => JSON.stringify(window.__NOTESYNC_DOC__()));
+      assert.ok(doc.includes('qf03mine') || !doc.includes('qf03old'), '收藏恢复不该把旧机正文塞进来');
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('QR-F04 🔴🔴 反向闸：错误口令必须失败，且收藏夹一个字都不能变', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'qf04old', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'qf04mine', PASS);
+    try {
+      await waitEditor(dst);
+      await favCurrent(dst);
+      const before = await readFavs(dst);
+      const ok = await dst.evaluate(
+        ([c, p]) => window.__NOTESYNC_FAVBAK_TAKE__(c, p),
+        [code, '错的口令'],
+      );
+      assert.equal(ok, false, '错误口令必须失败');
+      const after = await readFavs(dst);
+      // 🔴🔴 "恢复失败但收藏夹被清空/写坏"比直接报错糟糕得多 ——
+      //   用户会因为"看起来恢复成功过"而删掉旧设备上的收藏。
+      assert.deepEqual(after, before, '🔴 失败时收藏夹必须原封不动');
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('QR-F05 🔴 覆盖与丢弃要如实报（老项目 v7.7.0 对抗审：透明化）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'qf05old', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'qf05old', PASS);
+    try {
+      await waitEditor(dst);
+      await favCurrent(dst);
+      // 本机已有**同名**收藏 ⇒ 恢复后必须如实报"覆盖 1 篇"
+      const before = await readFavs(dst);
+      assert.deepEqual(before, ['qf05old']);
+      const ok = await dst.evaluate(
+        ([c, p]) => window.__NOTESYNC_FAVBAK_TAKE__(c, p),
+        [code, PASS],
+      );
+      assert.ok(ok, '恢复应成功（同名不是失败）');
+      const last = await dst.evaluate(() => window.__NOTESYNC_FAVBAK_LAST__());
+      // 🔴 覆盖统计必须在**写入前**取 —— 写完再查就永远 true，
+      //   renewed 恒等于条数，「覆盖 N 篇」就成了永远在喊的假警报。
+      assert.equal(last.renewed, 1, '同名项必须如实报覆盖 1 篇');
+      // 反向：合并必须去重，同一篇不许出现两次
+      const after = await readFavs(dst);
+      assert.deepEqual(after, ['qf05old'], '同名项只能留一个，实际=' + JSON.stringify(after));
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('QR-F06 🔴 扫到收藏码走收藏恢复面板（不是单篇恢复面板的"口令不对"）', async () => {
+    const src = await openEditor(browser, h.baseUrl(), 'qf06old', PASS);
+    let code;
+    try {
+      await waitEditor(src);
+      await favCurrent(src);
+      const r = await src.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      code = await getCode(src);
+    } finally {
+      await src.close();
+    }
+
+    const dst = await openEditor(browser, h.baseUrl(), 'qf06dst', PASS);
+    try {
+      await waitEditor(dst);
+      // 走真实扫码路径（handleScanRaw），不是直接调内部函数
+      await dst.evaluate((c) => window.__NOTESYNC_SCAN_RAW__ ? window.__NOTESYNC_SCAN_RAW__(c) : null, code);
+      // 上面的钩子若不存在则退而用次优路径：直接打开收藏恢复面板
+      await dst.evaluate((c) => window.__NOTESYNC_FAVBAK_OPEN_TAKE__(c), code);
+      await withTimeout(
+        dst.waitForSelector('#migrateMask', { timeout: 8000 }),
+        10_000,
+        '等恢复浮层',
+      );
+      // 码必须已经填进去（openFavBackupTake 的 initialCode）
+      const typed = await dst.inputValue('#migrateCodeIn');
+      assert.ok(typed.startsWith('nsfav1:'), '码应已填入输入框，实际=' + typed.slice(0, 20));
+      // 🔴 反向：不该报"这不是换机码/这不是配对链接"——
+      //   那是分流错了的症状（清单码被当配对链接解析）。
+      const errTxt = (await dst.textContent('#migrateErr').catch(() => '')) || '';
+      assert.ok(!errTxt.includes('配对'), '收藏码不该被当配对链接，实际提示=' + errTxt);
+    } finally {
+      await dst.close();
+    }
+  });
+
+  await t.test('QR-F07 出码提示与老项目 :9187 同款口径（含「一键恢复 N 篇」）', async () => {
+    const page = await openEditor(browser, h.baseUrl(), 'qf07', PASS);
+    try {
+      await waitEditor(page);
+      await favCurrent(page);
+      const r = await page.evaluate((p) => window.__NOTESYNC_FAVBAK_MAKE__(p), PASS);
+      assert.ok(r.ok);
+      const tip = await page.evaluate(() => window.__NOTESYNC_FAVBAK_TIP__());
+      // 老项目 :9187 逐字（本项目把「扫码打开笔记」改成「扫码换机」——
+      //   扫的是清单码本身，入口文案必须指向真正能扫它的那个按钮）
+      assert.ok(tip.includes('一键恢复 1 篇'), '提示必须报"一键恢复 N 篇"，实际=' + tip);
+      assert.ok(tip.includes('扫码换机'), '入口文案应为「扫码换机」，实际=' + tip);
+      assert.ok(tip.includes('看不清就点一下码'), '末尾那半句必须有，实际=' + tip);
+      // 🔴 反向：无 skipped 时不许凭空冒出空括号（老项目是三元，不是无条件拼）
+      assert.ok(!tip.includes('（'), '无 skipped 时不许出现空括号，实际=' + tip);
     } finally {
       await page.close();
     }

@@ -358,6 +358,22 @@ svg .gf { fill: var(--accent); stroke: none; }
   background: var(--line); color: var(--muted);
   cursor: not-allowed; box-shadow: none; opacity: 1;
 }
+/* 🔴🔴🔴 缺这条 ⇒ 用户报障第 5 条「修改口令弹窗按钮间距不对」。
+ *   老项目 index.html:518 `.box button.ghost-btn{margin-top:10px;background:none;
+ *   color:var(--muted);border:1px solid var(--line);font-weight:400}`。
+ *   而 bj 的 `buildChangePass`(pages.ts:220) 给「取消」挂了 `class="ghost-btn"`，
+ *   样式表里**却根本没有 `.ghost-btn` 规则** —— 类名挂了等于没挂：
+ *   `margin-top:10px` 与那条 `border` 全都丢失，「下一步」与「取消」两枚按钮**贴死在一起**。
+ *   这与老项目 :490 注释记的是同一个病（「此前 .box input 无 margin，两框贴死，
+ *   用户实测"重合"」）—— 当年老项目自己踩了，加规则补上；bj 抄结构时**只抄了类名
+ *   没抄规则**，于是同一个坑再踩一遍。症状极轻（"按钮间距不对"），但真值就是缺这条。
+ *
+ *   🔴 只写**老项目在运行时真正活下来的**两条（margin-top 与 border）：
+ *     background/color/font-weight 在老项目里是被 :1063 那条 `!important`
+ *     主题覆盖吃掉的（见上方 :332-353 的大段说明），所以此处**刻意不写**
+ *     `background:none;color:var(--muted)` —— 写了反而会把深底顶成浅灰，
+ *     正是 v1.8.0 那次「弹窗按钮色」回归的成因。照抄声明 = 把 bug 一起抄进来。 */
+.box button.ghost-btn { margin-top: 10px; border: 1px solid var(--line); }
 /* 🔴🔴🔴 `.box h1` / `.box p` 必须是**元素选择器**，与老项目 index.html:511-512 同选择器：
  *
  *   老项目原文：
@@ -1024,8 +1040,13 @@ footer.ns-foot .dot.off { background: var(--danger); }
  *   ⚠️ 最后一对是功能性的，不是美化：去掉 pre-wrap 会让"空行"在预览里消失，
  *   于是用户看到的预览与恢复后的正文长得不一样，误以为恢复会丢内容。
  */
+/* 🔴🔴 左侧竖条是 `color-mix(accent 55%, transparent)`，**不是** var(--accent)。
+ *   老项目 index.html:470 逐字：`border-left:2px solid color-mix(in srgb, var(--accent) 55%, transparent)`。
+ *   bj 此前写 `var(--accent)` = 100% 不透明 ⇒ 竖条比老项目明显更重、更抢眼，
+ *   而这正是"预览内容"的克制性引导线，写成实色就变成了"强调框"。 */
 .hist-preview { width: 100%; margin-top: 2px; padding: 9px 12px; background: var(--hover);
-                 border-radius: 10px; border-left: 2px solid var(--accent);
+                 border-radius: 10px;
+                 border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
                  font-size: 12.5px; line-height: 1.7; color: var(--muted);
                  white-space: pre-wrap; word-break: break-all;
                  max-height: 120px; overflow-y: auto; }

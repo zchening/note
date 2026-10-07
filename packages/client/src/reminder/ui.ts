@@ -20,7 +20,7 @@
 
 import { COPY } from '../ui/copy.ts';
 import { ICON_X } from '../ui/icons.ts';
-import { fmtLate, fmtRelDay, fmtRemInsert, fmtRemTime, itemForChip, matchAtCaret } from '../reminder/format.ts';
+import { fmtChipDay, fmtChipTime, fmtLate, fmtRemInsert, itemForChip, matchAtCaret } from '../reminder/format.ts';
 import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
 import type { Doc } from '@bj/shared-schema';
 
@@ -206,7 +206,7 @@ export class ReminderUI {
     l1.appendChild(this.buildChipDeleteBtn());
     const l2 = document.createElement('div');
     l2.className = 'ns-chip-ok2';
-    l2.textContent = fmtRemTime(at) + (item ? `　${item}` : '');
+    l2.textContent = fmtChipTime(at) + (item ? `　${item}` : '');
     this.chip.appendChild(l1);
     this.chip.appendChild(l2);
     this.chip.classList.remove('hidden');
@@ -262,30 +262,47 @@ export class ReminderUI {
     }, ms);
   }
 
-  /** CTA 卡（老项目未添加态：时间＋相对日 / 事项 / 通栏主按钮）。 */
+  /** CTA 卡（老项目未添加态：时间＋相对日 / 事项 / 分隔线 / 通栏主按钮）。 */
   private showChip(m: { at: number; index: number; length: number }, item: string): void {
-    const time = fmtRemTime(m.at);
     this.chip.textContent = '';
     this.chip.classList.remove('feedback');
     const hd = document.createElement('div');
     hd.className = 'ns-chip-hd';
-    const rel = document.createElement('span');
-    rel.className = 'ns-chip-rel';
-    rel.textContent = fmtRelDay(m.at, Date.now());
+    // 🔴🔴 顺序：**时间在首行最左侧且加粗**，相对日在右（老项目 index.html:6410-6418）。
+    //   bj 此前是「相对日左 / 时间右」，与老项目完全反过来 ——
+    //   用户看到的截图就是「左边的字小、右边的字大」，主次颠倒。
     const clock = document.createElement('span');
     clock.className = 'ns-chip-clock';
-    clock.textContent = time;
-    hd.appendChild(rel);
+    clock.textContent = fmtChipTime(m.at);
     hd.appendChild(clock);
-    const it = document.createElement('div');
-    it.className = 'ns-chip-item';
-    // 🔴 截断只落在事项行：老项目 v7.8.0 定的规矩（CTA 恒完整可见可点）
-    it.textContent = item ? escapeTruncPlain(item, 30) : '';
+    // 🔴 同日返回空 ⇒ **不挂这个元素**（老项目 `if (dayTxt) {...}`）。
+    //   挂一个空 span 会在首行右侧留出一条空白，justify-content:space-between
+    //   下把加粗时间挤向左边，与老项目「时间贴左」不一致。
+    const dayTxt = fmtChipDay(m.at, Date.now());
+    if (dayTxt) {
+      const rel = document.createElement('span');
+      rel.className = 'ns-chip-rel';
+      rel.textContent = dayTxt;
+      hd.appendChild(rel);
+    }
+    this.chip.appendChild(hd);
+    if (item) {
+      const it = document.createElement('div');
+      it.className = 'ns-chip-item';
+      // 🔴 截断只落在事项行：老项目 v7.8.0 定的规矩（CTA 恒完整可见可点）
+      it.textContent = escapeTruncPlain(item, 30);
+      this.chip.appendChild(it);
+    }
+    // 🔴🔴 分隔线（老项目 index.html:6424 `const sep = document.createElement('div'); sep.className='chip-sep'`）。
+    //   bj 的样式表**早就有** `.ns-chip-sep` 规则（styles.css:1108），
+    //   但 showChip() 从没创建过这个元素 —— 典型的「有样式没节点」：
+    //   规则恒不命中，且症状是"老项目有、bj 没有"，一眼看出是漏了元素而非漏了 CSS。
+    const sep = document.createElement('div');
+    sep.className = 'ns-chip-sep';
+    this.chip.appendChild(sep);
     const cta = document.createElement('div');
     cta.className = 'ns-chip-cta';
     cta.textContent = COPY.remChipAdd;
-    this.chip.appendChild(hd);
-    if (item) this.chip.appendChild(it);
     this.chip.appendChild(cta);
     this.chip.dataset.at = String(m.at);
     this.chip.classList.remove('hidden');
@@ -428,7 +445,7 @@ export class ReminderUI {
       const t = document.createElement('span');
       t.className = 'ns-rem-when';
       const at = Date.parse(r.at);
-      t.textContent = fmtRemTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '');
+      t.textContent = fmtChipTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '');
       row.appendChild(t);
       if (isCatchup && at <= now) {
         const late = document.createElement('span');
@@ -720,7 +737,7 @@ export class ReminderUI {
       const row = document.createElement('div');
       row.className = 'ns-rem-row';
       // 🔴 老项目 v5.42：行内容用**裸文本节点**（span 元素盒被国产浏览器夜间模式吃字）
-      row.appendChild(document.createTextNode(fmtRemTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '')));
+      row.appendChild(document.createTextNode(fmtChipTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '')));
       const off = document.createElement('button');
       off.type = 'button';
       off.className = 'ns-rem-off';
@@ -746,6 +763,17 @@ export class ReminderUI {
     //   而且点一下滚轮就"跳"到正确值，更显得莫名其妙。
     //   顺序反过来（先定位再显示）等于什么都没做，且不报错。
     this.resetWheelScroll();
+    // 🔴 事项输入框默认聚焦（用户报障第 1 条「默认没有聚焦在事项文本框」）。
+    //   同样必须**在摘掉 hidden 之后**：display:none 的输入框 focus() 是 no-op，
+    //   与 scrollTop 同款陷阱（且症状一样是"看着没聚焦、点一下又好了"）。
+    //   用 preventScroll：老项目 v5.43/v5.55 记过触屏自动聚焦会弹软键盘把视口压扁、
+    //   居中弹窗偏位（index.html bakPass focus 那条同款纪律）。
+    try {
+      item.focus({ preventScroll: true });
+    } catch {
+      // 老内核不支持 options：退化为无参 focus（弹窗仍会聚焦，只是可能带滚动）
+      try { item.focus(); } catch { /* 聚焦失败不影响功能 */ }
+    }
   }
 
   /**

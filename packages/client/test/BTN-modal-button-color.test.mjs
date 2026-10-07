@@ -92,17 +92,31 @@ test('BTN-04 反向：任何 .box button 规则都不许拿 --hover 当backgroun
   );
 });
 
-test('BTN-05 老项目那条 ghost-btn 仍不该照字面实现', () => {
-  // ghost-btn 的 background/color/font-weight 被 :1063 的 !important 吃回，
-  // 只剩 margin-top / border。照字面补一条描边透明底会做出老项目根本没有的按钮。
-  const ghostless = CSS_BODY.match(/\.box button\.ghost-btn\s*\{/g) ?? [];
-  assert.deepEqual(ghostless, [], '老项目那条 ghost-btn 实际不生效，不许照字面实现');
-  // 反向：也不许"退而求其次"只抄它的 margin-top/border 来伪装对齐
-  assert.doesNotMatch(
-    CSS_BODY,
-    /\.box button[^{]*\{[^}]*margin-top:\s*10px/,
-    'ghost-btn 的 margin-top 是它唯一存活的声明，但把它搬过来会做出老项目没有的额外样式',
-  );
+test('BTN-05 ghost-btn 只照抄运行时**活下来**的那两条声明', () => {
+  // 🔴🔴🔴 本条原先断言「`.box button.ghost-btn{` 一条都不许存在」，**那个判据是错的**
+  //   （老判据钉错 —— 2026-10-07 真浏览器取证推翻）。
+  //
+  //   真值（Playwright 打开老项目 index.html，日间主题，改口令弹窗 #cpMask 内实读
+  //   getComputedStyle(#cpCancel)）：
+  //     marginTop        = 10px          ← 存活
+  //     borderTopWidth   = 1px / solid   ← 存活
+  //     background       = rgb(28,28,26)  = --fg（深底，被 :1063 !important 吃回）
+  //     color            = rgb(251,251,248) = --bg（同上）
+  //     fontWeight       = 400           ← 被吃回
+  //   ⇒ 老项目 :1063 的 `!important` 覆盖层只声明 background/color/-webkit-text-fill-color，
+  //   **不碰 margin-top 与 border**，所以这两条确实存活。
+  //   而 bj 的 buildChangePass(pages.ts:220) 给「取消」挂了 class="ghost-btn"，
+  //   样式表里却没有对应规则 ⇒ 类名挂了等于没挂，两枚按钮贴死（用户报障第 5 条）。
+  //
+  //   ⇒ 判据改成：照抄 margin-top/border，且**只准抄这两条**。
+  const ghost = rule('.box button.ghost-btn');
+  assert.ok(ghost, '缺 .box button.ghost-btn 规则（老项目 :518 的类名必须被样式表接住）');
+  assert.match(ghost, /margin-top:\s*10px/, '老项目 #cpCancel 实测 marginTop=10px');
+  assert.match(ghost, /border:\s*1px solid var\(--line\)/, '老项目 #cpCancel 实测 border=1px solid');
+  // 反向：背景/字色/字重三条在老项目被 !important 吃回，照抄会做出老项目没有的样式
+  assert.doesNotMatch(ghost, /background/, '老项目 ghost-btn 的 background 被 :1063 !important 吃回，不许照字面写');
+  assert.doesNotMatch(ghost, /color/, '老项目 ghost-btn 的 color 被 :1063 !important 吃回，不许照字面写');
+  assert.doesNotMatch(ghost, /font-weight/, '老项目 ghost-btn 的 font-weight 被 :1063 !important 吃回');
 });
 
 /* ---------------- 3. 禁用态保持不变（这条不许被本次修改带坏）---------------- */

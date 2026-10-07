@@ -15,38 +15,57 @@
 
 import { collectTimeMatches, type TimeMatch } from './time-parse.ts';
 
-/** 面板/卡片显示用：`2027-3-1 10:00`（无前导零，月日不补零——老项目就是这样，短） */
-export function fmtRemTime(at: string | number): string {
+/**
+ * 回写正文用：`2027-3-1 10:00` —— **绝对**形态。
+ *
+ * 🔴🔴 这里必须与 `fmtChipTime` **分开**，绝不能合并：
+ *   显示要的是「今天 09:44」/「10月14日 09:44」（老项目 fmtRemTime），
+ *   而回写正文必须能被解析层的 `reShort`（`(\d{1,2})[-/](\d{1,2})[ T\u3000](\d{1,2}):(\d{2})`）
+ *   认出来。若图省事让回写也走显示格式，正文里落下的会是「今天 09:44」，
+ *   `reShort` **认不出** ⇒ 提醒被 reconcile 判死 ⇒ 用户刚加的提醒自己消失。
+ *   老项目 display 与 insert 本来就是两个函数（fmtRemTime / 写回另有形态），照抄这个分层。
+ */
+export function fmtRemInsert(at: string | number): string {
   const d = new Date(typeof at === 'number' ? at : Date.parse(at));
   if (Number.isNaN(d.getTime())) return '';
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 /**
- * 回写正文用：`2027-3-1 10:00` —— 形态与 fmtRemTime 相同。
+ * chip/卡片**显示**用（老项目 `index.html:6047` fmtRemTime 逐字）：
+ *   今天 → `今天 09:44`；否则 → `10月14日 09:44`（**不带年**、月日不补零）。
  *
- * 🔴 这里刻意**不用** `2027-03-01 10:00`（补零）：
- *   解析层的 `reShort` 是 `(\d{1,2})[-/](\d{1,2})[ T\u3000](\d{1,2}):(\d{2})`，
- *   补零形态能解析，但显示上老项目一直是不补零的短形态（用户看惯了这个样子）。
- *   统一成"显示=回写"减少一类对照表的维护成本。
+ * 🔴 老项目就是「有今天前缀就不带年、没今天前缀才带月日」的二选一，
+ *   bj 此前恒 `YYYY-M-D HH:mm`（带年、无今天前缀）⇒ 两个分支都不对。
  */
-export function fmtRemInsert(at: string | number): string {
-  return fmtRemTime(at);
-}
-
-/** chip 上的相对日：`今天` / `明天` / `后天` / `3月5日` / `2028年1月2日` */
-export function fmtRelDay(at: string | number, now: number = Date.now()): string {
+export function fmtChipTime(at: string | number, now: number = Date.now()): string {
   const d = new Date(typeof at === 'number' ? at : Date.parse(at));
   if (Number.isNaN(d.getTime())) return '';
-  const n = new Date(now);
-  const startOf = (x: Date): number => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const diffDays = Math.round((startOf(d) - startOf(n)) / 86400000);
-  if (diffDays === 0) return '今天';
-  if (diffDays === 1) return '明天';
-  if (diffDays === 2) return '后天';
-  if (diffDays === -1) return '昨天';
-  if (d.getFullYear() === n.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`;
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const sameDay = d.toDateString() === new Date(now).toDateString();
+  return sameDay ? `今天 ${hm}` : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+
+/**
+ * chip 首行右上角相对日（老项目 `index.html:6053` `chipDayLabel` 逐字）：
+ *   同日 → `''`（**不挂标签**）/ 明天 / 后天 / `n<7` → `周X` / 否则 → `n天后`。
+ *
+ * 🔴🔴 同日必须返回空串而不是「今天」：老项目注释写明「fmtRemTime 已带「今天」前缀，
+ *   再挂标签是重复」。bj 此前同日返回「今天」⇒ 首行右侧多一个冗余标签。
+ *   且老项目**没有「昨天」分支**（过期时间串压根不浮 chip，见 matchAtCaret）。
+ */
+export function fmtChipDay(at: string | number, now: number = Date.now()): string {
+  const d = new Date(typeof at === 'number' ? at : Date.parse(at));
+  if (Number.isNaN(d.getTime())) return '';
+  // 🔴 按**日历天**（本地零点差）取整，避开 23:59→00:01 这类跨分钟误差（老项目注释原话）。
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const today = new Date(new Date(now).getFullYear(), new Date(now).getMonth(), new Date(now).getDate()).getTime();
+  const n = Math.round((target - today) / 86400000);
+  if (n <= 0) return '';
+  if (n === 1) return '明天';
+  if (n === 2) return '后天';
+  if (n < 7) return '周' + '日一二三四五六'.charAt(d.getDay());
+  return n + '天后';
 }
 
 /** 迟到时长：`12 分钟` / `3 小时`（不足 1 分钟按 1 分钟算，与老项目一致） */
