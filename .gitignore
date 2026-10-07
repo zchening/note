@@ -53,3 +53,6 @@ playwright-report/
 Thumbs.db
 *.iml
 *.log
+
+# push_bj_apk.py 生成的本地元数据（真源在服务器 deploy/，不入库）
+tools/latest_app.json
