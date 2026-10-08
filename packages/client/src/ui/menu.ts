@@ -468,8 +468,8 @@ export function buildMenu(host: HTMLElement, st: MenuState, cb: MenuCallbacks): 
     //   且它暗示了一个**不存在**的"点整行"行为。
     //
     // 🔴🔴 中间那个 .grow 是**必要的第四列**，不是美化：.hist-meta 自身
-    //   `flex:1;min-width:0`（styles.css；white-space:nowrap 已按"历史版本
-    //   显示完整时间"移除 —— 2026-10-08，见 styles.css .hist-meta 处注释），
+    //   `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`
+    //   （styles.css，2026-10-09 改回老项目截断形状），
     //   没有它的话 meta 会吃掉恢复按钮的宽度，把「恢复」两字挤成竖排 ——
     //   老项目那边的等价约束写在 `.hist-line{flex:1;min-width:0}`（index.html:466）。
     //

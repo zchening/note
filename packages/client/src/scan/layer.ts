@@ -127,7 +127,14 @@ export function buildScanLayer(deps: ScanLayerDeps): { el: HTMLElement; close: (
 
   const snap = document.createElement('button');
   snap.id = 'scanSnap';
-  snap.className = 'ns-ghost-btn';
+  // 🔴🔴 必须与老项目同款类名 `ghost-btn`（index.html:8644
+  //   `snapBtn.className = 'ghost-btn'`），**不是** bj 自造的 `ns-ghost-btn`：
+  //   取景浮层的 `.box` 是承重容器，`.box button:not(.box-x)` 给所有按钮
+  //   `--fg` 底 / `--bg` 字（实底深色），`.box button.ghost-btn` 再补
+  //   `margin-top:10px` + `border:1px solid var(--line)`。
+  //   挂 `ns-ghost-btn`（只有 `background:transparent!important`）会把实底压成
+  //   透明浅字，与老项目并排一眼看出 —— 用户报障第 7 条「抓拍识别按钮不一样」。
+  snap.className = 'ghost-btn';
   snap.textContent = COPY.scanSnap;
 
   box.append(h, stage, tip, cancel, snap);

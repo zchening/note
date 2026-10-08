@@ -43,13 +43,15 @@ cd packages/client && "$NODE" --test test/*.test.mjs                 # 单测
 
 ```bash
 cd D:/Users/zchen/Documents/WorkBuddyProject/NoteSync
-"C:/Users/zchen/.workbuddy/binaries/python/versions/3.13.12/python.exe" _bj_deploy3.py
+"C:/Users/zchen/.workbuddy/binaries/python/versions/3.13.12/python.exe" _bj_deploy_web.py
 ```
 
+- 🔴🔴 **部署网页只跑 `_bj_deploy_web.py`，绝不再跑 `_bj_deploy3.py`**：deploy3 是 S7-b **初次搭建**的第三步，其第 2/6 步是 `rmdir /s /q C:\Services\NoteSyncBj\data` —— **它会删掉生产数据**（笔记密文、街机档案、`wk-mode.txt` 写入凭据闸档位）。`wk-mode.txt` 一没，凭据闸静默从 `full` 退回 `off`（安全回归，且不报错）。`_bj_deploy_web.py` 只替换 `www/` 与服务端源码，`data/` 一字节不动（2026-10-08 v3.0.0 实跑并自证 `data/notes` 非空）。
 - 服务在 **8090**（不是老项目的 8080），数据目录 `C:\Services\NoteSyncBj\data`
-- 部署后必查：`/healthz` 的 `version` 等于刚 bump 的值；`/api/upsign` 返 200
-- 🔴 **新增服务端文件必须同步加进上传清单**，漏了就是 ESM 找不到模块、服务起不来
-- 🔴 **新增静态资源子目录**（如 `icons/`）要确认部署脚本会递归传 —— 它原本只传顶层文件
+- 部署后必查：`/healthz` 的 `version` 等于刚 bump 的值；`/api/upsign` **POST** 返 200（它是 POST-only，GET 本就 404，别误判成故障）
+- 🔴 **新增服务端文件必须同步加进上传清单**（`_bj_deploy_web.py` 里 `("server.js","failmap.js","guards.js","upsign.js")`），漏了就是 ESM 找不到模块、服务起不来
+- 🔴 **新增静态资源子目录**（如 `.well-known/`、`icons/`）要确认两处都放行：`_bj_deploy_web.py` 用 `os.walk` 递归上传；`build.mjs` 的"跳过点文件"过滤器要放行 `.well-known`（否则文件在仓库里、产物里没有、线上 404 而构建日志正常）
+- 凭据：SSH 走 `~/.ssh/notesync_deploy`（ed25519），脚本里不出现密码
 
 ## APK 发版（GitHub 云构建 + 自动 OTA，勿手打）
 

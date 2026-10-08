@@ -631,6 +631,15 @@ export function drawBusy(doc: Document | null = typeof document !== 'undefined' 
     const rain = doc.getElementById('nsRain');
     if (rain && !rain.classList.contains('hidden')) return true; // 节日雨：看 .hidden
 
+    // 🔴🔴 bj 的真身（老项目那两个空壳在 bj 里不存在，见函数头）：
+    //   问候气泡走 fx.ts 的 dayGreet，元素 id 是 `#nsDayToast`，靠 `.show` 点亮；
+    //   节日雨走 fx.ts 的 canvas 粒子层，无常驻节点，故由 fx.ts 在雨期间给
+    //   `body` 挂 `.ns-raining`（雨停自动摘）。
+    //   不补这两条 ⇒ 让位形同虚设 ⇒ 问候/下雨时照样弹卡（用户报障「刷新抽卡太频繁」）。
+    const dayToast = doc.getElementById('nsDayToast');
+    if (dayToast && dayToast.classList.contains('show')) return true;
+    if (doc.body && doc.body.classList.contains('ns-raining')) return true;
+
     // 同一条底部泳道上的其它层：冲突条 / 自身 / 词表确认层。都靠 .hidden 切换。
     const ids = ['draftBar', 'remoteBar', 'eggDraw', 'eggAsk'];
     for (const id of ids) {

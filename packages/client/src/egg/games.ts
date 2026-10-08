@@ -210,6 +210,89 @@ function chunkCjk(s: string): string[] {
 }
 
 /* ------------------------------------------------------------------ *
+ * 桌宠 × 彩蛋（局内融入）—— 老项目 v9.4.0（index.html:11624-11641 逐字）
+ *
+ * 🔴🔴 用户报障第 2 条「宠物没有像老版本一样在其他彩蛋里客串出现」：
+ *   老项目 v9.4.0 把桌宠作为**小剪影**融进了四个 canvas 蛋：
+ *     · /snake  角落常驻，吃颗粒时叼字鼓腮（petPuff + flies）；
+ *     · /brick  蹲在一块普通砖上，砖被打掉即抱砖滚落（petBrick / petFall）；
+ *     · /tank   躲在某块可碎砖后，砖被拆即现形窜走（pet.st = hide/scare/dash）；
+ *     · /dragon 撞停后在**结算卡**左下往上爬（CSS `.ns-pet-climb`，见 shell.ts）。
+ *   这里先落 petFig 画笔（四蛋共用），各蛋的接线在各自 draw 里。
+ *
+ * 🔴 只吃 `pal()` 令牌、零新色（老项目纪律）。opts: s 缩放 / rot 翻滚 /
+ *   puff 鼓腮 / scare 瞪眼+! / cheer 举双手+!。只在 draw() 内被调（jsdom 不跑 draw）。
+ * ------------------------------------------------------------------ */
+interface PetFigOpts {
+  s?: number;
+  rot?: number;
+  puff?: number;
+  scare?: number;
+  cheer?: number;
+}
+
+function petFig(c: CanvasRenderingContext2D, p: Pal, x: number, y: number, opts: PetFigOpts = {}): void {
+  const s = opts.s ?? 1;
+  const rot = opts.rot ?? 0;
+  const puff = opts.puff ?? 0;
+  const scare = opts.scare ?? 0;
+  const cheer = opts.cheer ?? 0;
+  c.save();
+  c.translate(x, y);
+  if (rot) c.rotate(rot);
+  if (s !== 1) c.scale(s, s);
+  c.lineJoin = 'round';
+  c.lineWidth = 1.7;
+  c.strokeStyle = p.accent;
+  c.fillStyle = p.soft;
+  c.beginPath();
+  // 圆身（鼓腮时横向鼓、纵向略扁）
+  c.ellipse(0, -8, 8 + puff * 2.5, 8 - puff * 1.2, 0, 0, Math.PI * 2);
+  c.fill();
+  c.stroke();
+  // 两只耳朵
+  c.beginPath();
+  c.moveTo(-5, -12);
+  c.lineTo(-6.5, -19);
+  c.lineTo(-1, -14);
+  c.stroke();
+  c.beginPath();
+  c.moveTo(5, -12);
+  c.lineTo(6.5, -19);
+  c.lineTo(1, -14);
+  c.stroke();
+  // 两点眼（scare 时瞪大）
+  c.fillStyle = p.fg;
+  const er = 1 + scare * 0.7;
+  c.beginPath();
+  c.arc(-2.6, -9, er, 0, Math.PI * 2);
+  c.fill();
+  c.beginPath();
+  c.arc(2.6, -9, er, 0, Math.PI * 2);
+  c.fill();
+  // 欢呼：举双手左右摇
+  if (cheer) {
+    const sw = Math.sin(cheer * 8) * 4;
+    c.strokeStyle = p.accent;
+    c.beginPath();
+    c.moveTo(-7, -6);
+    c.lineTo(-13, -15 - sw);
+    c.stroke();
+    c.beginPath();
+    c.moveTo(7, -6);
+    c.lineTo(13, -15 + sw);
+    c.stroke();
+  }
+  // 惊/喜头顶一个「!」
+  if (scare || cheer) {
+    c.fillStyle = p.accent;
+    c.font = '12px ui-monospace,Consolas,monospace';
+    c.fillText('!', 9, -18);
+  }
+  c.restore();
+}
+
+/* ------------------------------------------------------------------ *
  * 1. /snake 贪吃蛇 —— 蛇身由笔记名接成，蛇头是当前笔记
  * ------------------------------------------------------------------ */
 
@@ -227,6 +310,9 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
   let score = 0;
   let step = 0;
   let acc = 0;
+  // 🔴 桌宠局内融入（老项目 :11645）：吃颗粒→角落桌宠叼字鼓腮（petPuff + 飞字 flies）
+  let petPuff = 0;
+  let flies: Array<{ px: number; py: number; tx: number; ty: number; t: number; v: number }> = [];
   const SPEED = 7; // 格/秒
 
   const reset = (g: GameCtx): void => {
@@ -250,6 +336,9 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
       break;
     }
     body = body.slice(0, 8);
+    // 🔴 重开清鼓腮/飞字残留（老项目 :11654 逐字：`petPuff = 0; flies.length = 0;`）
+    petPuff = 0;
+    flies = [];
     placeFood(g, ns);
   };
 
@@ -342,10 +431,23 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
           g.fx('eat');
           g.setScore(score + ' 字');
           g.setLevel('蛇身 ' + body.length);
+          // 🔴 桌宠叼走这格 +字数、鼓一下腮（老项目 :11671-11673 逐字）：
+          //   飞字从食物格飞向角落桌宠嘴里，petPuff 让桌宠鼓腮 0.6s。
+          petPuff = 0.6;
+          flies.push({ px: ox + food.x * cell + cell / 2, py: oy + food.y * cell + cell / 2, tx: ox + cell * 0.5, ty: oy + cell * 1.05, t: 0, v: food.pts });
           const ns = names('snake', getCtx().body, getCtx().favs, SNAKE_FALLBACK);
           placeFood(g, ns);
         } else {
           body.pop();
+        }
+      }
+      // 🔴 鼓腮衰减 + 飞字入嘴（老项目 :11696-11697 逐字）
+      if (petPuff > 0) petPuff = Math.max(0, petPuff - dt);
+      for (let fi = flies.length - 1; fi >= 0; fi--) {
+        const fl = flies[fi];
+        if (fl) {
+          fl.t += dt * 1.7;
+          if (fl.t >= 1) flies.splice(fi, 1);
         }
       }
     },
@@ -377,6 +479,16 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
       rr(ctx2, ox + food.x * cell + 1, oy + food.y * cell + 1, cell - 2, cell - 2, 4);
       ctx2.fill();
       txt(ctx2, String(food.pts), ox + (food.x + 0.5) * cell, oy + (food.y + 0.5) * cell, cell * 0.5, p.accent);
+      // 🔴 角落桌宠：吃颗粒时叼字鼓腮（老项目 :11719 逐字）
+      petFig(ctx2, p, ox + cell * 0.5, oy + cell * 1.18, { puff: petPuff > 0 ? petPuff * 1.6 : 0 });
+      // 飞字：从食物格飞进桌宠嘴里（老项目 :11720-11722 逐字，easeOutCubic + 抛物弧）
+      for (const fl of flies) {
+        const e2 = Math.min(1, fl.t);
+        const ee = 1 - Math.pow(1 - e2, 3);
+        ctx2.globalAlpha = 1 - e2 * 0.8;
+        txt(ctx2, '+' + fl.v, fl.px + (fl.tx - fl.px) * ee, fl.py + (fl.ty - fl.py) * ee - Math.sin(ee * Math.PI) * cell, cell * 0.4, p.accent);
+        ctx2.globalAlpha = 1;
+      }
     },
     swipe: (d) => turn(d),
     key: (down, e, g) => {
@@ -921,7 +1033,7 @@ export function dragonGame(getCtx: () => { body: string; favs: string[]; cur?: s
 export function brickGame(getCtx: () => { body: string; favs: string[] }): GameDef {
   const COLS = 6;
   const ROWS = 3;
-  interface Brick { x: number; y: number; w: number; h: number; name: string; kind: 'norm' | 'hard' | 'steel'; hp: number; alive: boolean }
+  interface Brick { x: number; y: number; w: number; h: number; name: string; kind: 'norm' | 'hard' | 'steel'; hp: number; alive: boolean; pet?: boolean }
   let bw = 58;
   const bh = 24;
   const gap = 3;
@@ -933,6 +1045,9 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
   let best = 0;
   let t0 = 0;
   let dead = false;
+  // 🔴 桌宠顶一块普通砖，被击中即抱砖滚落（老项目 :11818 v9.4.0）
+  let petBrick: Brick | null = null;
+  let petFall: { x: number; y: number; vx: number; vy: number; rot: number; vr: number; t: number } | null = null;
 
   const reset = (g: GameCtx): void => {
     const nm = names('brick', getCtx().body, getCtx().favs, ['灵感池', '工作随记', '九月周报', '读书笔记', '菜谱', '健身', '发票', '备忘', '会议', '想法池', '旧文', '待办']);
@@ -959,6 +1074,14 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
     best = 0;
     t0 = 0;
     dead = false;
+    // 🔴 挑一块普通砖顶桌宠（老项目 :11825-11827 逐字：只从 kind==='norm' 里挑）
+    petBrick = null;
+    petFall = null;
+    const norms = bricks.filter((bb) => bb.kind === 'norm');
+    if (norms.length) {
+      petBrick = norms[Math.floor(Math.random() * norms.length)] ?? null;
+      if (petBrick) petBrick.pet = true;
+    }
     g.setScore('0 / ' + bricks.length);
     g.setLevel('连击 0');
   };
@@ -966,6 +1089,7 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
   const finish = (win: boolean, g: GameCtx): void => {
     if (dead) return;
     dead = true;
+    petFall = null; // 🔴 结束时清掉落中的桌宠，别在结算卡下冻成一个僵影（老项目 :11832）
     g.setScore(String(score));
     g.fx(win ? 'win' : 'die');
     g.end(win ? '全清了' : '球掉了', [
@@ -1044,6 +1168,11 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
             best = Math.max(best, combo);
             g.fx('brk');
             g.setScore(score + ' / ' + bricks.length);
+            // 🔴 顶桌宠的砖被打掉：桌宠抱砖滚落（老项目 :11859 逐字）
+            if (b.pet && !petFall) {
+              petFall = { x: b.x + b.w / 2, y: b.y + 2, vx: (Math.random() * 2 - 1) * 46, vy: -40, rot: 0, vr: Math.random() < 0.5 ? -3 : 3, t: 0 };
+              g.fx('bonk');
+            }
             if (bricks.every((x) => !x.alive || x.kind === 'steel')) {
               finish(true, g);
               return;
@@ -1051,6 +1180,22 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
           } else g.fx('hit');
           break;
         }
+      }
+      // 🔴 桌宠抱砖滚落物理（老项目 :11865-11867 逐字：重力 900、落地反弹 0.4、1.8s 后消失）
+      if (petFall) {
+        const Hb = g.h();
+        petFall.t += dt;
+        petFall.vy += 900 * dt;
+        petFall.x += petFall.vx * dt;
+        petFall.y += petFall.vy * dt;
+        petFall.rot += petFall.vr * dt;
+        if (petFall.y >= Hb - 16) {
+          petFall.y = Hb - 16;
+          petFall.vy *= -0.4;
+          petFall.vx *= 0.55;
+          petFall.vr *= 0.4;
+        }
+        if (petFall.t > 1.8) petFall = null;
       }
       g.setLevel('连击 ' + combo);
     },
@@ -1096,6 +1241,15 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
         c.fillText(String(b.name).slice(0, 4), b.x + 6, b.y + b.h / 2 + 0.5);
         c.textBaseline = 'alphabetic';
       }
+      // 🔴 桌宠：坐砖上 / 抱砖滚落（老项目 :11885-11886 逐字；掉落末段 0.5s 淡出）
+      if (petFall) {
+        const fa = petFall.t > 1.3 ? Math.max(0, 1 - (petFall.t - 1.3) / 0.5) : 1;
+        c.globalAlpha = fa;
+        petFig(c, P, petFall.x, petFall.y, { rot: petFall.rot, scare: 0.6 });
+        c.globalAlpha = 1;
+      } else if (petBrick && petBrick.alive) {
+        petFig(c, P, petBrick.x + petBrick.w / 2, petBrick.y + 1, {});
+      }
       // 挡板 + 球（老版同款形态）
       c.lineWidth = 1.7;
       c.strokeStyle = P.accent;
@@ -1119,17 +1273,27 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
 
 export function satoshiGame(): GameDef {
   const N = 4;
-  const WIN_AT = 134217728; // 2^27：过 1 亿聪的最近一档（老版注释：从出生值翻 11 次，难度=经典 2048）
+  // 🔴 老项目 :11898-11899 逐字：出生 2^16 聪 / 次生 2^17 聪 / 大格阈值 2^23 / 目标 1 亿聪。
+  const SPAWN = 65536; // 2^16
+  const SPAWN2 = 131072; // 2^17
+  const BIG = 8388608; // 2^23：老项目「大格」阈值（换金色底）
+  const GOAL = 1e8; // 合到 1 亿聪 = 1 个币（老项目赢条件）
   let cell = 60;
   let ox = 0;
   let oy = 0;
   let grid: number[] = [];
   let moves = 0;
+  let score = 0; // 🔴 老项目口径：**合并累积分**（每次合并 += 合并值之和），不是当前盘面总和
   let over = false;
+  let ghost = 0; // 老项目 :11939：每 20 步剪影小人横穿棋盘一次（纯表现层小破坏）
 
-  const fmt = (v: number): string => v.toLocaleString('en-US');
+  /**
+   * 老项目 `fmt`（:11904 逐字）：`n >= GOAL ? '1 ₿' : n.toLocaleString('en-US')`。
+   * 🔴🔴 用户报障第 4 条「/satoshi 没有『聪』」：此前这里只有千分位、格子单位被写成「币」。
+   *   老项目格子里是「数字 + 聪」两行，满目标时整格显示「1 ₿」。
+   */
+  const fmt = (v: number): string => (v >= GOAL ? '1 ₿' : v.toLocaleString('en-US'));
   const boardMax = (): number => Math.max(...grid);
-  const boardSum = (): number => grid.reduce((a, b) => a + (b ?? 0), 0);
   const canMove = (): boolean => {
     if (grid.some((v) => v === 0)) return true;
     for (let r = 0; r < N; r++) {
@@ -1143,25 +1307,28 @@ export function satoshiGame(): GameDef {
     return false;
   };
   const hud = (g: GameCtx): void => {
-    g.setScore(fmt(boardSum()));
+    // 老项目 :11952：SC 显示合并累积分、LV 显示最大格 + ' 聪'
+    g.setScore(score.toLocaleString('en-US'));
     g.setLevel(fmt(boardMax()) + ' 聪');
   };
   const finish = (win: boolean, g: GameCtx): void => {
     if (over) return;
     over = true;
     g.fx(win ? 'win' : 'die');
-    g.setScore(fmt(boardSum()));
+    g.setScore(score.toLocaleString('en-US'));
+    // 老项目 :11943/:11944 逐字：赢=合成了 1 个币；输=无路可走。
+    // 🔴 输的那行「最大格」值是 `fmt(max)`（**不带** ' 聪' 后缀）——老项目就是裸 fmt。
     g.end(
       win ? '合成了 1 个币' : '无路可走',
       win
         ? [
-            ['本局得分', fmt(boardSum())],
+            ['本局得分', score.toLocaleString('en-US')],
             ['步数', moves + ' 步'],
             ['解锁', '/bitcoin 更深一层'],
           ]
         : [
-            ['本局得分', fmt(boardSum())],
-            ['最大格', fmt(boardMax()) + ' 聪'],
+            ['本局得分', score.toLocaleString('en-US')],
+            ['最大格', fmt(boardMax())],
             ['步数', moves + ' 步'],
           ],
     );
@@ -1170,7 +1337,9 @@ export function satoshiGame(): GameDef {
   const reset = (g: GameCtx): void => {
     grid = new Array(N * N).fill(0);
     moves = 0;
+    score = 0;
     over = false;
+    ghost = 0;
     spawn();
     spawn();
     hud(g);
@@ -1183,7 +1352,7 @@ export function satoshiGame(): GameDef {
     const p = free[Math.floor(Math.random() * free.length)] as number;
     // 老版 SPAWN=2^16(65,536 聪) / SPAWN2=2^17(131,072 聪)：从出生到 1 亿聪翻 11 次，
     // 4×4 理论上限 17 次 → 难度精确等于经典 2048（老版 :11898 注释同款）
-    grid[p] = Math.random() < 0.9 ? 65536 : 131072;
+    grid[p] = Math.random() < 0.9 ? SPAWN : SPAWN2;
   };
 
   const slide = (g: GameCtx, dir: 'U' | 'D' | 'L' | 'R'): void => {
@@ -1196,11 +1365,13 @@ export function satoshiGame(): GameDef {
     if (dir === 'U') for (let cIdx = 0; cIdx < N; cIdx++) lines.push([0, 1, 2, 3].map((r) => r * N + cIdx));
     if (dir === 'D') for (let cIdx = 0; cIdx < N; cIdx++) lines.push([3, 2, 1, 0].map((r) => r * N + cIdx));
     let moved = false;
+    let gain = 0; // 本次移动的合并得分（老项目 slide 的 g）
     for (const line of lines) {
       const vals = line.map((i) => grid[i] as number).filter((v) => v !== 0);
       for (let i = 0; i < vals.length - 1; i++) {
         if (vals[i] === vals[i + 1]) {
           vals[i] = (vals[i] as number) * 2;
+          gain += vals[i] as number; // 🔴 老项目 :11914：g += a[i].v（累加合并后的值）
           vals.splice(i + 1, 1);
           // 🔴 合并后必须 i-- ：不回头会把刚合出来的块在同一条线上再合一次
           //   （[2,2,2,2] 会被算成8+8=16 而不是正确的 4+4+8）
@@ -1215,12 +1386,25 @@ export function satoshiGame(): GameDef {
     }
     if (moved) {
       moves++;
+      score += gain;
       spawn();
       // 🔴 分数**在这里**就推给 HUD：若放到 frame 里每帧推，
       //   swipe 连划时 HUD 会滞后一拍，用户会觉得"没反应"。
-      //   计分口径=老版：SC 显示全场聪数总和、LV 显示最大格。
       hud(g);
-      if (boardMax() >= WIN_AT) finish(true, g);
+      // 🔴 老项目 :11938-11941：每 20 步一个剪影跑过棋盘、随机换乱两格。
+      if (moves % 20 === 0) {
+        ghost = 1;
+        const cells: number[] = [];
+        for (let i = 0; i < grid.length; i++) if (grid[i]) cells.push(i);
+        if (cells.length > 1) {
+          const pc = cells[Math.floor(Math.random() * cells.length)] as number;
+          const qc = cells[Math.floor(Math.random() * cells.length)] as number;
+          const tv = grid[pc] as number;
+          grid[pc] = grid[qc] as number;
+          grid[qc] = tv;
+        }
+      }
+      if (boardMax() >= GOAL) finish(true, g);
       else if (!canMove()) finish(false, g);
     }
   };
@@ -1230,9 +1414,11 @@ export function satoshiGame(): GameDef {
     tip: '四向滑动 / 方向键 · 相同单位相加，一路合到 1 个币（1 亿聪）',
     start: reset,
     resize: (w, h) => {
-      cell = Math.floor(Math.min(w, h) / (N + 1));
-      ox = (w - cell * N) / 2;
-      oy = (h - cell * N) / 2;
+      // 老项目 :11954 逐字：side = min(W,H)*0.92、g = side/4、居中。
+      const side = Math.min(w, h) * 0.92;
+      cell = side / N;
+      ox = (w - side) / 2;
+      oy = (h - side) / 2;
     },
     frame: () => {
       // 2048 是纯事件驱动，没有需要每帧推进的状态（老项目同款）
@@ -1242,27 +1428,84 @@ export function satoshiGame(): GameDef {
       const c = cv?.getContext('2d');
       if (!c) return;
       const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 底格
-      for (let r = 0; r < N; r++) {
-        for (let cIdx = 0; cIdx < N; cIdx++) {
-          c.fillStyle = p.line;
-          rr(c, ox + cIdx * cell + 2, oy + r * cell + 2, cell - 4, cell - 4, 8);
-          c.fill();
-        }
-      }
-      // 块
+      const W = g.w();
+      const H = g.h();
+      const side = cell * N;
+      c.clearRect(0, 0, W, H);
+      // 底部虚线 + 刻度（老项目 :11965-11967 逐字）
+      c.strokeStyle = p.line;
+      c.lineWidth = 1;
+      c.setLineDash([4, 5]);
+      c.beginPath();
+      c.moveTo(ox, oy + side + 14);
+      c.lineTo(ox + side, oy + side + 14);
+      c.stroke();
+      c.beginPath();
+      c.moveTo(ox + side * 0.62, oy + side + 14);
+      c.lineTo(ox + side * 0.78, oy + side + 30);
+      c.stroke();
+      c.setLineDash([]);
       for (let r = 0; r < N; r++) {
         for (let cIdx = 0; cIdx < N; cIdx++) {
           const v = grid[r * N + cIdx] as number;
-          if (v === 0) continue;
-          c.fillStyle = v >= 4 ? p.accent : p.soft;
-          rr(c, ox + cIdx * cell + 2, oy + r * cell + 2, cell - 4, cell - 4, 8);
+          const x = ox + cIdx * cell + 5;
+          const y = oy + r * cell + 5;
+          const s = cell - 10;
+          c.lineWidth = 1.7;
+          c.lineJoin = 'round';
+          // 空格：老项目 :11971 只描边不填充
+          if (!v) {
+            c.strokeStyle = p.line;
+            rr(c, x, y, s, s, 9);
+            c.stroke();
+            continue;
+          }
+          const big = v >= BIG;
+          c.fillStyle = big ? p.accent : p.boxBg;
+          c.strokeStyle = v > SPAWN ? p.accent : p.line;
+          rr(c, x, y, s, s, 9);
           c.fill();
-          const label = v >= 1e8 ? `${Math.floor(v / 1e8)}币` : fmt(v);
-          txt(c, label, ox + (cIdx + 0.5) * cell, oy + (r + 0.5) * cell, Math.min(20, cell * 0.34), v >= 4 ? p.bg : p.fg);
+          c.stroke();
+          c.fillStyle = big ? p.bg : v > SPAWN ? p.accent : p.muted;
+          // 老项目 :11986：千分位逗号换 thin space（不下伸）、字号三档按**位数**。
+          const label = fmt(v).replace(/,/g, '\u2009');
+          const fs = label.length > 8 ? s * 0.16 : label.length > 5 ? s * 0.21 : s * 0.27;
+          c.font = `600 ${Math.round(fs)}px ui-monospace,Consolas,monospace`;
+          c.textAlign = 'center';
+          c.textBaseline = 'middle';
+          // 满目标：整格只写「1 ₿」
+          if (v >= GOAL) {
+            c.fillText(label, x + s / 2, y + s / 2);
+            continue;
+          }
+          // 否则两行：数字 + 「聪」
+          const lh = s * 0.3;
+          c.fillText(label, x + s / 2, y + s / 2 - lh * 0.42);
+          c.font = `${Math.round(fs * 0.5)}px ui-monospace,Consolas,monospace`;
+          c.fillText('聪', x + s / 2, y + s / 2 + lh * 0.58);
         }
       }
+      // 剪影小人横穿棋盘（老项目 :11995-11999 逐字，纯表现层）
+      if (ghost > 0) {
+        ghost -= 0.02;
+        const gxp = ox + side * Math.max(0, Math.min(1, ghost));
+        const gyp = oy + side * 0.5;
+        c.strokeStyle = p.accent;
+        c.lineWidth = 1.7;
+        c.beginPath();
+        c.arc(gxp, gyp - 10, 4, 0, Math.PI * 2);
+        c.moveTo(gxp, gyp - 6);
+        c.lineTo(gxp, gyp + 4);
+        c.moveTo(gxp - 5, gyp - 2);
+        c.lineTo(gxp + 5, gyp - 2);
+        c.moveTo(gxp, gyp + 4);
+        c.lineTo(gxp - 4, gyp + 11);
+        c.moveTo(gxp, gyp + 4);
+        c.lineTo(gxp + 4, gyp + 11);
+        c.stroke();
+      }
+      c.textAlign = 'left';
+      c.textBaseline = 'alphabetic';
     },
     swipe: (d, g) => slide(g, d),
     key: (down, e, g) => {
@@ -1278,28 +1521,75 @@ export function satoshiGame(): GameDef {
 }
 
 /* ------------------------------------------------------------------ *
- * 5. /bitcoin 黄金矿工 —— 钩爪摆、点一下放钩
+ * 5. /bitcoin 黄金矿工 —— 钩爪摆、点一下放钩、越深越肥
+ *
+ * 🔴🔴 移植老项目 index.html:12005-12093 逐条比对。
+ *   此前 bj 版是「一排圆点宝石 + 直上直下放钩」的**另一个游戏**，缺老项目的玩法本体：
+ *     · 矿块类型学：gold 金块 / coin 金币 ₿ / rock 岩石（重）/ tnt 炸药（负分）/
+ *       genesis 创世块（挖到即赢）；各自形状、重量、价值独立；
+ *     · 钩爪**摆动**（老版 ang 在 ±1.19 弧度间来回摆，越到后面摆越快），不是垂直下钩；
+ *     · **重量拖慢回收**（越重回收越慢，`210 - w*0.75`），深了更肥也更难拉；
+ *     · 「越深越值钱」是真的（深度 0.6→2.2 倍加成）。
+ *   缺任何一项都不是老版那个 /bitcoin —— 用户报障第 3 条即指此。
  * ------------------------------------------------------------------ */
 
-export function bitcoinGame(): GameDef {
-  let ax = 0;
-  let ay = 0;
-  let pivotX = 0;
-  let pivotY = 0;
-  let ang = Math.PI / 2;
-  let len = 0;
-  let extending = false;
-  let retracting = false;
+/**
+ * 🔴 品牌图章 —— 老项目 index.html:11569 `nsBrandMark` **逐字**（v9.5.8 起
+ *   tank 基地 / bitcoin 创世块弃记事本纸片，改用产品标环 + N）。
+ *   两弧角度与 favicon 逐字同（-30°→120°、150°→300°）；颜色只吃令牌（P.ac 金）。
+ */
+function nsBrandMark(c: CanvasRenderingContext2D, p: Pal, x: number, y: number, r: number): void {
+  c.save();
+  c.translate(x, y);
+  c.strokeStyle = p.accent;
+  c.lineCap = 'round';
+  c.lineWidth = Math.max(1.4, r * 0.14);
+  c.beginPath();
+  c.arc(0, 0, r, -Math.PI / 6, (Math.PI * 2) / 3);
+  c.stroke();
+  c.beginPath();
+  c.arc(0, 0, r, (Math.PI * 5) / 6, (Math.PI * 10) / 6);
+  c.stroke();
+  c.fillStyle = p.accent;
+  c.font = `700 ${r * 1.05}px Georgia,"Times New Roman",serif`;
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText('N', 0, r * 0.06);
+  c.restore();
+}
+
+/** /bitcoin 素材兜底词（老项目 names() 非 obs 分支的内置词库）。 */
+const BITCOIN_FALLBACK = ['灵感池', '工作随记', '读书笔记', '菜谱', '健身', '发票', '备忘', '会议'];
+
+export function bitcoinGame(getCtx: () => { favs: string[] }): GameDef {
+  interface Mine {
+    t: string;
+    v: number;
+    w: number;
+    x: number;
+    y: number;
+    m: number;
+    r: number;
+    n: string;
+  }
+  let ang = 0;
+  let dir = 1;
+  let rope = 0;
+  let state: 'swing' | 'out' | 'grab' = 'swing';
+  let items: Mine[] = [];
+  let grab: Mine | null = null;
   let score = 0;
   let best = 0;
   let miss = 0;
-  let left = 60; // 老版同款 60s 局时
+  let left = 60;
+  let shake = 0;
+  let PX = 0;
+  const PY = 14;
   let over = false;
-  let gems: { x: number; y: number; r: number; val: number; got: boolean }[] = [];
-  let held: { x: number; y: number; r: number; val: number } | null = null;
 
   const fmt = (v: number): string => v.toLocaleString('en-US');
-  /** 老版 end(msg)（:12022）：结算三行 挖到/最重一钩/空钩；创世块算赢。 */
+
+  /** 老项目 end(msg)（:12021）：结算三行 挖到 / 最重一钩 / 空钩；创世块算赢。 */
   const finish = (msg: string, g: GameCtx): void => {
     if (over) return;
     over = true;
@@ -1313,136 +1603,253 @@ export function bitcoinGame(): GameDef {
   };
 
   const reset = (g: GameCtx): void => {
-    pivotX = g.w() / 2;
-    pivotY = 56;
-    ax = pivotX;
-    ay = pivotY;
-    ang = Math.PI / 2;
-    len = 0;
-    extending = false;
-    retracting = false;
+    ang = 0;
+    dir = 1;
+    rope = 0;
+    state = 'swing';
+    grab = null;
     score = 0;
     best = 0;
     miss = 0;
     left = 60;
+    shake = 0;
     over = false;
-    held = null;
-    gems = [];
-    // 越深越肥：y 越大 val 越高（聪计价，老版同口径）
-    for (let i = 0; i < 16; i++) {
-      const depth = Math.random();
-      gems.push({
-        x: 30 + Math.random() * Math.max(40, g.w() - 60),
-        y: 120 + depth * Math.max(60, g.h() - 200),
-        r: 9 + Math.random() * 12,
-        val: Math.round(5 + depth * 95),
-        got: false,
-      });
-    }
+    PX = g.w() / 2;
+    const nm = names('bitcoin', '', getCtx().favs, BITCOIN_FALLBACK);
+    // 老项目 :12011 逐字：金块 5000/重 140、金币 2500/60、岩石 100/190、炸药 -1500/80。
+    const kinds: ReadonlyArray<readonly [string, number, number]> = [
+      ['gold', 5000, 140], ['coin', 2500, 60], ['rock', 100, 190], ['tnt', -1500, 80],
+      ['gold', 5000, 140], ['coin', 2500, 60], ['rock', 100, 190], ['gold', 5000, 140], ['coin', 2500, 60],
+    ];
+    // 🔴 「越深越值钱」必须是真的：同一档按深度 0.6→2.2 倍加成（价值与重量同比）。
+    //   span 必须夹住下限：矮视口下 span 退化会算出负加成、矿块价值变负（老项目 :12016 注释）。
+    const TOP = 130;
+    const BOT = g.h() - 86;
+    const span = Math.max(1, BOT - TOP);
+    items = kinds.map((k) => {
+      const y = rf(TOP, BOT);
+      const mul = 0.6 + 1.6 * Math.min(1, Math.max(0, (y - TOP) / span));
+      return {
+        t: k[0],
+        v: Math.max(10, Math.round((Math.abs(k[1]) * mul) / 10) * 10) * (k[1] < 0 ? -1 : 1),
+        w: Math.round(k[2] * mul),
+        x: rf(26, g.w() - 56),
+        y,
+        m: Math.round(mul * 100) / 100,
+        r: k[0] === 'rock' ? 15 : k[0] === 'gold' ? 17 : 11,
+        n: pick(nm),
+      };
+    });
+    // 创世块固定钉在底部正中（老项目 :12019）
+    items.push({ t: 'genesis', v: 25000, w: 230, x: g.w() / 2 - 40, y: g.h() - 52, r: 22, m: 1, n: '创世块' });
     g.setScore('0 聪');
     g.setLevel('60s');
+  };
+
+  const drop = (g: GameCtx): void => {
+    if (state === 'swing') {
+      state = 'out';
+      g.fx('shot');
+    }
   };
 
   return {
     id: 'bitcoin',
     tip: '点屏幕 / 空格 = 放钩 · 越深越值钱，但拉回来更慢',
     start: reset,
-    resize: (w, h) => {
-      pivotX = w / 2;
-      pivotY = 56;
-      void h;
+    resize: (w) => {
+      PX = w / 2;
     },
     frame: (dt, g) => {
       if (over) return;
-      // 老版 60s 局时：到点结算「时间到」
-      left -= dt;
       if (left <= 0) {
-        left = 0;
-        g.setLevel('0s');
         finish('时间到', g);
         return;
       }
-      g.setLevel(Math.ceil(left) + 's');
-      if (extending) {
-        len += 460 * dt;
-        const tipX = pivotX + Math.cos(ang) * len;
-        const tipY = pivotY + Math.sin(ang) * len;
-        const hit = gems.find((x) => !x.got && Math.hypot(x.x - tipX, x.y - tipY) < x.r);
-        if (hit) {
-          held = { x: hit.x, y: hit.y, r: hit.r, val: hit.val };
-          hit.got = true;
-          g.fx('coin');
-          extending = false;
-          retracting = true;
-        } else if (tipY > g.h() || tipX < 0 || tipX > g.w()) {
-          extending = false;
-          retracting = true;
+      left -= dt;
+      if (state === 'swing') {
+        // 老项目 :12032：摆速随剩余时间加快（1 + (60-left)/120），到 ±1.19 弧度折返
+        ang += dir * dt * 1.15 * (1 + (60 - left) / 120);
+        if (ang > 1.19) {
+          ang = 1.19;
+          dir = -1;
         }
-      } else if (retracting) {
-        len -= 380 * dt;
-        if (held) {
-          //钩子回收时把宝石往轴心拉
-          held.x -= (held.x - pivotX) * 0.12;
-          held.y -= (held.y - pivotY) * 0.12;
+        if (ang < -1.19) {
+          ang = -1.19;
+          dir = 1;
         }
-        if (len <= 0) {
-          len = 0;
-          retracting = false;
-          if (held) {
-            score += held.val;
-            best = Math.max(best, held.val);
-            g.setScore(fmt(score) + ' 聪');
-            held = null;
-          } else miss++; // 空钩（老版同款计数）
+      } else if (state === 'out') {
+        rope += 330 * dt;
+        const hx = PX + Math.sin(ang) * rope;
+        const hy = PY + Math.cos(ang) * rope;
+        for (const it of items) {
+          if (!grab && Math.hypot(it.x - hx, it.y - hy) < it.r + 9) {
+            grab = it;
+            state = 'grab';
+            if (it.t === 'rock' || it.t === 'genesis') g.fx('thrust');
+            break;
+          }
+        }
+        if (!grab && rope > g.h() + 30) {
+          rope = 0;
+          state = 'swing';
+          miss++;
         }
       } else {
-        // 摆动
-        ang = Math.PI / 2 + Math.sin(performance.now() / 520) * 1.15;
+        // 回收：越重越慢（老项目 :12039 `210 - w*0.75`）
+        rope -= (210 - (grab ? grab.w * 0.75 : 0)) * dt;
+        if (grab && grab.t === 'gold' && Math.floor(rope) % 40 === 0) g.fx('coin');
+        if (rope <= 0) {
+          rope = 0;
+          if (grab) {
+            const got = grab;
+            score += got.v;
+            best = Math.max(best, got.v);
+            if (got.t === 'tnt') {
+              shake = 0.25;
+              g.fx('boom');
+            } else g.fx('coin');
+            items = items.filter((x) => x !== got);
+            if (got.t === 'genesis') {
+              finish('挖到创世块', g);
+              return;
+            }
+            grab = null;
+          }
+          state = 'swing';
+          g.setScore(fmt(score) + ' 聪');
+        }
       }
-      ax = pivotX + Math.cos(ang) * len;
-      ay = pivotY + Math.sin(ang) * len;
+      g.setLevel(Math.ceil(Math.max(0, left)) + 's');
     },
     draw: (g) => {
       const cv = document.getElementById('nsCv') as HTMLCanvasElement | null;
       const c = cv?.getContext('2d');
       if (!c) return;
       const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 钩爪轴
+      const W = g.w();
+      const H = g.h();
+      c.clearRect(0, 0, W, H);
+      // 炸药命中时整屏抖一下（老项目 :12058）
+      if (shake > 0) {
+        shake -= 0.016;
+        c.save();
+        c.translate(rf(-3, 3), rf(-2.5, 2.5));
+      }
+      // 土层横线（老项目 :12060：每 26px 一条）
+      c.strokeStyle = p.line;
+      c.lineWidth = 1;
+      for (let i = 1; i < 17; i++) {
+        c.beginPath();
+        c.moveTo(0, i * 26 + 0.5);
+        c.lineTo(W, i * 26 + 0.5);
+        c.stroke();
+      }
+      const hx = PX + Math.sin(ang) * Math.max(rope, 26);
+      const hy = PY + Math.cos(ang) * Math.max(rope, 26);
       c.strokeStyle = p.fg;
-      c.lineWidth = 2;
+      c.lineWidth = 1.7;
+      c.lineCap = 'round';
       c.beginPath();
-      c.moveTo(pivotX, pivotY);
-      c.lineTo(ax, ay);
+      c.moveTo(PX - 16, PY);
+      c.lineTo(PX + 16, PY);
       c.stroke();
-      c.fillStyle = p.accent;
       c.beginPath();
-      c.arc(ax, ay, 5, 0, Math.PI * 2);
-      c.fill();
-      // 宝石
-      for (const gm of gems) {
-        if (gm.got && !held) continue;
-        if (held && held.x === gm.x && held.y === gm.y) continue;
-        c.fillStyle = gm.val > 60 ? p.accent : p.soft;
-        c.beginPath();
-        c.arc(gm.x, gm.y, gm.r, 0, Math.PI * 2);
-        c.fill();
-        txt(c, String(gm.val), gm.x, gm.y, Math.min(13, gm.r), gm.val > 60 ? p.bg : p.fg);
+      c.moveTo(PX, PY);
+      c.lineTo(hx, hy);
+      c.stroke();
+      c.beginPath();
+      c.moveTo(hx - 7, hy + 2);
+      c.lineTo(hx, hy + 10);
+      c.lineTo(hx + 7, hy + 2);
+      c.stroke();
+      for (const it of items) {
+        if (grab === it) {
+          it.x = hx;
+          it.y = hy + 12;
+        }
+        c.save();
+        c.translate(it.x, it.y);
+        c.lineWidth = 1.7;
+        c.lineJoin = 'round';
+        if (it.t === 'gold') {
+          c.fillStyle = p.accent;
+          c.strokeStyle = p.fg;
+          c.beginPath();
+          c.moveTo(-14, -4);
+          c.lineTo(-8, -11);
+          c.lineTo(8, -11);
+          c.lineTo(14, -4);
+          c.lineTo(0, 4);
+          c.closePath();
+          c.fill();
+          c.stroke();
+          c.fillStyle = p.bg;
+          c.font = '8px ui-monospace,Consolas,monospace';
+          c.textAlign = 'center';
+          c.fillText(String(it.n).slice(0, 2), 0, -3);
+        } else if (it.t === 'coin') {
+          c.strokeStyle = p.accent;
+          c.fillStyle = p.boxBg;
+          c.beginPath();
+          c.arc(0, 0, 11, 0, Math.PI * 2);
+          c.fill();
+          c.stroke();
+          c.fillStyle = p.accent;
+          c.font = '600 11px ui-monospace,Consolas,monospace';
+          c.textAlign = 'center';
+          c.textBaseline = 'middle';
+          c.fillText('₿', 0, 0.5);
+          c.textBaseline = 'alphabetic';
+        } else if (it.t === 'rock') {
+          c.strokeStyle = p.fg;
+          c.fillStyle = p.boxBg;
+          c.beginPath();
+          c.moveTo(-12, 6);
+          c.lineTo(-9, -6);
+          c.lineTo(2, -11);
+          c.lineTo(12, -3);
+          c.lineTo(8, 9);
+          c.lineTo(-4, 11);
+          c.closePath();
+          c.fill();
+          c.stroke();
+        } else if (it.t === 'tnt') {
+          c.strokeStyle = p.fg;
+          c.setLineDash([2.6, 2.4]);
+          c.strokeRect(-11, -8, 22, 16);
+          c.setLineDash([]);
+          c.strokeStyle = p.accent;
+          c.beginPath();
+          c.moveTo(0, -8);
+          c.lineTo(0, -14);
+          c.stroke();
+        } else {
+          nsBrandMark(c, p, 0, 0, 15);
+        }
+        c.restore();
       }
-      // 手上抓着的
-      if (held) {
-        c.fillStyle = p.accent;
-        c.beginPath();
-        c.arc(held.x, held.y, held.r, 0, Math.PI * 2);
-        c.fill();
-        txt(c, String(held.val), held.x, held.y, Math.min(13, held.r), p.bg);
-      }
+      // 底部：深度 + 分数（老项目 :12087-12089）
+      c.fillStyle = p.muted;
+      c.font = '10px ui-monospace,Consolas,monospace';
+      c.textAlign = 'left';
+      c.textBaseline = 'alphabetic';
+      c.fillText('深度 ' + Math.round(H - 130) + 'px', 10, H - 10);
+      c.textAlign = 'right';
+      c.fillText(fmt(score) + ' 聪', W - 10, H - 10);
+      c.textAlign = 'left';
+      if (shake > 0) c.restore();
     },
-    tap: (g) => {
-      if (!extending && !retracting) {
-        extending = true;
-        len = 0;
-        g.fx('shot');
+    down: (x, y, g) => {
+      void x;
+      void y;
+      drop(g);
+    },
+    key: (down, e, g) => {
+      if (!down) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        drop(g);
       }
     },
   };
@@ -1460,7 +1867,7 @@ export function bitcoinGame(): GameDef {
  *   - 三关制：敌 5+level*2、三路出生、AI 半数朝你走、击毁 34% 掉道具
  *     （★射速/盾/钟定身/铲子升钢）；命 3，被击回出生点；
  *   - HUD：左「敌 N」、中「第 X / 3 关 · 命 Y」。
- *   桌宠藏砖 garnish（mkPet/updatePet/petFig）列 TODO 不在本批。
+ *   桌宠藏砖 garnish（mkPet/updatePet/petFig）已按老项目 :12097-12247 补齐（v9.4.0）。
  * ------------------------------------------------------------------ */
 
 export function tankGame(getCtx: () => { body: string; favs: string[]; cur: string }): GameDef {
@@ -1482,6 +1889,9 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
   let shield = 0;
   let freeze = 0;
   let fireCd = 0.32;
+  // 🔴 桌宠躲某块可碎砖后，被拆即现形串下一块（老项目 :12097 v9.4.0）
+  interface TankPet { x: number; y: number; st: 'hide' | 'scare' | 'dash' | 'gone'; scare: number; dashT: number; fx: number; fy: number; tx: number; ty: number }
+  let pet: TankPet | null = null;
 
   const DIRV: Record<'U' | 'D' | 'L' | 'R', [number, number]> = {
     L: [-1, 0], R: [1, 0], U: [0, -1], D: [0, 1],
@@ -1497,6 +1907,59 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
     if (x >= 0 && y >= 0 && x < N && y < N) {
       const row = map[y];
       if (row) row[x] = v;
+    }
+  }
+  /** 所有可碎砖格（老项目 :12098 `brickCells` 逐字）。 */
+  function brickCells(): Array<{ x: number; y: number }> {
+    const a: Array<{ x: number; y: number }> = [];
+    for (let yy = 0; yy < N; yy++) for (let xx = 0; xx < N; xx++) if (map[yy]?.[xx] === 1) a.push({ x: xx, y: yy });
+    return a;
+  }
+  /** 随机挑一块砖藏桌宠（老项目 :12099 `mkPet` 逐字）。 */
+  function mkPet(): TankPet | null {
+    const bc = brickCells();
+    if (!bc.length) return null;
+    const p = bc[Math.floor(Math.random() * bc.length)];
+    if (!p) return null;
+    return { x: p.x, y: p.y, st: 'hide', scare: 0, dashT: 0, fx: 0, fy: 0, tx: 0, ty: 0 };
+  }
+  /**
+   * 桌宠状态机（老项目 :12100-12107 `updatePet` 逐字）：
+   *   hide（砖后）→ 砖没了 scare（瞪眼 0.5s）→ dash（easeInOut 窜向另一块砖）→ hide/再 scare；
+   *   没有可碎砖了 ⇒ gone。
+   */
+  function updatePet(dt: number): void {
+    if (!pet) return;
+    if (pet.st === 'hide' && map[pet.y]?.[pet.x] !== 1) {
+      pet.st = 'scare';
+      pet.scare = 0;
+    }
+    if (pet.st === 'scare') {
+      pet.scare += dt;
+      if (pet.scare > 0.5) {
+        const bc = brickCells();
+        const tg = bc[Math.floor(Math.random() * bc.length)];
+        if (tg) {
+          pet.st = 'dash';
+          pet.dashT = 0;
+          pet.fx = pet.x;
+          pet.fy = pet.y;
+          pet.tx = tg.x;
+          pet.ty = tg.y;
+        } else pet.st = 'gone';
+      }
+    }
+    if (pet.st === 'dash') {
+      pet.dashT += dt * 2.6;
+      const e = Math.min(1, pet.dashT);
+      const ee = e < 0.5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2;
+      pet.x = pet.fx + (pet.tx - pet.fx) * ee;
+      pet.y = pet.fy + (pet.ty - pet.fy) * ee;
+      if (e >= 1) {
+        pet.x = pet.tx;
+        pet.y = pet.ty;
+        pet.st = map[pet.y]?.[pet.x] === 1 ? 'hide' : 'scare';
+      }
     }
   }
   function buildMap(): void {
@@ -1583,6 +2046,7 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
     foes = [];
     spawnFoe();
     base = { x: 6, y: 12, alive: true };
+    pet = mkPet(); // v9.4.0：开一局挑一块砖藏桌宠（老项目 :12133）
     g.setScore('敌 ' + (left + foes.length));
     g.setLevel('第 ' + level + ' / 3 关 · 命 ' + lives);
   }
@@ -1679,6 +2143,11 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
         if (m2 === 1) {
           const row = map[cy];
           if (row) row[cx] = 0;
+          // 🔴 打掉的是桌宠藏的砖：现形（老项目 :12187）
+          if (pet && pet.st === 'hide' && Math.round(pet.x) === cx && Math.round(pet.y) === cy) {
+            pet.st = 'scare';
+            pet.scare = 0;
+          }
           g.fx('hit');
           return false;
         }
@@ -1732,7 +2201,9 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
         foes = [];
         spawnFoe();
         g.fx('confirm');
+        if (!pet || pet.st === 'gone') pet = mkPet(); // 换关重铺掩体，桌宠跟去新砖（老项目 :12201）
       }
+      updatePet(dt); // v9.4.0：桌宠现形→串下一块掩体的状态机（老项目 :12203）
       g.setScore('敌 ' + (left + foes.length));
       g.setLevel('第 ' + level + ' / 3 关 · 命 ' + lives);
     },
@@ -1761,6 +2232,8 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
         c.stroke();
       }
       c.globalAlpha = 1;
+      // 🔴 桌宠藏在砖后：砖随后盖住身子，只露头耳（老项目 :12213 逐字）
+      if (pet && pet.st === 'hide') petFig(c, P, ox + (pet.x + 0.5) * u, oy + (pet.y + 1) * u, { s: 1.7 });
       // 地形（老版同款形态语言：砖=实底圆角、钢=虚线框、河=三道波纹、基地=品牌标）
       c.lineWidth = 1.7;
       c.lineJoin = 'round';
@@ -1890,6 +2363,8 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
         c.arc(ox + b.x * u, oy + b.y * u, 2.6, 0, 7);
         c.fill();
       }
+      // 🔴 被拆现形/窜动时全形置顶层（老项目 :12247 逐字）
+      if (pet && (pet.st === 'scare' || pet.st === 'dash')) petFig(c, P, ox + (pet.x + 0.5) * u, oy + (pet.y + 1) * u - 1, { s: 1, scare: pet.st === 'scare' ? 1 : 0.45 });
     },
   };
 }
@@ -1904,7 +2379,7 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
  *   ② 落稳判据缺两条：老版 |vy|<=4.2 && |rot|<=0.055 && 偏移<=26px，自造版只看偏移；
  *   ③ 仪表盘整条缺失：HUD 中格「垂直 X · 角 Y° · 油 Z%」、结算行
  *      剩余燃料/落地速度/倾角、坠毁标题「姿态歪了/摔了」二选一（按滞空时长）。
- *   桌宠 garnish（稳落挥手/摔了掀跟头）依赖 petFig 画笔，列 TODO 不在本批。
+ *   桌宠 garnish（稳落挥手/摔了掀跟头）已按老项目 :12254-12310 补齐（v9.4.0）。
  * ------------------------------------------------------------------ */
 
 export function spacexGame(): GameDef {
@@ -1920,6 +2395,9 @@ export function spacexGame(): GameDef {
   let PADX = 0;
   let GY = 0;
   let mx = 0;
+  // 🔴 落点旁桌宠：稳落挥手、摔了掀跟头（老项目 :12254 v9.4.0）
+  let pet: { x: number; y: number; st: 'idle' | 'cheer' | 'tumble' | 'flat'; vx: number; vy: number; rot: number; ct: number } | null = null;
+  let lastPetTs = 0;
 
   const reset = (g: GameCtx): void => {
     y = g.h() * 0.16;
@@ -1934,6 +2412,9 @@ export function spacexGame(): GameDef {
     PADX = g.w() * 0.5;
     GY = g.h() - 34;
     mx = g.w() / 2;
+    // 🔴 桌宠立于落点右侧（±26 落窗之外，绝不挡降落）（老项目 :12256）
+    pet = { x: PADX + 46, y: GY, st: 'idle', vx: 0, vy: 0, rot: 0, ct: 0 };
+    lastPetTs = 0;
     g.setScore('0m');
     g.setLevel('');
   };
@@ -1943,6 +2424,16 @@ export function spacexGame(): GameDef {
     if (done) return;
     done = true;
     thrust = false;
+    // 🔴 摔→被气浪掀飞，稳→欢呼（老项目 :12259 逐字；掀飞方向由落点偏离中线决定）
+    if (pet) {
+      if (win) pet.st = 'cheer';
+      else {
+        pet.st = 'tumble';
+        pet.vx = (mx < PADX ? -1 : 1) * (170 + Math.random() * 70);
+        pet.vy = -320;
+        pet.rot = 0;
+      }
+    }
     if (win) g.fx('up');
     else g.fx('die');
     g.setScore(win ? String(Math.round(fuel + 100)) : '0');
@@ -2008,6 +2499,30 @@ export function spacexGame(): GameDef {
       const W = g.w();
       const H = g.h();
       c.clearRect(0, 0, W, H);
+      // 🔴 落地后 frame 停、draw 仍在，桌宠靠**墙钟**自走（老项目 :12297 逐字）
+      const now = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+      const pdt = Math.min(0.05, (now - lastPetTs) / 1000 || 0);
+      lastPetTs = now;
+      if (pet) {
+        if (pet.st === 'cheer') pet.ct += pdt;
+        else if (pet.st === 'tumble') {
+          pet.vy += 900 * pdt;
+          pet.x += pet.vx * pdt;
+          pet.y += pet.vy * pdt;
+          pet.rot += 4 * pdt;
+          if (pet.y >= GY) {
+            pet.y = GY;
+            pet.vy *= -0.4;
+            pet.vx *= 0.6;
+            if (Math.abs(pet.vy) < 40) {
+              pet.vy = 0;
+              pet.vx = 0;
+              pet.rot = Math.round(pet.rot / (Math.PI / 2)) * (Math.PI / 2);
+              pet.st = 'flat';
+            }
+          }
+        }
+      }
       // 背景横线（老版 12 条）+ 星点
       c.strokeStyle = P.line;
       c.lineWidth = 1;
@@ -2041,6 +2556,8 @@ export function spacexGame(): GameDef {
         else c.lineTo(k, yy);
       }
       c.stroke();
+      // 🔴 桌宠：稳落挥手 / 摔了掀跟头翻滚（老项目 :12310 逐字）
+      if (pet) petFig(c, P, pet.x, pet.y, pet.st === 'cheer' ? { cheer: pet.ct } : pet.st === 'tumble' || pet.st === 'flat' ? { rot: pet.rot, scare: 0.5 } : {});
       // 火箭（老版贝塞尔轮廓 + 翼 + 落窗支撑腿提示 + 尾焰）
       c.save();
       c.translate(mx || W / 2, y);
@@ -2365,6 +2882,13 @@ export function petGame(): DomGameDef {
       //   沿用旧类名 ns-pet-stage（CSS 与 EGG-17 判据都按它定位），只把布局改成列。
       mount.className = 'ns-pet-stage ns-pet-stage-panel';
 
+      // 🔴 内容滚动区（老项目 :10398 `.ns-pet-scroll`）。用户报障第 1 条：
+      //   此前内容与按钮都是 mount 的直接子节点，而 mount（`.ns-pet-stage-panel`）
+      //   漏了 `flex-direction:column` ⇒ 所有区块排成一行、横向挤成一团。
+      //   现在按老项目两段式：scroll 包住内容、dock 钉底（CSS 见 styles.css）。
+      const scroll = document.createElement('div');
+      scroll.className = 'ns-pet-scroll';
+
       const s = readPet();
 
       /* ---- 档案头：头像 + 形态名 + 档案行（老项目 :11325-11326 逐字） ---- */
@@ -2386,7 +2910,7 @@ export function petGame(): DomGameDef {
       meta.appendChild(ln);
       top.appendChild(av);
       top.appendChild(meta);
-      mount.appendChild(top);
+      scroll.appendChild(top);
       // 🔴 点大螃蟹跳一下：bj 原有行为（`ns-pet.jump`），老项目面板的头像是静态的。
       //   本轮是**补**面板不是重做页面，所以不把这个已有交互顺手删掉。
       av.addEventListener('click', () => {
@@ -2405,18 +2929,18 @@ export function petGame(): DomGameDef {
         c.textContent = got ? (PET_TRINKET[i] ?? '') : '?';
         shelf.appendChild(c);
       }
-      mount.appendChild(shelf);
+      scroll.appendChild(shelf);
 
       /* ---- 档案串（换养用）+ 说明（老项目 :11328-11329 逐字） ---- */
       const pass = document.createElement('div');
       pass.className = 'ns-pass';
       pass.textContent = petArchiveCode(s);
-      mount.appendChild(pass);
+      scroll.appendChild(pass);
 
       const note = document.createElement('p');
       note.className = 'ns-pnote';
       note.textContent = COPY.petNote;
-      mount.appendChild(note);
+      scroll.appendChild(note);
 
       /* ---- 换养区（老项目 :11330-11334 逐字结构） ---- */
       const swap = document.createElement('div');
@@ -2437,7 +2961,7 @@ export function petGame(): DomGameDef {
       swap.appendChild(swIn);
       swap.appendChild(swGo);
       swap.appendChild(swMsg);
-      mount.appendChild(swap);
+      scroll.appendChild(swap);
 
       const syncMsg = (bad: boolean, msg: string): void => {
         swMsg.hidden = false;
@@ -2556,6 +3080,8 @@ export function petGame(): DomGameDef {
       btns.appendChild(free);
       btns.appendChild(copy);
       dock.appendChild(btns);
+      // 🔴 顺序：先内容滚动区、后钉底操作区（老项目 :10397 的列布局顺序）
+      mount.appendChild(scroll);
       mount.appendChild(dock);
     },
   };

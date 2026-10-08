@@ -399,3 +399,18 @@ test('VP-13 顶栏螃蟹的样式与走位常量必须是老项目原值（:1042
   const layer = code(new URL('../src/egg/layer.ts', import.meta.url));
   assert.match(layer, /if \(key === 'pet'\) \{\s*adoptPet\(\);\s*mountPet\(/, '访问 /pet 必须领养并挂上');
 });
+
+/* ---------------- 8. `.box` 内按钮一律实底（配对弹窗「锁定笔记」）---------------- */
+
+test('VP-14 `.box` 内按钮一律实底：配对弹窗「锁定笔记」挂 ghost-btn，且不许有强制透明的自造类', () => {
+  // 老项目运行时**所有** `.box button` 都是实底（:1063 的 !important 覆盖压过 `.ghost-btn`
+  //   字面的 background:none，见 VP-06）。bj 自造的 `.ns-ghost-btn{background:transparent!important}`
+  //   会把 `.box` 内按钮压成透明浅字 —— 与同面板的 qrReveal / qrClose 并排一眼看出。
+  const panel = code(new URL('../src/scan/panel.ts', import.meta.url));
+  assert.match(panel, /btn\.className = 'ghost-btn';/,
+    '配对弹窗「锁定笔记」必须挂老项目次级按钮类 ghost-btn（实底 + 1px 描边 + margin-top）');
+  // 反向①：源码里不许再出现 ns-ghost-btn（输入已去注释，注释里写着这个名字不会假绿）
+  assert.ok(!/ns-ghost-btn/.test(panel), '不许再用自造的 ns-ghost-btn（会把 .box 内按钮压成透明）');
+  // 反向②：样式表里不许留强制透明的自造类
+  assert.equal(rule('.ns-ghost-btn'), '', '样式表不许留 .ns-ghost-btn（background:transparent!important）');
+});

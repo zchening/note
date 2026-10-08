@@ -164,6 +164,17 @@ export const PALETTE: Readonly<Record<ThemeName, ThemeTokens>> = {
 export const FONTS = {
   serif: 'Georgia,"Times New Roman","Songti SC","STSong",serif',
   mono: 'ui-monospace,SFMono-Regular,"SF Mono",Consolas,Menlo,monospace',
+  /**
+   * 复古皮肤**整站等宽**用的字体栈 —— 老项目 `nsSkinOverrideCss` 注入的
+   * `body{font-family:"Cascadia Mono",Consolas,"Courier New","SimSun",monospace}`
+   * （index.html:1102 **逐字**）。
+   *
+   * 🔴 与 `--mono` **刻意分开**：老项目里这两条是两套栈 ——
+   *   `--mono`（时间戳/等宽小字）走 ui-monospace，皮肤 body 走 Cascadia Mono。
+   *   合成一个令牌会让"皮肤正文"和"皮肤里的时间戳"在装了 Cascadia Mono 的机器上
+   *   字形不一致（老项目是一致的 ui-monospace 时间戳 + Cascadia 正文）。
+   */
+  skinMono: '"Cascadia Mono",Consolas,"Courier New","SimSun",monospace',
 } as const;
 
 /**
@@ -176,16 +187,23 @@ export const OVERLAY = {
   /** 口令页等模态遮罩：浅色用暖调深色，不用纯黑（纯黑在暖白底上很脏） */
   maskLight: 'rgba(20,20,18,.45)',
   maskDark: 'rgba(0,0,0,.55)',
-  /** 终端绿皮肤扫描线 */
-  scanNight: 'repeating-linear-gradient(to bottom, rgba(0,0,0,.16) 0 1px, transparent 1px 3px)',
-  scanDay: 'repeating-linear-gradient(to bottom, rgba(0,0,0,.09) 0 1px, transparent 1px 3px)',
-  /** 打字机纸皮肤横竖格线 */
-  paperDay:
-    'repeating-linear-gradient(to bottom, rgba(120,110,90,.10) 0 1px, transparent 1px 26px),' +
-    ' repeating-linear-gradient(to right, rgba(120,110,90,.07) 0 1px, transparent 1px 26px)',
-  paperNight:
-    'repeating-linear-gradient(to bottom, rgba(210,200,170,.10) 0 1px, transparent 1px 26px),' +
-    ' repeating-linear-gradient(to right, rgba(210,200,170,.07) 0 1px, transparent 1px 26px)',
+  /**
+   * 终端绿皮肤扫描线（老项目 index.html:315-316 `#skinFx.scan` / `.scan.light` **逐字**）。
+   * 🔴🔴 2026-10-09 修订（用户报障第 9 条）：此前是 `rgba(0,0,0,.16)`（中性黑扫描线），
+   *   老项目实为**偏绿的黑**（夜间 rgba(6,14,8,.20) / 日间 rgba(20,60,30,.05)）——
+   *   在中性底色上差别不大，但压在终端绿荧光屏上时"黑扫描线"会把绿色压灰，
+   *   与老项目的"屏幕余辉"观感不同。逐字改回。
+   */
+  scanNight: 'repeating-linear-gradient(to bottom, rgba(6,14,8,.20) 0 1px, transparent 1px 3px)',
+  scanDay: 'repeating-linear-gradient(to bottom, rgba(20,60,30,.05) 0 1px, transparent 1px 3px)',
+  /**
+   * 打字机纸皮肤稿纸线（老项目 index.html:317-318 `#skinFx.paper` / `.paper.night` **逐字**）。
+   * 🔴🔴 2026-10-09 修订（用户报障第 9 条）：此前是**横竖双向灰格线**，
+   *   老项目实为**单向红色横线**（每 28px 一条 1px 红线，像稿纸的横格）——
+   *   "横竖格线"读起来像工程方格纸，与老项目"打字机稿纸"是两种观感。逐字改回。
+   */
+  paperDay: 'repeating-linear-gradient(to bottom, transparent 0 28px, rgba(176,58,46,.05) 28px 29px)',
+  paperNight: 'repeating-linear-gradient(to bottom, transparent 0 28px, rgba(197,105,92,.07) 28px 29px)',
   /**
    * 浮起卡片的投影（时间 chip、响铃卡）。两条而非一条 `0 0 0 0`：
    * 老项目 chip 是 `0 14px 36px`、提醒卡是 `0 18px 48px`，两个尺寸都得留住。
@@ -306,6 +324,61 @@ export function nextSkin(cur: SkinName): SkinName {
   return 'default';
 }
 
+/**
+ * 复古皮肤两档配色 —— 老项目 `NS_SKIN_PALETTES`（index.html:937-950 **逐字**）。
+ *
+ * 🔴🔴 为什么必须补这份色板（用户报障第 9 条「复古终端绿 / 复古打印机纸和老版本不一样」）：
+ *   bj 此前**只有** `body.skin-a{--serif:var(--mono)}` 与一条 font-family —— 皮肤只换了字形，
+ *   **配色完全没换**，于是「终端绿」仍是暖白底 + 品牌金、「打字机纸」也是同一套。
+ *   老项目皮肤是**整站换色**（bg/fg/muted/line/box/accent/soft/dot/caret 九档全换），
+ *   这就是用户一眼看出的差异。
+ *
+ * 🔴 九档字段与老项目一一对应，不许少：
+ *   bg→--bg / fg→--fg / muted→--muted / line→--line / box→--box-bg /
+ *   accent→--accent / soft→--accent-soft / dot→--dot-idle / caret→--caret。
+ *   `--upload-bg`（弹窗按钮底）取 `fg`、`--dot-on` 仍为固定绿 —— 老项目同此
+ *   （themeCssCore 里按钮底就是 `${p.fg}`，`.dot.on` 硬编码 #2FA866）。
+ *
+ * 🔴 与主主题色板**刻意分开**：PALETTE 是日/夜两档，皮肤是「终端绿/打字机纸 × 日/夜」四档，
+ *   两者的 key 不同构，合并进 PALETTE 会让"皮肤档"混进"主题档"的遍历里。
+ */
+export interface SkinTokens {
+  bg: string;
+  fg: string;
+  muted: string;
+  line: string;
+  box: string;
+  accent: string;
+  soft: string;
+  dot: string;
+  caret: string;
+}
+
+export const SKIN_PALETTE: Readonly<
+  Record<'terminal' | 'typewriter', { day: SkinTokens; night: SkinTokens }>
+> = {
+  // A 终端绿：夜间=荧光屏，日间=电传公文
+  terminal: {
+    night: { bg: '#0B120C', fg: '#8FE3A0', muted: '#3F7A50', line: '#1C3522', box: '#0F1910',
+             accent: '#3CFF7D', soft: 'rgba(60,255,125,.08)', dot: '#2C5B38', caret: '#3CFF7D' },
+    day:   { bg: '#F7F8F2', fg: '#1E5F2D', muted: '#86A68C', line: '#DDE6DA', box: '#FFFFFF',
+             accent: '#14612C', soft: 'rgba(20,97,44,.07)', dot: '#A8C4AE', caret: '#14612C' },
+  },
+  // B 打字机纸：日间=稿纸，夜间=暗房
+  typewriter: {
+    day:   { bg: '#F4EFE2', fg: '#33301F', muted: '#9A9177', line: '#DCD3BA', box: '#FBF8EE',
+             accent: '#B03A2E', soft: 'rgba(176,58,46,.06)', dot: '#C4B99A', caret: '#B03A2E' },
+    night: { bg: '#221D16', fg: '#CFC5B2', muted: '#8A7F6B', line: '#3B342A', box: '#2A241B',
+             accent: '#C5695C', soft: 'rgba(197,105,92,.08)', dot: '#5C5245', caret: '#C5695C' },
+  },
+};
+
+/** 取某档皮肤在某昼夜下的九档色；default 档返回 null（= 不覆盖，走主主题）。 */
+export function skinTokens(skin: SkinName, night: boolean): SkinTokens | null {
+  if (skin === 'default') return null;
+  return SKIN_PALETTE[skin][night ? 'night' : 'day'];
+}
+
 /** body 上的class 名，老项目用的是 `dark` / `skin-a` / `skin-b`。 */
 export function bodyClassFor(theme: ThemeName, skin: SkinName): string {
   const out: string[] = [];
@@ -338,9 +411,33 @@ export function resolveTheme(manual: boolean | null, now: Date): ThemeName {
   return isNightByClock(now) ? 'dark' : 'light';
 }
 
-/** 把色板写进 :root 的 CSS 变量。切换主题时调用。 */
-export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
-  const p = PALETTE[theme];
+/**
+ * 把色板写进 :root 的 CSS 变量。切换主题时调用。
+ *
+ * 🔴 `skin` 为可选第三参（默认 `default`）：**复古皮肤必须整站换色**，
+ *   而 bj 全站颜色都吃 `:root` 变量 —— 所以皮肤的九档色在这里就地覆盖，
+ *   不需要老项目那套 `!important` 注入（bj 没有"浏览器夜间模块"这个对手，
+ *   见 styles.css 里 color-scheme 段）。不覆盖的档（--ring/--hover/--danger/
+ *   --selection/--del-line/--link-line/--zoom-* 等）保持主主题值 —— 老项目皮肤
+ *   CSS 也只改九类，其余走主主题。
+ */
+export function applyThemeVars(theme: ThemeName, el: HTMLElement, skin: SkinName = 'default'): void {
+  const base = PALETTE[theme];
+  const sk = skinTokens(skin, theme === 'dark');
+  const p = sk
+    ? {
+        ...base,
+        bg: sk.bg,
+        fg: sk.fg,
+        muted: sk.muted,
+        line: sk.line,
+        boxBg: sk.box,
+        accent: sk.accent,
+        accentSoft: sk.soft,
+        uploadBg: sk.fg,
+        dotIdle: sk.dot,
+      }
+    : base;
   const s = el.style;
   s.setProperty('--bg', p.bg);
   s.setProperty('--fg', p.fg);
@@ -367,6 +464,10 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--zoom-solid', p.zoomSolid);
   s.setProperty('--dot-on', p.dotOn);
   s.setProperty('--dot-idle', p.dotIdle);
+  // 🔴 光标色：老项目皮肤专属规则 `#editor{caret-color:${s.caret}}`（nsSkinOverrideCss）。
+  //   无皮肤时**不声明**等价于浏览器默认（跟随 color = --fg），所以 default 档给 --fg，
+  //   与"没写这条"渲染一致；皮肤档才真正换色（终端绿夜间是荧光绿，比正文更亮）。
+  s.setProperty('--caret', sk ? sk.caret : p.fg);
   // 🔴 开奖卡金属分档（Bug4 补齐；只被 #eggDraw 卡面消费，见 PALETTE 注释）
   s.setProperty('--foil-silver', p.foilSilver);
   s.setProperty('--foil-gold', p.foilGold);
@@ -379,6 +480,9 @@ export function applyThemeVars(theme: ThemeName, el: HTMLElement): void {
   s.setProperty('--zoom-pri-ink', OVERLAY.zoomPriInk);
   s.setProperty('--serif', FONTS.serif);
   s.setProperty('--mono', FONTS.mono);
+  // 🔴 复古皮肤整站等宽的字体栈（老项目 nsSkinOverrideCss 的 body 字体，:1102 逐字）。
+  //   由 styles.css 的 body.skin-a / body.skin-b 消费；default 档不引用它。
+  s.setProperty('--skin-mono', FONTS.skinMono);
   s.setProperty('--mask-bg', theme === 'dark' ? OVERLAY.maskDark : OVERLAY.maskLight);
   // 🔴 浮层投影也走变量：CSS 里写 rgba 会被 S4-T7 判红（颜色只允许一个出处），
   //   而投影本质是颜色，所以必须在这里注入而不是写在 styles.css。

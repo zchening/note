@@ -38,7 +38,29 @@ export interface AboutDeps {
    *   缺省则不响应连点（不传就是没接这功能，不留半个实现）。
    */
   onTitleQuadTap?: () => void;
+  /**
+   * 🔴🔴 关于页的「彩蛋 N / M FOUND」入口行（老项目 index.html:11115-11131 `mountAboutRow`）。
+   *
+   *   老项目把这行**插在作者行之后**（`box.parentNode.insertBefore(row, box.nextSibling)`，
+   *   box = `#aboutAuthor`），整行可点，点了开图鉴（`nsEggOpen()`）。
+   *   用户报障第 5 条「关于 NoteSyncX 没有列举彩蛋」就是这行缺失。
+   *
+   *   **为什么做成注入而不是本文件自己实现**：与 `onTitleQuadTap` 同款 ——
+   *   本文件不认识彩蛋层（`egg/registry` 是另一层），计数与开图鉴都得由调用方给。
+   *   不传 ⇒ 该行**根本不渲染**（不接就不留半个实现）。
+   */
+  eggRow?: {
+    /** 计数文案，如 `3 / 17 FOUND`（老项目 `nsEggGot() + ' / ' + NS_EGG_LIST.length + ' FOUND'`）。 */
+    count: () => string;
+    /** 点整行开图鉴（老项目 `nsEggOpen()`）。 */
+    open: () => void;
+  };
 }
+
+/** 彩蛋入口行的 chevron —— 老项目 index.html:11124 逐字（24 视框、描边 2.4、圆头圆角）。 */
+const CHEV_SVG =
+  '<svg class="ns-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>';
 
 export interface AboutOverlay {
   el: HTMLElement;
@@ -61,6 +83,12 @@ export const UPD_IDS = {
 } as const;
 
 export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOverlay {
+  // 🔴🔴 幂等：老项目 `#aboutMask` / `#updMask` 是页面里的**单例**（index.html:828/842），
+  //   而 bj 每次点「关于」都新建一层。不摘旧的就会叠出第二层 ——
+  //   表现是出现两个 `#aboutEggRow`（`getElementById` 取到旧的那个，计数停在旧值）。
+  document.getElementById('aboutMask')?.remove();
+  document.getElementById(UPD_IDS.mask)?.remove();
+
   const el = document.createElement('div');
   el.className = 'mask hidden';
   el.id = 'aboutMask';
@@ -125,13 +153,52 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   authorRow.classList.add('about-author');
   body.append(authorRow);
 
+  // 彩蛋入口行（老项目 :11125 `insertBefore(row, aboutAuthor.nextSibling)` ⇒ 排在作者行之后）
+  if (deps.eggRow) {
+    const eggRow = document.createElement('div');
+    eggRow.className = 'about-row ns-egg-entry';
+    // 🔴 id 必须是 `aboutEggRow`（老项目 :11121）：漏赋值 ⇒ 每次开关于多插一行。
+    eggRow.id = 'aboutEggRow';
+    eggRow.setAttribute('role', 'button');
+    eggRow.tabIndex = 0;
+    const ek = document.createElement('span');
+    ek.className = 'about-k';
+    ek.textContent = COPY.aboutEgg;
+    const ev = document.createElement('span');
+    ev.className = 'about-v';
+    const num = document.createElement('span');
+    num.className = 'ns-num';
+    num.textContent = deps.eggRow.count();
+    ev.append(num);
+    // 🔴 chevron 是本项目自产常量（无外部输入）⇒ 走 innerHTML 安全，与 ICON_X 同款；
+    //   取出首个子元素（就是那枚 svg）直接当 `ev` 的孩子，保持老项目「svg 自带 .ns-chev」的形状。
+    const chevWrap = document.createElement('span');
+    chevWrap.innerHTML = CHEV_SVG;
+    const chev = chevWrap.firstElementChild;
+    if (chev) ev.append(chev);
+    eggRow.append(ek, ev);
+    const openEgg = deps.eggRow.open;
+    eggRow.addEventListener('click', () => openEgg());
+    eggRow.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openEgg();
+      }
+    });
+    body.append(eggRow);
+  }
+
   // 检查更新（仅壳内）
   const updRow = row(COPY.aboutUpdate, '');
   updRow.id = 'aboutUpdRow';
   updRow.classList.add('hidden');
   const updBtn = document.createElement('span');
   updBtn.id = 'aboutUpd';
-  updBtn.className = 'upd-link';
+  // 🔴🔴 必须**两个类都挂**：老项目 index.html:838 是 `class="about-v upd-link"`。
+  //   只挂 `upd-link` 会丢掉 `.about-v` 的 `width:110px; text-align:left` ⇒
+  //   「检查更新」不再与「Version x.y.z」左对齐（用户报障第 6 条）。
+  //   `.upd-link` 只负责金色 + 下划线，定宽左对齐那半仍在 `.about-v` 上。
+  updBtn.className = 'about-v upd-link';
   updBtn.setAttribute('role', 'button');
   updBtn.tabIndex = 0;
   updBtn.textContent = COPY.upd.checkBtn;

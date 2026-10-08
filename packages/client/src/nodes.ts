@@ -402,7 +402,9 @@ export class ImageBlockNode extends DecoratorNode<HTMLElement> {
     // 🔴 走 src / alt **属性赋值**，不走 innerHTML（云端 URL 属外部输入）
     img.src = this.__src;
     img.alt = this.__alt;
-    img.loading = 'lazy';
+    // 🔴 不加 loading="lazy"：老项目是裸 <img src>（无 loading/decoding），
+    //   移动端 lazy 会让未进入视口的图高度塌成 0，只剩 border 一条横线。
+    //   笔记内图片数量有限，无 lazy 的性能必要。
     img.decoding = 'async';
     // 图床是外链，不带 referrer 免泄露访问页地址（老项目同策略）
     img.referrerPolicy = 'no-referrer';

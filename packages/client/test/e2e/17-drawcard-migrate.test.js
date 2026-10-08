@@ -48,7 +48,11 @@ test('EGGDRAW-01 🔴 刷新抽卡：卡片必须带完整样式（computedStyle
       await page.click('#ok');
       await page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
     }
-    await page.waitForSelector('#eggDraw', { timeout: 5_000 });
+    // 🔴🔴 超时给足 12s，不是 5s：重载后若恰好递了「每日一句话」气泡
+    //   （`#nsDayToast.show`，COPY.greetMs=4200ms），让位判据 drawBusy() 会把开奖卡
+    //   推迟到气泡消失才弹（drawConsume 每 250ms 重试，上限 8s）。
+    //   5s 会卡在 4.2s 气泡 + 重试窗口的边界上 ⇒ 偶发假红。
+    await page.waitForSelector('#eggDraw', { timeout: 12_000 });
 
     const card = await page.evaluate(() => {
       const el = document.getElementById('eggDraw');
@@ -83,6 +87,68 @@ test('EGGDRAW-01 🔴 刷新抽卡：卡片必须带完整样式（computedStyle
       page.waitForFunction(() => document.getElementById('eggDraw') === null, { timeout: 3000 }),
       4000, '等卡片收起移除',
     );
+  } finally {
+    await page.close();
+  }
+});
+
+test('EGGDRAW-02 🔴🔴 反向闸：推送在途（pushing）时点刷新 → 拦下、不抽卡、不 reload', async () => {
+  // 🔴 与 EGGDRAW-01 是**一对**：
+  //   EGGDRAW-01 钉"首拉（syncing）时点刷新必须照常出卡 + reload"（老项目 busy/inflightWrites
+  //   都不成立 ⇒ 不拦）；本条钉"真的有 PUT 在飞（pushing）时必须拦下、不 reload"。
+  //   两条合起来才把老项目 :5760 那道守卫的**边界**夹住 —— 只测其中一条，
+  //   要么漏掉"刹车太宽"（永不 reload），要么漏掉"刹车缺失"（在途写入被 reload 打断）。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggdraw2', PASS);
+  try {
+    // 先等首拉结束落到 idle，免得把"点刷新"的时机落在 syncing 上（那是另一条判据的事）。
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('#shell')?.dataset.syncState === 'idle', null, {
+        timeout: 15_000,
+      }),
+      20_000,
+      '等 idle',
+    );
+    // 🔴 把推送（POST /api/note/<id>）拖慢 3s，制造一个稳定可观测的 pushing 窗口
+    //   （真实网络慢时就是这个形状）。🔴 方法是 **POST** 不是 PUT —— bj 的推送走
+    //   client.ts 的 `method:'POST'`；按 PUT 过滤会一条都拦不到，症状是 pushing 一闪而过。
+    await page.route('**/api/note/**', async (route) => {
+      if (route.request().method() === 'POST') await new Promise((r) => setTimeout(r, 3000));
+      await route.continue();
+    });
+    // 打一个字 → 700ms 去抖后开始推 → pushing
+    await page.click('#editor-host');
+    await page.keyboard.type('x');
+    await withTimeout(
+      page.waitForFunction(() => document.querySelector('#shell')?.dataset.syncState === 'pushing', null, {
+        timeout: 10_000,
+      }),
+      15_000,
+      '等 pushing',
+    );
+    // 哨兵：reload 会把它清掉；预置一张券：真 reload 了就会被消费掉 ⇒ 出卡
+    await page.evaluate(() => {
+      window.__eggdraw2Alive = true;
+      sessionStorage.setItem('notesync_bj_draw', JSON.stringify({ t: 'r', i: 0 }));
+    });
+    await page.click('#refreshBtn');
+    // 🔴 拦下的铁证：出现「正在保存中，稍候自动同步」（老项目 :5761 逐字）
+    await withTimeout(
+      page.waitForFunction(
+        () => document.getElementById('uploadNote')?.textContent === '正在保存中，稍候自动同步',
+        null,
+        { timeout: 4000 },
+      ),
+      6_000,
+      '等「正在保存中」提示',
+    );
+    const after = await page.evaluate(() => ({
+      alive: window.__eggdraw2Alive === true,
+      draw: document.getElementById('eggDraw') !== null,
+      coupon: sessionStorage.getItem('notesync_bj_draw'),
+    }));
+    assert.equal(after.alive, true, '🔴 被拦下时绝不许 reload（哨兵应还在）');
+    assert.equal(after.draw, false, '🔴 被拦下时绝不许出卡');
+    assert.ok(after.coupon, '🔴 被拦下时券必须留着（不许被消费）');
   } finally {
     await page.close();
   }

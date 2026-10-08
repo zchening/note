@@ -28,7 +28,9 @@ import {
   PALETTE,
   resolveTheme,
   skinOverlayStyle,
+  skinTokens,
   SKIN_LABELS,
+  SKIN_PALETTE,
   SKIN_WORDS,
 } from '../src/ui/theme.ts';
 import { COPY, MENU_ITEM_IDS, TOPBAR_HIDDEN_IDS, TOPBAR_VISIBLE_IDS } from '../src/ui/copy.ts';
@@ -259,10 +261,100 @@ test('S4-T6 覆膜层纹理随皮肤与昼夜变化，default 档必须完全空
   const scanNight = skinOverlayStyle('terminal', true);
   assert.notEqual(scanDay, scanNight, '终端绿扫描线昼夜应不同');
   assert.ok(scanDay.includes('repeating-linear-gradient'));
-  // 打字机纸：横竖双向格线
+  // 🔴🔴 打字机纸：**只有横向**稿纸线（老项目 index.html:317-318 逐字）。
+  //   2026-10-09 修订（用户报障第 9 条）：此前这里断言的是"横竖双向格线"，
+  //   那是把老项目"打字机稿纸"误读成"工程方格纸"的旧实现；老项目实为单向红线。
+  //   判据跟着改成「有横向 + **无纵向**」——"应该有"配一条"不应该有"。
   const paper = skinOverlayStyle('typewriter', false);
-  assert.ok(paper.includes('to bottom') && paper.includes('to right'), '打字机纸应有横竖两种格线');
+  assert.ok(paper.includes('to bottom'), '打字机纸应有横向稿纸线');
+  assert.ok(!paper.includes('to right'), '打字机纸不应有纵向格线（老项目只有横向）');
   assert.notEqual(paper, skinOverlayStyle('typewriter', true));
+});
+
+/* ---------------- 4c. 皮肤整站换色（用户报障第 9 条） ---------------- */
+
+/** 造最小 DOM 替身：只用到 style.setProperty 与 classList.toggle。 */
+function fakeRoot() {
+  const props = new Map();
+  const classes = new Set();
+  return {
+    props,
+    classes,
+    el: {
+      style: { setProperty: (k, v) => props.set(k, v) },
+      classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
+    },
+  };
+}
+
+test('S4-T8 🔴🔴 皮肤必须**整站换色**（老项目 NS_SKIN_PALETTES），default 档绝不覆盖', () => {
+  // 🔴🔴 用户报障第 9 条的正身：此前 applyThemeVars 只吃主题、不吃皮肤，
+  //   于是「终端绿 / 打字机纸」只换了字形，**配色仍是暖白底 + 品牌金** ——
+  //   与老项目并排一眼看出。这条判据钉的就是"皮肤真的换了色"。
+
+  // ① default 档：一律走主主题，绝不覆盖
+  const d = fakeRoot();
+  applyThemeVars('light', d.el, 'default');
+  assert.equal(d.props.get('--bg'), PALETTE.light.bg, 'default 档不该改底色');
+  assert.equal(d.props.get('--accent'), PALETTE.light.accent, 'default 档不该改强调色');
+  assert.equal(d.props.get('--caret'), PALETTE.light.fg, 'default 档 caret 应回落到 --fg');
+  // 反向：不传第三参（旧调用形态）必须与传 'default' 等价 —— 别让可选参数改变语义
+  const d2 = fakeRoot();
+  applyThemeVars('light', d2.el);
+  assert.equal(d2.props.get('--bg'), d.props.get('--bg'), '不传皮肤应等价于 default');
+
+  // ② 皮肤档：九档色逐档对齐 SKIN_PALETTE，且与主主题不同
+  for (const skin of ['terminal', 'typewriter']) {
+    for (const night of [false, true]) {
+      const theme = night ? 'dark' : 'light';
+      const want = SKIN_PALETTE[skin][night ? 'night' : 'day'];
+      const r = fakeRoot();
+      applyThemeVars(theme, r.el, skin);
+      assert.equal(r.props.get('--bg'), want.bg, `${skin}/${theme} 底色必须换`);
+      assert.equal(r.props.get('--fg'), want.fg, `${skin}/${theme} 字色必须换`);
+      assert.equal(r.props.get('--muted'), want.muted, `${skin}/${theme} 次要字色必须换`);
+      assert.equal(r.props.get('--line'), want.line, `${skin}/${theme} 线色必须换`);
+      assert.equal(r.props.get('--box-bg'), want.box, `${skin}/${theme} 卡片底必须换`);
+      assert.equal(r.props.get('--accent'), want.accent, `${skin}/${theme} 强调色必须换`);
+      assert.equal(r.props.get('--accent-soft'), want.soft, `${skin}/${theme} 强调软底必须换`);
+      assert.equal(r.props.get('--dot-idle'), want.dot, `${skin}/${theme} 空闲点必须换`);
+      assert.equal(r.props.get('--caret'), want.caret, `${skin}/${theme} 光标色必须换`);
+      // 与主主题**确实不同**（否则"换了色"是空话）
+      assert.notEqual(want.bg, PALETTE[theme].bg, `${skin}/${theme} 底色必须区别于主主题`);
+    }
+  }
+
+  // ③ 四档两两不同（终端绿昼/夜、打字机昼/夜各是各的）
+  const seen = new Set();
+  for (const skin of ['terminal', 'typewriter']) {
+    for (const night of [false, true]) {
+      seen.add(SKIN_PALETTE[skin][night ? 'night' : 'day'].bg);
+    }
+  }
+  assert.equal(seen.size, 4, '四档皮肤底色必须两两不同（复制粘贴会撞色）');
+
+  // ④ 反向：皮肤只覆盖九类，其余令牌（--ring/--danger）保持主主题值 ——
+  //   老项目皮肤 CSS 也只改九类；顺手全改会把删除线/危险色一起带偏。
+  const r2 = fakeRoot();
+  applyThemeVars('light', r2.el, 'terminal');
+  assert.equal(r2.props.get('--danger'), PALETTE.light.danger, '皮肤不该动危险色');
+});
+
+test('S4-T9 skinTokens：default 返回 null（= 不覆盖），皮肤档返回当日/夜九档', () => {
+  assert.equal(skinTokens('default', false), null);
+  assert.equal(skinTokens('default', true), null);
+  assert.deepEqual(skinTokens('terminal', true), SKIN_PALETTE.terminal.night);
+  assert.deepEqual(skinTokens('typewriter', false), SKIN_PALETTE.typewriter.day);
+  // 🔴 键必须齐九档（少一档 = 那一处静默不换色，且没有任何报错）
+  for (const skin of ['terminal', 'typewriter']) {
+    for (const night of [false, true]) {
+      assert.deepEqual(
+        Object.keys(skinTokens(skin, night)).sort(),
+        ['accent', 'bg', 'box', 'caret', 'dot', 'fg', 'line', 'muted', 'soft'],
+        `${skin}/${night} 必须齐九档`,
+      );
+    }
+  }
 });
 
 test('S4-T7 颜色字面量只允许出现在 theme.ts（纪律闸）', () => {

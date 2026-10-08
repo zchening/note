@@ -1192,11 +1192,12 @@ footer.ns-foot .dot.off { background: var(--danger); }
 .list-row .fav-name { flex: 1; min-width: 0; font: 400 13.5px/1.5 var(--mono);
                       letter-spacing: .01em; color: var(--fg);
                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 🔴🔴 2026-10-08：去掉 overflow/ellipsis/nowrap —— 历史版本时间要显示完整，
-   不再被截断（用户诉求"显示完整的时间，不要截断"）。时间戳本身很短，去掉 nowrap
-   也不会撑破布局。 */
+/* 🔴🔴 2026-10-09：改回老项目 `nowrap + ellipsis` 截断（index.html:469 逐字）。
+   2026-10-08 曾去掉截断以"显示完整时间"，但用户复核后要求改回老版本
+   「不换行、超出省略」，时间戳也回到 `MM-DD HH:mm`（见 sync/history.ts fmtHistTime）。 */
 .list-row .hist-meta { flex: 1; min-width: 0; font: 400 12.5px/1.5 var(--mono);
-                       letter-spacing: .02em; color: var(--muted); }
+                       letter-spacing: .02em; color: var(--muted);
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 右箭头列 14px muted（老项目 .fav-go index.html:461）—— "这一行可以进去"的唯一暗示 */
 .list-row .fav-go, .list-row .fav-go > svg { width: 14px; height: 14px; flex: none; }
 .list-row .fav-go { color: var(--muted); }
@@ -1289,12 +1290,24 @@ footer.ns-foot .dot.off { background: var(--danger); }
    背景纹理由 ui/theme.ts 的 skinOverlayStyle() 直接写 style.background ——
    这里只管几何与层序。 */
 #skinFx { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
-/* 复古皮肤的字标走等宽（只改字形，不动全局配色） */
-body.skin-a { --serif: var(--mono); }
-body.skin-b { --serif: var(--mono); }
-/* 终端绿皮肤的正文也等宽 */
-body.skin-a .ns-editor, body.skin-a .ns-top, body.skin-a .ns-foot { font-family: var(--mono); }
-/* 打字机纸皮肤：正文用衬线、行距更松、纸感格线由覆膜层负责 */
+/* 复古皮肤：**整站等宽**（老项目 nsSkinOverrideCss 对两档皮肤都注入
+   `body{font-family:"Cascadia Mono",Consolas,…monospace}`，index.html:1102）。
+   🔴🔴 2026-10-09 修订（用户报障第 9 条）：
+     · 此前是 `body.skin-a{--serif:var(--mono)}` —— 那是"只换字形不换配色"的旧做法，
+       且**改错了对象**：老项目改的是 `body` 的 font-family，显式写了 `var(--serif)` 的
+       元素（字标 b / 关于页标题 / 落地页大标题 / 结算卡文案 / 桌宠档案）**仍是衬线**。
+       把 `--serif` 改成 mono 会把这些元素一起拉成等宽，与老项目并排看得出。
+     · 字体栈也用老项目皮肤那套 `--skin-mono`（Cascadia Mono 优先），
+       与 `--mono`（ui-monospace）分开 —— 老项目就是两套栈。 */
+body.skin-a, body.skin-b { font-family: var(--skin-mono); }
+/* 字标加宽字距（老项目 header .brand b{letter-spacing:.14em}，皮肤专属） */
+body.skin-a #brandWord, body.skin-b #brandWord { letter-spacing: .14em; }
+/* 皮肤档气泡字距（老项目 #versionToast{letter-spacing:.08em}；bj 对应 #skinToast） */
+body.skin-a #skinToast, body.skin-b #skinToast { letter-spacing: .08em; }
+/* 正文光标色（老项目皮肤专属 `#editor{caret-color:…}`；default 档 --caret = --fg，
+   与"没写这条"的浏览器默认一致） */
+.ns-editor { caret-color: var(--caret); }
+/* 打字机纸皮肤：正文行距更松、字距略开（纸感横线由覆膜层负责） */
 body.skin-b .ns-editor { line-height: 2.05; letter-spacing: .3px; }
 
 /* 🔴🔴🔴 color-scheme 必须**类名驱动**（老项目 index.html:80/:92 逐字同款）：
@@ -1628,7 +1641,7 @@ body.dark { color-scheme: dark; }
 /* 结算卡：点背景 = 重开（老项目 v9.3.3：不再误触退回笔记） */
 .ns-over { position: absolute; inset: 0; display: flex; align-items: center;
   justify-content: center; background: var(--mask-bg); padding: 20px; }
-.ns-card { width: 100%; max-width: 320px; padding: 20px; text-align: center;
+.ns-card { position: relative; width: 100%; max-width: 320px; padding: 20px; text-align: center;
   background: var(--box-bg); border: 1px solid var(--line); border-radius: 14px;
   box-shadow: var(--shadow-card); }
 .ns-card h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; color: var(--fg); }
@@ -1641,6 +1654,22 @@ body.dark { color-scheme: dark; }
   cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--fg); }
 .ns-again { background: var(--fg) !important; color: var(--bg) !important;
   border-color: var(--fg) !important; }
+/* 🔴🔴 v9.4.0：仅 /dragon 撞停后，桌宠从结算卡左下往上爬、扒住卡顶来「看你摔了」
+ * （老项目 index.html:10384-10388 逐字；锚点靠上面 `.ns-card{position:relative}`）。 */
+.ns-pet-climb { position: absolute; left: 10px; bottom: 8px; width: 26px; height: 26px;
+  color: var(--accent); pointer-events: none; opacity: 0; z-index: 2; }
+.ns-pet-climb.go { opacity: 1; animation: petClimb 2.4s cubic-bezier(.4,.05,.5,.95) .3s both; }
+.ns-pet-climb svg { width: 100%; height: 100%; overflow: visible; display: block; }
+@keyframes petClimb {
+  0% { transform: translate(0, 12px) rotate(0); }
+  22% { transform: translate(3px, -24px) rotate(-7deg); }
+  48% { transform: translate(8px, -66px) rotate(7deg); }
+  72% { transform: translate(5px, -104px) rotate(-4deg); }
+  100% { transform: translate(3px, -112px) rotate(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ns-pet-climb.go { animation: none; opacity: 1; transform: translate(3px, -112px); }
+}
 
 /* ── 非 canvas 型（镜像 / 桌宠）── */
 /* 🔴 z-index 是**层叠上下文内部**的比较，不是全局比较：
@@ -1655,18 +1684,27 @@ body.dark { color-scheme: dark; }
  *   ⇒ 面板比视口高时**上下两端一起被裁**，症状是「『让它去睡』下面的护照与说明文字
  *   永不露出，而且滑不动」——按钮可见、底下的内容永远够不着。
  *   修法（老项目逐字）：拆成两段 —— 内容区自己滚，操作区 `.ns-pet-dock` 钉在底部常驻。
- * 🔴 bj 的 DOM 比老项目少一层：外壳 `shell.ts` 已经建好 HUD 与 `.ns-dom-stage`，
- *   `dom()` 直接把内容挂进 mount，所以**滚动区就是舞台本身**
- *   （`.ns-pet-stage-panel` 带 `overflow-y:auto`），不另造 `.ns-pet-panel`/`.ns-pet-scroll`。
- *   少一层是刻意的：多造一个没被任何代码创建的容器名，样式表就会与 DOM 悄悄脱钩。 */
-.ns-pet-stage-panel { align-items: stretch; justify-content: flex-start;
-  overflow-y: auto; -webkit-overflow-scrolling: touch; }
+ * 🔴🔴 2026-10-09 修正（用户报障第 1 条「/pet 按钮什么的乱了」）：
+ *   此前 `.ns-pet-stage-panel` **漏了 `flex-direction:column`**，而基类
+ *   `.ns-pet-stage` 是 `display:flex`（默认 row）⇒ 面板的每个区块
+ *   （头/柜子/档案/说明/换养/底部按钮）被排成**一行**，横向挤成一团，
+ *   这就是"按钮乱了"的真身。补 column 是第一步。
+ *   同时按老项目两段式补齐：内容区自己滚、操作区钉底 —— 老项目
+ *   `.ns-pet-panel{flex-direction:column}` + `.ns-pet-scroll{flex:1;overflow-y:auto}`
+ *   + `.ns-pet-dock{flex:none}`。所以这里也让 `dom()` 建 `.ns-pet-scroll` 包住内容。 */
+.ns-pet-stage-panel { flex-direction: column; align-items: stretch; justify-content: flex-start;
+  overflow: hidden; }
 /* 面板宽度与内边距：老项目 `.ns-pet-panel` 的 max-width:420px + scroll 区的 22/20/14 */
 .ns-pet-stage-panel > * { width: 100%; max-width: 420px; margin-left: auto; margin-right: auto; }
 .ns-pet-stage-panel > .ns-pet-dock { max-width: none; }
+/* 内容滚动区（老项目 index.html:10398 逐字：flex:1 + min-height:0 + 22/20/14 内边距） */
+.ns-pet-scroll { flex: 1; min-height: 0; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; padding: 22px 20px 14px; }
 .ns-pet-dock { flex: none; border-top: 1px solid var(--line); background: var(--bg);
   padding: 12px 20px calc(14px + env(safe-area-inset-bottom)); }
-.ns-pet-top { display: flex; align-items: center; gap: 12px; margin: 22px 0 14px; }
+/* 顶部 margin 归零：老项目 `.ns-pet-top{margin-bottom:14px}` 的 22px 顶距由
+   `.ns-pet-scroll` 的 padding-top 提供，两边都给就变成 44px。 */
+.ns-pet-top { display: flex; align-items: center; gap: 12px; margin: 0 0 14px; }
 .ns-pet-av { width: 44px; height: 44px; flex: none; border: 1px solid var(--line);
   border-radius: 12px; display: flex; align-items: center; justify-content: center;
   color: var(--fg); background: var(--box-bg); }
@@ -1885,7 +1923,10 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
    若将来老项目改了 `.qr-box p`，两边会一起变，仍保持一致。 */
 .ns-qr-warn { font-size: 12px; color: var(--danger); line-height: 1.65; margin: 0 0 16px; }
 .ns-lock-warn { font-size: 13px; color: var(--muted); line-height: 1.7; }
-.ns-ghost-btn { background: transparent !important; }
+/* 🔴 bj 自造的 `.ns-ghost-btn{background:transparent!important}` 已删除：
+   它会把 `.box` 内按钮压成透明浅字，而老项目运行时**所有** `.box button` 都是实底
+   （:1063 的 !important 覆盖，见本文件 :420-464）。唯一使用点（扫码配对「锁定笔记」）
+   已改用老项目次级按钮类 `ghost-btn`。 */
 
 /* 全屏放大码（反光/夜里对拍）。
    🔴 纯白铺满 + 点击任意处收回：老项目 v7.5.1 定的形态，不要加提示文字，
@@ -1988,6 +2029,19 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
 .upd-link { color: var(--accent); text-decoration: underline;
   text-underline-offset: 3px; text-decoration-thickness: 1px; cursor: pointer;
   -webkit-tap-highlight-color: transparent; }
+/* 🔴🔴 关于页第四行「彩蛋 N / M FOUND」入口（老项目 index.html:10457-10465 逐字）。
+   缺这条 ⇒ 用户报障第 5 条「关于 NoteSyncX 没有列举彩蛋」。
+   🔴 为什么 `.about-v` 要在这里被**重新定宽**：基础 `.about-v` 是 `width:110px`
+   + `word-break:break-all`（为「Version 3.0.0」那种短串设计），
+   「10 / 10 FOUND」塞进去必被 break-all 拦腰折断、尾字母 D 掉到下一行
+   （老项目 :10458-10460 的注释记的正是这个坑）⇒ 这里 width:auto + nowrap。 */
+.ns-egg-entry { cursor: pointer; border-radius: 9px; margin: 0 -2px; padding: 0 2px;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.ns-egg-entry .about-v { display: flex; align-items: baseline; gap: 5px; position: relative;
+  width: auto; word-break: normal; white-space: nowrap; flex: none; }
+.ns-egg-entry .ns-num { font: 400 12px/1.5 var(--mono); letter-spacing: .1em;
+  color: var(--fg); font-weight: 600; white-space: nowrap; }
+.ns-egg-entry .ns-chev { width: 11px; height: 11px; color: var(--accent); flex: none; }
 
 /* 🔴🔴🔴 升级弹窗（老项目 index.html:263-272 逐字）：
      #updMask .box{text-align:center}

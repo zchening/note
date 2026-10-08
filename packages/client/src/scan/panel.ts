@@ -128,7 +128,12 @@ function putNeedPassphrase(host: HTMLElement, onLockNow?: () => void): void {
   if (!onLockNow) return;
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'ns-ghost-btn';
+  // 🔴 必须与老项目 `.box` 内的按钮同款：老项目里**每一个** `.box button` 在运行时
+  //   都是实底（:1063 的 `!important` 主题覆盖压过 `.ghost-btn` 的字面 background:none，
+  //   见 styles.css:420-464）。bj 自造的 `ns-ghost-btn`（`background:transparent!important`）
+  //   会把实底压成透明浅字 —— 与本面板的 `qrReveal`/`qrClose` 并排一眼看出。
+  //   用 `ghost-btn`（老项目 :518 的次级按钮类）保持"实底 + 1px 描边 + margin-top"的次级观感。
+  btn.className = 'ghost-btn';
   btn.id = 'pairLockNow';
   btn.textContent = COPY.pairLockNow;
   btn.addEventListener('click', onLockNow);

@@ -58,7 +58,9 @@ export type FxName =
   | 'hit'
   | 'boom'
   | 'pow'
-  | 'confirm';
+  | 'confirm'
+  // 老项目同款音效名（v9.4.0 桌宠×彩蛋）：bonk=砖被打掉、桌宠抱砖滚落
+  | 'bonk';
 
 export interface GameDef {
   id: string;
@@ -149,6 +151,21 @@ const SOUND_SVG =
   'stroke-linecap="round" aria-hidden="true"><path d="M4 9.5v5h3.2L12 18.6V5.4L7.2 9.5H4Z"/>' +
   '<path d="M16 9.4a3.6 3.6 0 0 1 0 5.2M18.4 7a7 7 0 0 1 0 10"/></svg>';
 
+/**
+ * 🔴🔴 结算卡里往上爬的桌宠（老项目 index.html:10749 `NS_PET_CLIMB_SVG` **逐字**）。
+ *
+ *   v9.4.0：仅 /dragon 撞停后，桌宠从结算卡左下往上爬、扒住卡顶来「看你摔了」
+ *   （别蛋在局内已各有一次融入，卡片不再重复）。几何逐字照抄，颜色只吃令牌。
+ */
+const NS_PET_CLIMB_SVG =
+  '<svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<circle cx="13" cy="15" r="7.5" fill="var(--accent-soft)"/>' +
+  '<path d="M6.5 10.5 L4.5 4 L11 8.5"/><path d="M19.5 10.5 L21.5 4 L15 8.5"/>' +
+  '<path d="M5 15 L1 11"/><path d="M21 15 L25 11"/>' +
+  '<circle cx="10.6" cy="14" r="1.1" fill="var(--fg)" stroke="none"/>' +
+  '<circle cx="15.4" cy="14" r="1.1" fill="var(--fg)" stroke="none"/></svg>';
+
 function mk(tag: string, cls?: string, html?: string): HTMLElement {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -157,7 +174,7 @@ function mk(tag: string, cls?: string, html?: string): HTMLElement {
 }
 
 export function buildShell(
-  sound: { muted: () => boolean; toggle: () => void; fx: (n: FxName) => void },
+  sound: { muted: () => boolean; toggle: () => void; fx: (n: FxName) => void; voice: (id: string) => void },
   hooks: ShellHooks = {},
 ): Shell {
   let cur: AnyGame | null = null;
@@ -389,11 +406,26 @@ export function buildShell(
         box.appendChild(d);
       }
     }
+    // 🔴 重开一局不叠加攀爬（老项目 :10756）
+    inner.querySelector('.ns-pet-climb')?.remove();
+    // 🔴🔴 v9.4.0：仅 /dragon 撞停后，桌宠从结算卡左下往上爬、扒住卡顶来「看你摔了」
+    //   （别蛋在局内已各有一次融入，卡片不再重复）。老项目 :10757-10763 逐字。
+    if (cur && !isDomGame(cur) && cur.id === 'dragon') {
+      const climb = mk('div', 'ns-pet-climb', NS_PET_CLIMB_SVG);
+      inner.appendChild(climb);
+      void climb.offsetWidth; // 强制回流，让 .go 动画从头播（老项目 :10761）
+      climb.classList.add('go');
+      // 🔴 借桌宠音色播一声、随即还原，防「再来一局」跑成桌宠叫（老项目 :10762）
+      sound.voice('pet');
+      sound.fx('burp');
+      sound.voice(cur.id);
+    }
     card.classList.remove('hidden');
   }
 
   function hideEnd(): void {
     const card = root?.querySelector<HTMLElement>('.ns-over');
+    card?.querySelector('.ns-pet-climb')?.remove();
     card?.classList.add('hidden');
     over = false;
   }

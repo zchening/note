@@ -75,7 +75,7 @@ import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
 import { dayGreet } from './egg/fx.ts';
 import { mountPet, unmountPet } from './egg/pet.ts';
-import { eggBrowserStore, isEggRoute, markDiscovered } from './egg/registry.ts';
+import { eggBrowserStore, eggCountText, isEggRoute, markDiscovered, readDiscovered } from './egg/registry.ts';
 import { bindTypewriterSound } from './egg/typewriter.ts';
 import {
   buildDiagPanel,
@@ -376,7 +376,9 @@ let currentSkin: SkinName = 'default';
 let shellRef: Shell | undefined;
 
 function repaint(): void {
-  applyThemeVars(currentTheme, document.documentElement);
+  // 🔴 皮肤要整站换色，必须把 currentSkin 传进去（老项目 NS_SKIN_PALETTES 九档）：
+  //   此前只传主题，皮肤只换了字形不换配色 —— 用户报障第 9 条。
+  applyThemeVars(currentTheme, document.documentElement, currentSkin);
   // 🔴 菜单里的主题项是互斥双文案（夜间模式 / 日间模式）+ 月亮/太阳图标。
   //   不跟着重画就会出现"已经是白天了，菜单还写夜间模式" —— 典型的静默漂移。
   menuState.night = currentTheme === 'dark';
@@ -654,6 +656,34 @@ function footStatus(s: 'connecting' | 'synced' | 'offline', d?: string): void {
 
 /** 最近一次快照的原始状态，供提示到期后恢复真实状态用。 */
 let lastSyncState: SyncState = 'idle';
+
+/**
+ * 🔴🔴 刷新按钮前的两道刹车（老项目 index.html:5760 `if (busy || inflightWrites > 0)`）。
+ *
+ *   老项目那两道**都只包住 PUT（写）**，不包 GET（读）：
+ *     · `busy`（保存互斥）在 saveLocal / persistReminders 里置位（:7127 起），
+ *       整段期间就是一次 PUT；
+ *     · `inflightWrites`（在途写计数）在 `apiPut` / `apiPutTo` 的 try/finally 里
+ *       ±1（:2270/:2294），**只有 PUT 会动它**。
+ *   ⇒ 老项目的守卫语义精确地是「**有写正在飞**」。首次拉取（apiGet）既不动 busy
+ *     也不动 inflightWrites，故老项目在首拉期间按刷新**照样抽卡 + reload**。
+ *
+ *   bj 没有这两个全局量，等价物是同步状态机（sync/fsm.ts）的态。**只有 `pushing`
+ *   对应"有 PUT 在飞"**：
+ *     · `pushing`  —— 正在 PUT。✅ 刹车（等价 busy + inflightWrites 的并集）
+ *     · `syncing`  —— 正在拉取/合并。❌ 纯读，reload 只是重来一遍（老项目不拦）
+ *     · `dirty`    —— 本地有未推送改动（去抖窗口内）。❌ 老项目此刻 busy=false、
+ *                     inflightWrites=0 也不拦；且 bj 的 pendingEnv 由 unload 抢写落本地
+ *     · `offline`  —— 无在途写入。❌
+ *
+ *   🔴🔴 教训（2026-10-09 实测）：最初把 `syncing` / `dirty` 一起算进来是**错的** ——
+ *     openEditor 完成后状态恰是 `syncing`（首拉），于是"点刷新"被永久拦下、永不 reload，
+ *     而首拉是纯读、打断它零风险。回归闸 EGGDRAW-01 正是钉这条路径的（点刷新必须出卡）。
+ */
+function saveInFlight(): boolean {
+  return lastSyncState === 'pushing';
+}
+
 
 /* ---- 上传状态条（老项目 showUploadStatus 同款） ---- */
 
@@ -1388,12 +1418,25 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   抽卡失败（隐私模式写不进 storage 等）绝不挡住刷新本身 ——
     //   drawRoll 内部整段 try/catch，异常路径返回 null。
     onRefresh: () => {
+      // 🔴 两道刹车（老项目 :5760 `if (busy || inflightWrites > 0)`）：
+      //   在途保存/有未推送改动时不抽卡、不 reload —— reload 会打断在途写入。
+      //   提示文案与自动收起时长逐字照抄老项目 :5761-5762。
+      if (saveInFlight()) {
+        showUploadNote('doing', COPY.refreshSaving, 1500);
+        return;
+      }
       eggDraw.roll();
       location.reload();
     },
     onSkin: (skin) => {
       currentSkin = skin;
-      shellRef?.setSkin(skin, currentTheme === 'dark');
+      // 🔴🔴 必须走 repaint()，不能只调 shellRef.setSkin：
+      //   `:root` 的九档配色变量**只有 applyThemeVars 会写**（repaint 里那一次），
+      //   而 setSkin 只换 body class / 字体 / 覆膜纹理。老项目 `nsSetSkin` 末尾
+      //   就是 `applyTheme(themeWantsDark)` 重注入调色板（index.html:1750）。
+      //   只调 setSkin 的症状：七连点切皮肤当场只换字形不换色，
+      //   要等下次切主题/刷新才生效 —— 用户报障第 9 条。
+      repaint();
       // 🔴 复古皮肤蛋埋点（老项目 index.html:1744-1759 `nsSetSkin`：
       //   `if (nsSkin !== 0) nsEggUnlock('skin')`）。**只有离开默认档才埋**——
       //   七连点转一圈回到默认档时那次不算"体验过复古皮肤"。
@@ -1579,6 +1622,18 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         //   （老项目 index.html:8204-8215）。计数状态机在 diag/tap.ts。
         onTitleQuadTap: () => {
           openDiagModal();
+        },
+        // 🔴🔴 关于页「彩蛋 N / M FOUND」入口行（老项目 index.html:11115-11131）。
+        //   用户报障第 5 条「关于 NoteSyncX 没有列举彩蛋」—— 老项目把这行插在作者行之后，
+        //   计数与图鉴**同一口径**（readDiscovered 已按注册表过滤，见 registry.ts 文件头），
+        //   点整行走 `nsEggOpen` 同款出口（ensureEggLayer().openCodex()）。
+        //   🔴 计数在**每次开关于页**时现算（buildAboutOverlay 每次重建）——
+        //     本会话新解锁的蛋不会还挂着旧数（老项目 :11119 的"重开必须刷新"）。
+        eggRow: {
+          count: () => eggCountText(readDiscovered(eggBrowserStore()).size),
+          open: () => {
+            ensureEggLayer()?.openCodex();
+          },
         },
       });
       void about.open();
@@ -2362,7 +2417,7 @@ async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
  *
  * 🔴🔴 `at` 存的是**服务端给的 ts 字符串**，不是格式化过的时间：
  *   它同时是 `GET /history/<ts>` 的路径段与行上的 `data-at`，
- *   格式化过就取不回原文（`fmtHistTime` 出的 `YYYY-MM-DD HH:mm:ss` 是给人看的，
+ *   格式化过就取不回原文（`fmtHistTime` 出的 `MM-DD HH:mm` 是给人看的，
  *   见 menu.ts MenuState.histList 的注释）。
  *
  * 🔴 失败**不伪装成空列表**：网络不通时列表显示"历史版本读取失败"，
@@ -3086,15 +3141,25 @@ async function collectBakEnvelopes(
  * @param passphrase 用户口令
  * @param now 生成时刻（毫秒）。显式传入便于判据固定时间戳。
  * @param fetchImpl 注入 fetch，便于判据
+ * @param idOverride 强制用这个篇名（用户报障第 8 条「在新手机重建备份笔记」）。
+ *   🔴 不传 ⇒ 沿用备份槽的篇名（没有就新随机一个），与老项目一致。
+ *   🔴 传了 ⇒ **就地重建同一篇**：盐仍取自服务端（`remote.salt`），
+ *     所以「同一个口令 + 同一个盐 ⇒ 同一把钥匙」这条链不断，
+ *     用户手里那张**旧二维码照旧能用**（它装的是口令，不是篇名）。
+ *     这正是"回旧设备重新生成"的等价动作，只是搬到了新设备上做。
  */
 export async function makeBakBackup(
   ids: readonly string[],
   passphrase: string,
   now: number = Date.now(),
   fetchImpl: typeof fetch = fetch,
+  idOverride?: string,
 ): Promise<BakMakeOk | BakMakeErr> {
   const slot = readBakSlot();
-  const entries = collectBakEntries(ids, slot ? slot.id : null);
+  // 🔴 就地重建时以 idOverride 为准，且**必须拿它去剔清单**（见下）：
+  //   否则重建这篇自己的篇名会被当成一条普通收藏写进清单，换机后收藏夹里凭空多一篇。
+  const id = idOverride ?? (slot ? slot.id : newBakId());
+  const entries = collectBakEntries(ids, id);
   if (entries.length === 0) return { ok: false, reason: 'empty', message: COPY.migrateNoFav };
   if (entries.length > BAK_MAX) {
     return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
@@ -3117,7 +3182,6 @@ export async function makeBakBackup(
   const doc = buildBakDoc(entries, now, mats, envs);
   if (doc === null) return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
 
-  const id = slot ? slot.id : newBakId();
   const plain = canonicalize(doc);
 
   let remote: { salt: string | null; env: Envelope | null };
@@ -3218,7 +3282,7 @@ export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey, f: typeo
   //   `dk` 是解开这篇备份笔记的那把钥匙（用来解密清单正文），
   //   而各篇的钥匙必须用**口令 + 各篇 salt** 重新派生再自证 ——
   //   备份笔记的钥匙与收藏夹里那些钥匙毫无关系，拿它去开收藏夹是错的。
-  showBakRestoreCard(manifest.ids, manifest.ts, manifest.mats, manifest.envs, f);
+  showBakRestoreCard(noteId, manifest.ids, manifest.ts, manifest.mats, manifest.envs, f);
   return true;
 }
 
@@ -3261,6 +3325,7 @@ export async function tryEnterBakMode(noteId: string, passphrase: string, f: typ
 
 /** 开只读恢复卡，并把「恢复这 N 篇」接到生产合并链路。 */
 function showBakRestoreCard(
+  noteId: string,
   ids: readonly string[],
   ts: number,
   mats: readonly (BakMaterial | null)[],
@@ -3270,19 +3335,51 @@ function showBakRestoreCard(
   buildBakRestoreCard({
     ids,
     ts,
-    onGo: async () => {
+    // 🔴🔴 `entered` 是恢复卡上「口令（本批共用）」输入框的内容（可空串）。
+    //   此前形参被**丢掉**、恢复路径硬编码 sessionPass ⇒ 用户填了别的口令点「恢复」
+    //   也照样逐篇弹口令框（输入框形同虚设）。现在按 bak-restore-card 文件头约定的
+    //   `entered || sessionPass` 口径解析后透传给 applyBakRestore。
+    onGo: async (entered) => {
+      const pass = entered || sessionPass;
       // 🔴🔴 先自证 + 写钥匙，**再**合并收藏夹。
       //   顺序不能反：自证要 100 篇次 PBKDF2（单次 62ms ⇒ 最坏 6 秒多），
       //   而恢复卡按钮已经先置灰成「正在恢复…」，用户看得见进度（老项目 :9242 同款）。
       //   先合并后自证的话，用户已经"恢复成功"跳走了，钥匙才在后台慢慢写 ——
       //   而 route() 早就跑完了，命中的是"没钥匙"分支，照样弹口令框。
-      const r = await applyBakRestore(ids, mats, envs, f);
+      const r = await applyBakRestore(ids, mats, envs, pass, f);
       if (!r.ok) throw new Error(r.message);
       // 🔴 与老项目 :9274-9278 同款：恢复完整页跳第一篇。
       //   理由与老项目一致 —— 只 setStatus 的话，首页页脚会被落地页盖住，
       //   用户看着"粘完没反应"（老项目闸 R2-P1-2 的事故形状）。
       location.href = '/' + encodeURIComponent(r.first as string);
       return r.message;
+    },
+    // 🔴🔴 「在这台设备重建备份笔记」（用户报障第 8 条：旧设备不在手边，无法重新生成）。
+    //
+    //   场景：用户换到新手机、扫码恢复后，手里那篇 `nsbak-xxxxxx` 还是旧的
+    //   （老格式 v1/v2 只带篇名，或正文已过时），而"回旧设备重新生成"根本做不到。
+    //   这里让他**就地重建同一篇**：清单用恢复卡上这份（= 备份里的原班篇名，
+    //   绝不换成新设备当前收藏夹 —— 那会在恢复前把备份覆盖成一份更短的名单），
+    //   材料/正文由这台设备现场采集（密钥在手就用，正文从服务器拉）。
+    //   🔴 盐仍取自服务端 ⇒ 口令不变时派生同一把钥匙 ⇒ 旧二维码照用
+    //     （填了别的口令则是换钥匙，见下方 reused 的判定与文案）。
+    onRebuild: async (entered) => {
+      // 口令来源与 onGo 同款：输入框优先，留空则用扫码带进来的 sessionPass。
+      const pass = entered || sessionPass;
+      if (!pass) {
+        // 🔴 没有口令就没法派生盐/写凭据 ⇒ 老实要一次（不假装成功）。
+        throw new Error(COPY.migrateNeedPass);
+      }
+      // 🔴🔴 「旧二维码照用」只在**口令没变**时成立：
+      //   盐取自服务端 ⇒ 同一口令派生同一把钥匙 ⇒ 备份笔记的密文形状不变，
+      //   扫码换机带进来的 `#p=` 口令仍能解开它。
+      //   但若用户在这里填了**另一把**口令，就是给这篇备份笔记换了钥匙 ——
+      //   旧码（编码的是旧口令）再也解不开，必须如实说，不能照喊"照用"。
+      const reused = !entered || entered === sessionPass;
+      const r = await makeBakBackup(ids, pass, Date.now(), f, noteId);
+      if (!r.ok) throw new Error(r.message);
+      // 🔴 结果只报"重建成功 + 篇数"，不跳页（收藏夹没变，只是云端那篇刷新了）。
+      return COPY.bakRestRebuilt(r.bakId, r.count, reused);
     },
     onCancel: () => {
       // 🔴 只读态**刻意不归还编辑器焦点**（老项目 :9238 原话「故刻意不补」）：
@@ -3309,21 +3406,26 @@ interface BakRestoreOutcome {
  *     抽成本函数，两条路共用，绝不各写一份合并逻辑。
  *
  * 🔴🔴🔴 用户报障第 3 条在这里落地：**自证通过才写钥匙**（`onPutKey`）。
- *   口令来自扫码那一下拿到的 `sessionPass`（配对链接 `#p=` 里那个）——
+ *   口令优先取恢复卡输入框（`pass`），留空则由调用方回落到扫码那一下拿到的
+ *   `sessionPass`（配对链接 `#p=` 里那个）——
  *   它就是全部收藏夹的通行证，与老项目"扫到即拿到全部钥匙"对用户是同一种体验，
  *   只是底下走的路不同（老项目装 raw key，这里口令现派生）。
- *   `sessionPass` 为空（记忆解锁进来、保险箱里没口令）⇒ 一篇都不豁免，
+ *   `pass` 为空（记忆解锁进来、保险箱里没口令）⇒ 一篇都不豁免，
  *   全部照常走正常口令框。**宁可多问一次，也不给错钥匙。**
+ *
+ * 🔴🔴 `pass` 由调用方解析（`entered || sessionPass`）后传入，本函数**不再自己读
+ *   sessionPass** —— 否则恢复卡输入框会被无声忽略（用户填了别的口令也不生效）。
  */
 async function applyBakRestore(
   ids: readonly string[],
   mats: readonly (BakMaterial | null)[],
   envs: readonly (Envelope | null)[],
+  pass: string,
   f: typeof fetch = fetch,
 ): Promise<BakRestoreOutcome> {
   if (ids.length === 0) return { ok: false, message: COPY.migrateNothingRestored };
 
-  const pre = await proveBakMaterials(ids, mats, sessionPass, async (id, dk) => {
+  const pre = await proveBakMaterials(ids, mats, pass, async (id, dk) => {
     // 🔴 `savedAt` 用固定 0：那不是"解锁时间"，是"这次恢复顺手记住的"，
     //   与 unlock.ts:191 的写入同口径（走的是同一条 key-store 通路）。
     await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
@@ -3383,7 +3485,7 @@ async function applyBakRestore(
           // 每篇**自己的**凭据：口令 + 该篇信封里的 salt 派生（清单的材料不是备份笔记的钥匙，
           // 与上面 proveBakMaterials 同一口径）。取不到凭据就不带——full 档服务端拒了
           // 也走既有 catch 落缓存兜底，恢复不因此失败。
-          const wkI = sessionPass ? await deriveWriteKey(id, sessionPass, { saltB64: env.kdf.salt, iter: env.kdf.iter }) : null;
+          const wkI = pass ? await deriveWriteKey(id, pass, { saltB64: env.kdf.salt, iter: env.kdf.iter }) : null;
           await putBakNote(id, env, 0, f, wkI);
           envRestored++;
         } catch { /* 推送失败：下面仍把备份信封写进缓存兜底 */ }

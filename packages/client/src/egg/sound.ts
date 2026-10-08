@@ -93,6 +93,10 @@ const FX: Record<FxName, { semi: number; vol: number; seq?: number[] }> = {
   boom: { semi: -9, vol: 0.26, seq: [0, -4, -9] },
   pow: { semi: 5, vol: 0.18 },
   confirm: { semi: 4, vol: 0.16, seq: [0, 4] },
+  // 老项目同款音效名（v9.4.0 桌宠×彩蛋）：bonk=砖被打掉、桌宠抱砖滚落
+  //   🔴 老项目是「低噪 + 低频下坠」（:10620 `nz(900→180) + tone(180→60)`），
+  //     bj 的 fx 引擎只有单音，取低音程近似（-7 半音 = 一个闷响）。
+  bonk: { semi: -7, vol: 0.24, seq: [0, -5] },
 };
 
 export function buildSound(): Sound {

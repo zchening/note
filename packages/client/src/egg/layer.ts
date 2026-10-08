@@ -129,7 +129,9 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     dragon: () => dragonGame(() => ({ body: h.bodyText(), favs: h.favs(), cur: h.curNote() })),
     brick: () => brickGame(() => ({ body: h.bodyText(), favs: h.favs() })),
     satoshi: () => satoshiGame(),
-    bitcoin: () => bitcoinGame(),
+    // 🔴 老项目 /bitcoin 的金块面上印的是**你的笔记名**（`names()` 抽收藏/待办），
+    //   所以这里必须把 favs 传进去，否则金块只能显示内置兜底词。
+    bitcoin: () => bitcoinGame(() => ({ favs: h.favs() })),
     tank: () => tankGame(() => ({ body: h.bodyText(), favs: h.favs(), cur: h.curNote() })),
     spacex: () => spacexGame(),
     tesla: () => teslaGame(() => ({ body: h.bodyText(), favs: h.favs() })),

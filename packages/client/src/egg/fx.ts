@@ -325,6 +325,12 @@ export function rainCharsFor(d: Date): readonly string[] {
 }
 
 /**
+ * 当前在下的雨有几场。**必须计数**：两场雨重叠时，先结束那场的定时器若直接
+ * 摘 `ns-raining`，后一场还在下却让位判据失效 ⇒ 问候/下雨期间照样弹开奖卡。
+ */
+let rainDepth = 0;
+
+/**
  * 节日雨：持续 durationMs 的斜落粒子。
  *
  * @param durationMs 雨持续时长。
@@ -335,6 +341,23 @@ export function rain(durationMs: number, chars: readonly string[] = rainCharsFor
   // 🔴 空字符集 = 这一档不该有雨（老项目 :6600 的 `return`）。绝不能兜底成雪花。
   if (!chars.length) return;
   const end = performance.now() + durationMs;
+  // 🔴 让位标记：开奖卡的 `drawBusy()` 要判「节日雨在场时不弹卡」（老项目 nsDrawBusy 判
+  //   `#nsRain:not(.hidden)`）。bj 的雨是 canvas 粒子层、无常驻节点，故在雨期间给
+  //   `body` 挂 `.ns-raining`，雨停自动摘 —— 让 drawBusy 有一个与老项目同义的在场判据。
+  //   🔴 必须挂在 `body` 上而不是 canvas 上：canvas 是 burst/firework 共用的，按存在判会误判。
+  //   🔴🔴 摘标记必须按**计数**（不是每场雨各自一把 setTimeout 直接 remove）：
+  //     两场雨重叠时，先结束那场的定时器会把标记摘掉，而另一场还在下 ——
+  //     症状是"雨还在飘、开奖卡却已经弹出来"，且偶发（取决于重叠时机）。
+  if (typeof document !== 'undefined' && document.body) {
+    rainDepth += 1;
+    document.body.classList.add('ns-raining');
+  }
+  window.setTimeout(() => {
+    if (typeof document === 'undefined' || !document.body) return;
+    rainDepth = Math.max(0, rainDepth - 1);
+    if (rainDepth === 0) document.body.classList.remove('ns-raining');
+  }, durationMs + 600);
+
   /** 老项目 :6609 的 `i`：这是第几个雨点（0 起）。用来 `i % len` 轮转字符。 */
   let i = 0;
   const tick = (): void => {
