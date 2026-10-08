@@ -374,7 +374,7 @@ export const COPY = {
   remCardTitle: '提醒',
   remCardAck: '知道了',
   /** 补弹时的迟到提示：`{m}` 已被填成「12分钟」或「3 小时」 */
-  remCardLate: (m: string): string => `已过 ${m}`,
+  remCardMore: (n: number): string => `还有 ${n} 条已过期提醒`,
   remLateMin: (n: number): string => `${n} 分钟`,
   remLateHour: (n: number): string => `${n} 小时`,
   /** 通知正文：`来自笔记 · {id}` */

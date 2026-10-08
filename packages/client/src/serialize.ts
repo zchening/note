@@ -112,7 +112,14 @@ function isEmptySpan(s: Span): boolean {
 // 模型 → Lexical
 // ─────────────────────────────────────────────────────────────────────────
 
-export function spansToNodes(ss: readonly Span[] | undefined, remIds: ReadonlySet<string>): LexicalNode[] {
+/**
+ * @param remDone 笔记内全部提醒 id → 是否已过期（`at <= now`，用户拍板 2026-10-08
+ *   「时间过了就画删除线」）。id 在表内才包标记节点；done=true 建出来的就是
+ *   `<s class="rem-done">`（老项目 remMatchesFor 两族形态，index.html:3746）。
+ *   🔴 之所以在导入侧现算而不是把 done 存进真源：done 是**派生态**
+ *   （随钟表走），进 canonical 会让"时间流逝"本身变成一次文档编辑。
+ */
+export function spansToNodes(ss: readonly Span[] | undefined, remDone: ReadonlyMap<string, boolean>): LexicalNode[] {
   const out: LexicalNode[] = [];
   for (const s of ss ?? []) {
     if (isEmptySpan(s)) continue;
@@ -122,30 +129,30 @@ export function spansToNodes(ss: readonly Span[] | undefined, remIds: ReadonlySe
     const href = s.href ?? '';
     const remId = s.rem ?? '';
     if (href !== '') out.push($createLinkNode(href).append(text));
-    else if (remId !== '' && remIds.has(remId)) {
-      out.push($createReminderMarkNode(remId).append(text));
+    else if (remId !== '' && remDone.has(remId)) {
+      out.push($createReminderMarkNode(remId, remDone.get(remId) === true).append(text));
     } else out.push(text);
   }
   return out;
 }
 
-function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null {
+function blockToNode(b: Block, remDone: ReadonlyMap<string, boolean>): LexicalNode | null {
   switch (b.t) {
     case 'p': {
       const n = $createParagraphNode();
-      n.append(...spansToNodes(b.spans, remIds));
+      n.append(...spansToNodes(b.spans, remDone));
       return n;
     }
     case 'h1':
     case 'h2':
     case 'h3': {
       const n = $createHeadingNode(b.t as 'h1' | 'h2' | 'h3');
-      n.append(...spansToNodes(b.spans, remIds));
+      n.append(...spansToNodes(b.spans, remDone));
       return n;
     }
     case 'quote': {
       const n = $createQuoteNode();
-      n.append(...spansToNodes(b.spans, remIds));
+      n.append(...spansToNodes(b.spans, remDone));
       return n;
     }
     case 'code': {
@@ -181,7 +188,7 @@ function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null 
         kids.push(head);
       }
       for (const c of b.children ?? []) {
-        const cn = blockToNode(c, remIds);
+        const cn = blockToNode(c, remDone);
         if (cn) kids.push(cn);
       }
       // 🔴🔴 空折叠块也要留一个可落光标的段落，否则用户点进去无处打字。
@@ -212,7 +219,7 @@ function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null 
       const list = $createListNode(b.t === 'ol' ? 'number' : 'bullet');
       for (const c of b.children ?? []) {
         if (c.t !== 'li') continue; // validator 已保证子节点都是 li，这里双保险
-        list.append(liToListItem(c, remIds));
+        list.append(liToListItem(c, remDone));
       }
       return list;
     }
@@ -220,9 +227,9 @@ function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null 
       // 顶层裸 li：ListItemNode 不能直接挂 root（Lexical 会抛），降级为段落保住文字。
       // validator 允许顶层 li（模型层不禁止），所以这里必须容错而不是崩。
       const n = $createParagraphNode();
-      n.append(...spansToNodes(b.spans, remIds));
+      n.append(...spansToNodes(b.spans, remDone));
       for (const c of b.children ?? []) {
-        const cn = blockToNode(c, remIds);
+        const cn = blockToNode(c, remDone);
         if (cn) n.append(cn);
       }
       return n;
@@ -231,14 +238,14 @@ function blockToNode(b: Block, remIds: ReadonlySet<string>): LexicalNode | null 
   return null;
 }
 
-function liToListItem(li: Block, remIds: ReadonlySet<string>): ListItemNode {
+function liToListItem(li: Block, remDone: ReadonlyMap<string, boolean>): ListItemNode {
   const item = $createListItemNode();
   const own = (li.spans ?? []).filter((s) => !isEmptySpan(s));
   // li 自己的文字放在**第一个段落**里（Lexical 约定：ListItemNode 首个块承载条目文字）。
   // 导出侧 listItemToBlock 把行内形态的节点还原成 li.spans，两边必须严格对称。
   if (own.length > 0) {
     const p = $createParagraphNode();
-    p.append(...spansToNodes(own, remIds));
+    p.append(...spansToNodes(own, remDone));
     item.append(p);
   }
   // 🔴 子块装进 ListBodyNode，**不能直接 append 到 item**：
@@ -247,7 +254,7 @@ function liToListItem(li: Block, remIds: ReadonlySet<string>): ListItemNode {
   //   有 ListBodyNode 这层壳，节点类型本身就是判据，不再依赖"第一个节点"这种脆弱推断。
   const kidNodes: LexicalNode[] = [];
   for (const c of li.children ?? []) {
-    const cn = blockToNode(c, remIds);
+    const cn = blockToNode(c, remDone);
     if (cn) kidNodes.push(cn);
   }
   if (kidNodes.length > 0) {
@@ -541,7 +548,9 @@ export function docToLexical(doc: Doc): void {
   //   并让 `validateDoc` 不再补空数组（消掉"同一内容两种内存表示"的老坑）。
   //   所以这里的 `?? []` 从"临时补丁"变成了**由类型强制的正确写法**：
   //   编译器会盯着每一处，漏了就是 typecheck 报错，而不是运行时白屏。
-  const remIds = new Set((doc.reminders ?? []).map((r) => r.id));
+  const remDone = new Map(
+    (doc.reminders ?? []).map((r): [string, boolean] => [r.id, Date.parse(r.at) <= Date.now()]),
+  );
   const root = $getRoot();
   root.clear();
   // 🔴🔴 尾部连续空段落在这里**先剔掉**，与导出侧 `trimTrailingEmptyParas` 对称。
@@ -565,7 +574,7 @@ export function docToLexical(doc: Doc): void {
   //     同步到别的设备就没了" —— 那才是真丢内容。
   const nodes: LexicalNode[] = [];
   for (const b of doc.blocks ?? []) {
-    const n = blockToNode(b, remIds);
+    const n = blockToNode(b, remDone);
     if (n) nodes.push(n);
   }
   // 🔴 空文档要补一个可落光标的段落（S3-30 钉死的产品要求：空笔记必须能直接打字）。
@@ -593,7 +602,9 @@ export function docToLexical(doc: Doc): void {
  * @returns 实际替换了几块（与 indexes.length 必须相等，否则说明有块是空的、没被 append）
  */
 export function replaceBlocksAt(doc: Doc, indexes: readonly number[]): number {
-  const remIds = new Set((doc.reminders ?? []).map((r) => r.id));
+  const remDone = new Map(
+    (doc.reminders ?? []).map((r): [string, boolean] => [r.id, Date.parse(r.at) <= Date.now()]),
+  );
   const root = $getRoot();
   const kids = root.getChildren();
   const blocks = doc.blocks ?? [];
@@ -609,7 +620,7 @@ export function replaceBlocksAt(doc: Doc, indexes: readonly number[]): number {
   }
   let done = 0;
   for (const i of indexes) {
-    const n = blockToNode(blocks[i]!, remIds);
+    const n = blockToNode(blocks[i]!, remDone);
     if (!n) continue; // 空块：留在原地，不动
     kids[i]!.replace(n);
     done += 1;

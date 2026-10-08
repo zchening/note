@@ -20,7 +20,7 @@
 
 import { COPY } from '../ui/copy.ts';
 import { ICON_X } from '../ui/icons.ts';
-import { fmtChipDay, fmtChipTime, fmtLate, fmtRemInsert, itemForChip, matchAtCaret } from '../reminder/format.ts';
+import { fmtChipDay, fmtChipTime, fmtRemInsert, itemForChip, matchAtCaret } from '../reminder/format.ts';
 import { addReminder, removeReminder, removeReminderAt, upcomingReminders, dueReminders } from './reconcile.ts';
 import { pickFireableAt } from './schedule.ts';
 import { syncRemindersToNative } from './native-rem.ts';
@@ -87,6 +87,16 @@ export interface ReminderHost {
    *   像是坏了。可选则保证不传也不会崩（单测里就没传）。
    */
   onStatus?: (kind: 'doing' | 'ok' | 'bad', text: string) => void;
+  /**
+   * 到点后**重铺正文标记**（可选）。
+   *
+   * 🔴🔴 为什么必须重铺而不是只改一个节点：done 是派生态（`at <= now`，
+   *   用户拍板 2026-10-08「时间过了就画」），而老项目 v6.3 的删除线是
+   *   「时间+分隔+事项」**整段**（remMatchesFor）—— 事项段要等 markAll
+   *   按 done 重新切分才会出现在真源里。实现放 main.ts（那里才有 editor），
+   *   ui 层保持零 Lexical 依赖。
+   */
+  refreshDone?: () => void;
 }
 
 export class ReminderUI {
@@ -460,10 +470,19 @@ export class ReminderUI {
   }
 
   /**
-   * 弹响铃卡。
-   * @param isCatchup 是否为「补弹」（下次打开时对已过的提醒）
+   * 弹响铃卡（到点当次 & 进笔记补弹共用一张壳）。
+   *
+   * @param more 补弹场景下「除本条外还有 N 条已过期」——>0 时卡上带一句次要提示，
+   *   **绝不把整列表塞进一张卡**（用户拍板 2026-10-08：只弹最早的一条，
+   *   其余的一句话带过；此前全塞的「大卡」是 v2.0.0 Bug7 用户实测截图的另一半）。
+   *   到点当次恒为单条，more 恒 0。
+   *
+   * 🔴 「过期了 X 分钟」文案**整个退役**（用户拍板：没用的信息）——
+   *   老项目 v5.54 起过期彻底静默，迟到时长从来不是老项目的元素，
+   *   它是 bj 自己发明的（COPY.remCardLate + fmtLate 的 UI 引用已一并摘除；
+   *   fmtLate 纯函数本体与 F7 判据保留，另作他用不删）。
    */
-  showCard(items: readonly { id: string; at: string; text: string }[], isCatchup: boolean): void {
+  showCard(items: readonly { id: string; at: string; text: string }[], more = 0): void {
     // 🔴 空数组必须早退：否则 showCard([]) 会把卡片显示成空壳，
     //   而调用方（补弹路径）传空数组是完全正常的。
     if (items.length === 0) return;
@@ -471,22 +490,20 @@ export class ReminderUI {
     const list = this.card.querySelector('.ns-remcard-list');
     if (!list) return;
     list.textContent = '';
-    const now = Date.now();
     for (const r of items) {
       const row = document.createElement('div');
       row.className = 'ns-rem-item';
       const t = document.createElement('span');
       t.className = 'ns-rem-when';
-      const at = Date.parse(r.at);
       t.textContent = fmtChipTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '');
       row.appendChild(t);
-      if (isCatchup && at <= now) {
-        const late = document.createElement('span');
-        late.className = 'ns-rem-late';
-        late.textContent = COPY.remCardLate(fmtLate(at, now));
-        row.appendChild(late);
-      }
       list.appendChild(row);
+    }
+    if (more > 0) {
+      const moreEl = document.createElement('div');
+      moreEl.className = 'ns-rem-more';
+      moreEl.textContent = COPY.remCardMore(more);
+      list.appendChild(moreEl);
     }
     this.card.classList.remove('hidden');
     this.hideChip();
@@ -601,7 +618,14 @@ export class ReminderUI {
     this.firedIds.add(r.id);
     this.playSound();
     void this.notify(r);
-    this.showCard([r], false);
+    this.showCard([r]);
+    // 🔴 到点即重铺标记（老项目 v6.3 fireReminder：entry.fired=true 后渲染层
+    //    重画，删除线「时间+事项」整段出现）。真源重铺在 main.ts 的实现里。
+    try {
+      this.host.refreshDone?.();
+    } catch {
+      /* 重铺失败不影响响铃/通知主链 */
+    }
   }
 
   private bindAudioUnlock(): void {
@@ -855,9 +879,20 @@ export class ReminderUI {
       off.textContent = COPY.remCancelGlyph;
       off.title = COPY.remCancelOne;
       off.addEventListener('click', () => {
-        this.host.setDoc(removeReminder(this.host.getDoc(), r.id));
-        this.showPanel();
+        const updated = removeReminder(this.host.getDoc(), r.id);
+        this.host.setDoc(updated);
         this.schedule();
+        // 🔴🔴 老项目删除口径（index.html:7795-7797 逐字语义）：
+        //   `toggleRemPanel(reminders.some(x => x.at > Date.now()))` ——
+        //   还有未来提醒 → 重渲染面板；**删光未来 → 直接收面板**。
+        //   bj 此前无条件 showPanel()，删最后一条后面板还开着（老项目会收）。
+        //   🔴 重渲染路径**绝不聚焦**输入框：老项目 focusRemItemInput 是 PC-only
+        //   （:7333 matchMedia 双门控；v5.43 教训：移动端聚焦=软键盘弹出把面板顶出屏）。
+        //   bj 此前 showPanel 无条件 item.focus() ⇒ 手机上删一条就弹一次键盘
+        //   （用户报障 2026-10-08 实锤）。
+        const hasFuture = (updated.reminders ?? []).some((x) => Date.parse(x.at) > Date.now());
+        if (hasFuture) this.showPanel();
+        else this.hidePanel();
       });
       row.appendChild(off);
       list.appendChild(row);
@@ -874,16 +909,18 @@ export class ReminderUI {
     //   而且点一下滚轮就"跳"到正确值，更显得莫名其妙。
     //   顺序反过来（先定位再显示）等于什么都没做，且不报错。
     this.resetWheelScroll();
-    // 🔴 事项输入框默认聚焦（用户报障第 1 条「默认没有聚焦在事项文本框」）。
-    //   同样必须**在摘掉 hidden 之后**：display:none 的输入框 focus() 是 no-op，
-    //   与 scrollTop 同款陷阱（且症状一样是"看着没聚焦、点一下又好了"）。
-    //   用 preventScroll：老项目 v5.43/v5.55 记过触屏自动聚焦会弹软键盘把视口压扁、
-    //   居中弹窗偏位（index.html bakPass focus 那条同款纪律）。
+    // 🔴🔴 聚焦**仅 PC**（老项目 v7.1.0 focusRemItemInput 逐字口径：
+    //   matchMedia('(hover: hover) and (pointer: fine)') 双门控后才 focus；
+    //   v5.43 教训：移动端聚焦=软键盘弹出把面板顶出屏。bj 此前无条件 item.focus()
+    //   ⇒ 手机上每次打开面板都弹键盘，与「删除后弹键盘」同一根）。
+    //   仍必须在摘掉 hidden 之后：display:none 的输入框 focus() 是 no-op
+    //   （与 scrollTop 同款陷阱）。preventScroll：老项目 bakPass focus 同款纪律。
     try {
-      item.focus({ preventScroll: true });
+      const pc = typeof window.matchMedia === 'function'
+        && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+      if (pc) item.focus({ preventScroll: true });
     } catch {
-      // 老内核不支持 options：退化为无参 focus（弹窗仍会聚焦，只是可能带滚动）
-      try { item.focus(); } catch { /* 聚焦失败不影响功能 */ }
+      /* matchMedia 不可用按移动端处理：不聚焦，功能不受影响 */
     }
   }
 

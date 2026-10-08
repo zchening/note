@@ -135,8 +135,14 @@ export function reconcileReminders(doc: Doc, now: number = Date.now()): Reconcil
   //   而"哪段文字被标记了"这件事必须落在真源里，否则：
   //     - 换个客户端实现（老项目/MCP）就对不上位置
   //     - 合并时无法比较（两端的标记不一致会被当成内容差异，制造假冲突）
-  const byAt = new Map<number, string>();
-  for (const r of alive) byAt.set(Date.parse(r.at), r.id);
+  const byAt = new Map<number, { id: string; done: boolean }>();
+  for (const r of alive) {
+    const at = Date.parse(r.at);
+    // 🔴 done 判据 = **时间过了就画**（用户拍板 2026-10-08，不依赖是否推送成功）。
+    //   老项目 v5.54 同款实时判断（index.html:3765「按时间实时判断，REM_DONE 已确认
+    //   标记退役」）——「fired 要推送过才画」的旧口径随 REM_DONE 一起退役。
+    byAt.set(at, { id: r.id, done: at <= now });
+  }
 
   const nextDoc = structuredClone(doc) as Doc;
   markAll(nextDoc.blocks ?? [], 0, all, byAt);
@@ -180,7 +186,7 @@ function markAll(
   list: readonly Block[],
   baseOffset: number,
   all: readonly TimeMatch[],
-  byAt: Map<number, string>,
+  byAt: Map<number, { id: string; done: boolean }>,
 ): void {
   let off = baseOffset;
   for (const b of list) {
@@ -195,7 +201,23 @@ function markAll(
     const blockEnd = off + own.length;
     const inBlock = all.filter((m) => m.index >= off && m.index < blockEnd && m.index + m.length <= blockEnd);
     if (Array.isArray(b.spans) && inBlock.length > 0) {
-      b.spans = markSpans(b.spans, inBlock.map((m) => ({ start: m.index - off, end: m.index - off + m.length, rem: byAt.get(m.at) })));
+      b.spans = markSpans(
+        b.spans,
+        inBlock.map((m) => {
+          const ent = byAt.get(m.at);
+          let end = m.index - off + m.length;
+          // 🔴 老项目 v6.3（remMatchesFor，index.html:3779-3785）逐字口径：
+          //   已过期 → 删除线覆盖「时间串 + 分隔符 + 事项（≤20 字）」**整段**，
+          //   不只是时间串；未来 → 只包时间串。done 段与事项同进退，
+          //   用户编辑事项文本后下次对账重算（markAll 每次全量重算，天然幂等）。
+          if (ent?.done) {
+            const tail = own.slice(end);
+            const lead = (tail.match(/^[·\s\u3000]+/) || [''])[0].length;
+            if (lead < tail.length) end += lead + Math.min(20, tail.length - lead);
+          }
+          return { start: m.index - off, end: Math.min(end, own.length), rem: ent?.id };
+        }),
+      );
     }
     off = blockEnd + 1;
     if (Array.isArray(b.children)) markAll(b.children, off, all, byAt);

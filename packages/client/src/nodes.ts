@@ -43,12 +43,22 @@ import type { Span } from '@bj/shared-schema';
 // ─────────────────────────────────────────────────────────────────────────
 
 export type SerializedReminderMarkNode = Spread<
-  { remId: string },
+  { remId: string; done?: boolean },
   SerializedElementNode
 >;
 
 export class ReminderMarkNode extends ElementNode {
   __remId: string;
+  /**
+   * 🔴 **派生态，不进 canonical**：对应该提醒「时间已过」（用户拍板 2026-10-08：
+   *   时间过了就画删除线，不依赖是否推送成功——老项目 v5.54 起同款实时判断，
+   *   index.html:3765「v5.54 起按时间实时判断，REM_DONE 已确认标记退役」）。
+   *   done=true 时 createDOM 输出 `<s class="rem-done">`（老项目 :3737 同款标签与类），
+   *   false 输出 `<u class="rem-mark">`。
+   *   它随 Lexical JSON 往返（与 FoldNode.open 的 ephemeral 同款待遇），
+   *   但 lexicalToDoc 导出 span 时**只读 remId** —— canonical 里永远没有 done。
+   */
+  __done: boolean;
 
   /** @internal */
   override $config() {
@@ -60,18 +70,23 @@ export class ReminderMarkNode extends ElementNode {
   }
 
   static override clone(node: ReminderMarkNode): ReminderMarkNode {
-    return new ReminderMarkNode(node.__remId, node.__key);
+    return new ReminderMarkNode(node.__remId, node.__done, node.__key);
   }
 
   // 第一个参数必须带默认值：Lexical 要求这样才能合成 static importJSON
-  // （否则它无法"凭空"造出一个节点来解析 JSON）。
-  constructor(remId = '', key?: NodeKey) {
+  // （否则它无法"凭空"造出一个节点来解析 JSON）。三个参数全带默认 ⇒ length 仍为 0。
+  constructor(remId = '', done = false, key?: NodeKey) {
     super(key);
     this.__remId = remId;
+    this.__done = done;
   }
 
   get remId(): string {
     return this.getLatest().__remId;
+  }
+
+  get done(): boolean {
+    return this.getLatest().__done;
   }
 
   /** inline：必须与文本同处一个行内流，否则选区跨不过去 */
@@ -85,25 +100,35 @@ export class ReminderMarkNode extends ElementNode {
   }
 
   override createDOM(): HTMLElement {
-    const dom = document.createElement('u');
-    dom.className = 'rem-mark';
+    // 🔴 标签与类名都按 done 切（老项目 remMatchesFor :3746-3739：
+    //   未来 = u.rem-mark 下划线；过期 = s.rem-done 删除线，两族 CSS 并存）。
+    const dom = document.createElement(this.__done ? 's' : 'u');
+    dom.className = this.__done ? 'rem-done' : 'rem-mark';
     dom.setAttribute('data-rem', this.__remId);
     return dom;
   }
 
   override updateDOM(prev: ReminderMarkNode): boolean {
-    // 内容变化由子 TextNode 自己的 reconcile 负责；这里只关心 id 变了没
-    return prev.__remId !== this.__remId;
+    // 内容变化由子 TextNode 自己的 reconcile 负责；这里只关心 id / done 变没变。
+    // 🔴 返回 true = 让 Lexical 卸载重建（createDOM 重新按 done 选标签）——
+    //   ImageBlockNode.updateDOM 同款先例：返回 true 才能换掉标签名本身。
+    return prev.__remId !== this.__remId || prev.__done !== this.__done;
   }
 
   override updateFromJSON(serialized: LexicalParseJSON<SerializedReminderMarkNode>): this {
     return super
       .updateFromJSON(serialized)
-      .setRemId(typeof serialized.remId === 'string' ? serialized.remId : '');
+      .setRemId(typeof serialized.remId === 'string' ? serialized.remId : '')
+      .setDone(serialized.done === true);
   }
 
   setRemId(remId: string): this {
     this.getWritable().__remId = remId;
+    return this;
+  }
+
+  setDone(done: boolean): this {
+    this.getWritable().__done = done;
     return this;
   }
 
@@ -114,6 +139,7 @@ export class ReminderMarkNode extends ElementNode {
     //   而不报"字段写丢了"，所以靠"展开/收起后 canonical 字节不变"这种测试根本测不出来。
     super.afterCloneFrom(prev);
     this.__remId = prev.__remId;
+    this.__done = prev.__done;
   }
 }
 
@@ -124,8 +150,8 @@ export interface ReminderMarkNode {
   updateFromJSON(serialized: LexicalParseJSON<SerializedReminderMarkNode>): this;
 }
 
-export function $createReminderMarkNode(remId: string): ReminderMarkNode {
-  return $applyNodeReplacement(new ReminderMarkNode(remId));
+export function $createReminderMarkNode(remId: string, done = false): ReminderMarkNode {
+  return $applyNodeReplacement(new ReminderMarkNode(remId, done));
 }
 
 export function $isReminderMarkNode(

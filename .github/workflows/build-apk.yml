@@ -133,9 +133,14 @@ jobs:
           VER="${VER#v}"
           # 🔴 versionName 必须等于 tag 去掉 v —— 老项目 v5.55 出的 APK 自报 5.54，
           #   用户看到"已经是最新版"却拿到旧版逻辑，是这一条漏改造成的。
-          #   versionCode 用去点拼接（v1.0.0 → 100），Android 要求它单调递增，
-          #   覆盖安装时系统靠它判断"是不是更新"。1.0.0 → 100，1.0.1 → 101。
-          CODE=$(echo "$VER" | tr -d '.')
+          # 🔴🔴 versionCode 必须用**加权单调算法**，绝不能"去点拼接"（tr -d '.'）：
+          #   拼接在位数变化时倒退 —— 1.13.1→1131、2.0.0→**200**，Android 覆盖安装
+          #   只判 versionCode ⇒ 从 1.13.1 升 2.0.0 被系统拒绝（2026-10-08 用户实测
+          #   报障实锤，线上 v2.0.0 APK AXML 解析 versionCode=200 验证）。
+          #   加权算法 major*10000+minor*100+patch：2.0.1→20001 > 一切历史拼接值，
+          #   2.1.0→20100、3.0.0→30000 单调递增，永不再倒退。
+          IFS='.' read -r VER_MAJOR VER_MINOR VER_PATCH <<< "$VER"
+          CODE=$((VER_MAJOR * 10000 + VER_MINOR * 100 + VER_PATCH))
           sed -i "s/versionCode [0-9]\+/versionCode $CODE/; s/versionName \"[^\"]*\"/versionName \"$VER\"/" android/app/build.gradle
           grep -n "versionCode\|versionName" android/app/build.gradle
 

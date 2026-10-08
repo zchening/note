@@ -1422,7 +1422,9 @@ body.dark { color-scheme: dark; }
 .ns-rem-item { display: flex; flex-direction: column; gap: 2px;
   min-height: 40px; justify-content: center; }
 .ns-rem-when { font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
-.ns-rem-late { color: var(--muted); font-size: 11.5px; }
+/* 补弹卡次要行「还有 N 条已过期提醒」（用户拍板 2026-10-08：只弹最早一条，
+   其余一句话带过；样式沿用原 .ns-rem-late 的 muted 小字档）。 */
+.ns-rem-more { color: var(--muted); font-size: 11.5px; }
 /* 「知道了」：老项目 index.html:201 是 height:46px 通栏、字距 .08em。
    原先是 padding:11px（高约 41px）且字距没有 —— 与老项目 .box 主按钮
    同一套外观是v5.40 定的对齐关系，两处不一致就散了。 */

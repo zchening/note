@@ -649,7 +649,7 @@ function mergeLineIntoFoldTitle(fold: FoldNode, line: ElementNode): boolean {
   }
   // 🔴 空行（没有可并文字）也走同一落点：删掉空段、光标到标题末尾
   if (lineSpans.length > 0) {
-    head.append(...spansToNodes(lineSpans, new Set()));
+    head.append(...spansToNodes(lineSpans, new Map()));
     const nextTitle = [...fold.title, ...lineSpans];
     fold.setTitle(nextTitle);
   }
@@ -751,7 +751,7 @@ function registerFoldEnter(editor: LexicalEditor): () => void {
       // 标题侧：改写为前半段（空则保留原标题 —— 切点就在最前面时不该把标题清空）
       if (headText !== '') {
         headPara.clear();
-        headPara.append(...spansToNodes(headSpans, new Set()));
+        headPara.append(...spansToNodes(headSpans, new Map()));
         fold.setTitle(headSpans);
       }
 
@@ -787,7 +787,7 @@ function registerFoldEnter(editor: LexicalEditor): () => void {
       //   那条依据**已过期**：`serialize.ts:668 trimTrailingEmptyParas` 现在是
       //   **零调用死函数**。用户报障第 8 条「末尾回车没反应」正是这一支，
       //   实测回车后真源**完全没变**，接着打的字拼成了标题 "ABCDEFZZZ"。
-      out.append(...spansToNodes(tailSpans, new Set()));
+      out.append(...spansToNodes(tailSpans, new Map()));
       fold.insertAfter(out);
       // 选区落到新段落末尾：用户紧接着打的字才会落在折叠块**外面**（而不是回标题）。
       out.selectEnd();

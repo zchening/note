@@ -17,7 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installHarness, openEditor, withTimeout } from './harness.mjs';
+import { installHarness, openEditor, openEditorAt, withTimeout } from './harness.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 🔴 必须用 resolve 拼绝对路径，不能用 new URL('../../../www/', import.meta.url).pathname
@@ -738,6 +738,221 @@ test('REM-17 🔴🔴 空笔记点进正文再开面板加提醒（Bug2 用户�
     assert.equal((doc.reminders || []).length, 1, `真源应恰好一条提醒，实际=${JSON.stringify(doc.reminders || [])}`);
     const body = await page.evaluate(() => document.querySelector('.ns-editor').textContent);
     assert.ok(body.includes('开会'), `正文应出现提醒时间串行，实际=${JSON.stringify(body)}`);
+  } finally {
+    await page.close();
+  }
+});
+
+/* ═════════════ REM-18..21：v2.0.1 批（用户报障 2026-10-08）═══════════════
+ * ① 删除线渲染整个缺失（grep rem-done 全库零挂载，CSS 是死代码）；
+ * ② 删时间串片段后下划线残留（IME 门控推迟标记回写且无补铺）；
+ * ③ 补弹一张卡塞全部过期提醒 + 「过期了X分钟」噪音文案；
+ * ④ 面板删光未来提醒后不收起、手机上每次重渲染都弹键盘。
+ */
+
+test('REM-18 🔴 到点后正文标记 u.rem-mark → s.rem-done（用户拍板「时间过了就画」）', async () => {
+  // 🔴🔴 假钟 install 必须放在 **click chip 之前、其余流程之后**：
+  //   rearm 排的 setTimeout（schedule()）要在假钟下排，fastForward 才推得动；
+  //   而 install 一旦发生 rAF 全停，放在最前面会让打开/打字阶段的渲染间歇性
+  //   停摆（实测三红两绿的根因）。openEditor（真钟）负责打开与打字，
+  //   install 卡在「下划线已铺上、还差一次假钟推进」的窗口里。
+  const page = await openEditor(h.browser(), h.baseUrl(), `rem18-${Date.now()}`, 'pw');
+  try {
+    const stamp = await page.evaluate(() => {
+      const d = new Date(Date.now() + 120_000); // 🔴 +120s：分钟取整后 at-now 恒 >30s 容差，chip 不会误判过期
+      const p = (x) => String(x).padStart(2, '0');
+      return `${d.getMonth() + 1}月${d.getDate()}日${p(d.getHours())}:${p(d.getMinutes())}`;
+    });
+    await typeBody(page, `${stamp} 开会`);
+    await page.waitForTimeout(300); // 🔴 打字后等 Lexical DOM reconcile（REM-13 同款，防 caretTo 读到半截树）
+    await caretTo(page, 4);
+    try {
+      await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    } catch (e) {
+      const dbg = await page.evaluate(() => {
+        const sel = window.getSelection();
+        return {
+          text: document.querySelector('.ns-editor')?.textContent ?? '',
+          anchor: sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startOffset : -1,
+          container: sel && sel.rangeCount > 0 ? String(sel.getRangeAt(0).startContainer.nodeName) : '(none)',
+          active: document.activeElement?.className ?? '(none)',
+          chip: document.querySelector('#timeChip')?.className ?? '(no chip)',
+        };
+      });
+      throw new Error(`${e.message}；现场=${JSON.stringify(dbg)}`);
+    }
+    await page.clock.install(); // ← 此刻接管 timer；rearm 的 setTimeout 在 setDoc 之后才排，必被接管
+    await page.click('#timeChip');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    await withTimeout(
+      page.waitForFunction(() => document.querySelectorAll('.ns-editor u.rem-mark').length > 0, { timeout: 5000 }),
+      6000, '等未来侧下划线铺上',
+    );
+    // 推进到提醒时刻之后 → fireScheduled 醒 → fire → refreshDone → 节点重建为 <s>
+    await page.clock.fastForward(125_000);
+    await withTimeout(
+      page.waitForSelector('.ns-editor s.rem-done', { timeout: 8000 }),
+      9000, '等到点后标记变删除线',
+    );
+    const marks = await page.evaluate(() => ({
+      done: document.querySelectorAll('.ns-editor s.rem-done').length,
+      future: document.querySelectorAll('.ns-editor u.rem-mark').length,
+      // 🔴 时间段与事项段是 markSpans 切出的**两个相邻 <s>**（各自挂同一 remId），
+      //    单取第一个会漏掉事项段 —— 判"整段覆盖"必须 join 全部
+      text: Array.from(document.querySelectorAll('.ns-editor s.rem-done')).map((e) => e.textContent).join(''),
+    }));
+    assert.ok(marks.done >= 1, '过期标记必须是 s.rem-done');
+    assert.equal(marks.future, 0, '同一串不得同时残留下划线形态');
+    assert.ok(marks.text.includes('开会'), '删除线整段覆盖到事项（老项目 v6.3 口径）');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 + 正文无标记残留（用户报障 2026-10-08 行为闸）', async () => {
+  // 🔴🔴 形状说明：桌面 e2e 的 Backspace 走 contenteditable 原生路径（与真机
+  //   beforeinput 不同构），无法在 e2e 里复现「DOM 删了/树没删」的分叉，也就无法
+  //   隔离出补铺通道做单向验证（变异测试实证：在线形态同步回灌会兜底）。
+  //   本条钉的是**用户可见行为的最终一致**：删掉分钟后，真源判死 + 正文无任何
+  //   残留标记。补铺（IME 门控推迟回写的最终一致兜底）在 main.ts 门控分支内，
+  //   由代码走查覆盖；真机验收以用户实测为准。
+  const page = await openEditor(h.browser(), h.baseUrl(), `rem19-${Date.now()}`, 'pw');
+  try {
+    await typeBody(page, '2026-10-18 18:18 哈哈');
+    await page.waitForTimeout(300); // 🔴 打字后等 Lexical DOM reconcile（REM-13 同款）
+    await caretTo(page, 4);
+    await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+    await page.click('#timeChip');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    await withTimeout(
+      page.waitForSelector('.ns-editor u.rem-mark', { timeout: 5000 }),
+      6000, '等下划线铺上',
+    );
+    // 🔴🔴 全选重打「已删掉分钟的正文」（REM-05 已证的 Lexical 命令路径：
+    //   Control+a + 输入都是 Lexical 命令，树与 DOM 由 Lexical 自己同步）。
+    //   打字活跃期内对账判死：真源 reminders 必须归零、正文不得残留任何标记。
+    await page.click('.ns-editor');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.type('2026-10-18 18: 哈哈');
+    const after = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent ?? '');
+    assert.ok(after.startsWith('2026-10-18 18: '), `前置：分钟必须真被删掉，实际=${JSON.stringify(after)}`);
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 0, { timeout: 5000 }),
+      6000, '等提醒被判死',
+    );
+    await withTimeout(
+      page.waitForFunction(() => document.querySelectorAll('.ns-editor u.rem-mark').length === 0, { timeout: 5000 }),
+      8000, '等正文标记清零（最终一致）',
+    );
+    const body = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent ?? '');
+    assert.ok(body.includes('2026-10-18 18:'), '🔴 摘标记绝不许动正文文字');
+  } finally {
+    await page.close();
+  }
+});
+
+test('REM-20 🔴 补弹只弹最早一条 + 「还有 N 条已过期提醒」（用户拍板 2026-10-08）', async () => {
+  // 🔴 唯一笔记名 + pageA/pageB **共用同一个名字**（pageB 要打开同一篇）
+  const note = `rem20-${Date.now()}`;
+  const pageA = await openEditor(h.browser(), h.baseUrl(), note, 'pw');
+  try {
+    // 两条提醒：+90s 与 +150s（分钟精度取整后必不同分钟）
+    const stamps = [];
+    for (const delaySec of [120, 180]) { // 🔴 分钟取整后 at-now 恒 >30s 容差
+      const stamp = await pageA.evaluate((d) => {
+        const t = new Date(Date.now() + d * 1000);
+        const p = (x) => String(x).padStart(2, '0');
+        return `${t.getMonth() + 1}月${t.getDate()}日${p(t.getHours())}:${p(t.getMinutes())}`;
+      }, delaySec);
+      stamps.push(stamp);
+      await typeBody(pageA, stamps.length === 1 ? `${stamp} 第一` : `\n${stamp} 第二`);
+      await pageA.waitForTimeout(300); // 🔴 打字后等 Lexical DOM reconcile（REM-13 同款）
+      // 光标放到本行时间串中间（时间串起点 = 已有全文长度或 0，+4）
+      const off = await pageA.evaluate((idx) => {
+        const el = document.querySelector('.ns-editor');
+        const text = el?.textContent ?? '';
+        const at = text.indexOf(idx === 0 ? '第一' : '第二');
+        return Math.max(0, at - 9);
+      }, stamps.length - 1);
+      await caretTo(pageA, off);
+      await pageA.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
+      await pageA.click('#timeChip');
+      // 🔴 waitForFunction 的断言在**页面上下文**里跑，闭包变量进不去 —— 目标条数必须传 arg
+      const want = stamps.length;
+      await withTimeout(
+        pageA.waitForFunction((n) => (window.__NOTESYNC_DOC__().reminders || []).length === n, want, { timeout: 5000 }),
+        6000, `等第 ${want} 条提醒进真源`,
+      );
+    }
+    await withTimeout(
+      pageA.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 2, { timeout: 5000 }),
+      6000, '等两条提醒都进真源',
+    );
+    // 🔴🔴 必须**等推送落地再关页**：推送走 700ms 去抖，Playwright 的 close()
+    //   不派发 pagehide/beforeunload，本地兜底没机会跑 —— 关早了 pageB 拉到的是
+    //   没有 reminders 的旧版，catch-up 恒空（第一轮就是这么红的）。
+    await pageA.waitForTimeout(1500);
+  } finally {
+    await pageA.close();
+  }
+  // 🔴 pageB 的假钟设在 8 分钟后：打开时两条提醒都已过期 → 走 catch-up 补弹
+  const pageB = await openEditorAt(h.browser(), h.baseUrl(), note, 'pw', {
+    iso: new Date(Date.now() + 8 * 60_000).toISOString(),
+  });
+  try {
+    // 补弹排在 mountEditor 后 500ms 的 setTimeout 里 —— 假钟静止，必须推一下
+    await pageB.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
+    await pageB.clock.fastForward(1_000);
+    await withTimeout(
+      pageB.waitForSelector('#remCard:not(.hidden)', { timeout: 8000 }),
+      9000, '等补弹卡出现',
+    );
+    // 🔴 先 dump 真源再断言：卡没弹时能直接看出是"服务器没数据"还是"补弹没跑"
+    const remsB = await pageB.evaluate(() => (window.__NOTESYNC_DOC__().reminders ?? []).map((r) => r.at));
+    const card = await pageB.evaluate(() => ({
+      items: document.querySelectorAll('#remCard .ns-rem-item').length,
+      first: document.querySelector('#remCard .ns-rem-when')?.textContent ?? '',
+      more: document.querySelector('#remCard .ns-rem-more')?.textContent ?? '',
+      late: document.querySelectorAll('#remCard .ns-rem-late').length,
+    }));
+    assert.equal(card.items, 1, `补弹只弹最早一条，绝不整列表塞一张卡（真源=${JSON.stringify(remsB)}）`);
+    assert.ok(card.first.includes('第一'), `弹的必须是最早那条，实际=${card.first}`);
+    assert.ok(card.more.includes('1'), `次要行要报「还有 1 条」，实际=${card.more}`);
+    assert.equal(card.late, 0, '「过期了X分钟」文案已退役');
+  } finally {
+    await pageB.close();
+  }
+});
+
+test('REM-21 🔴 面板删光未来提醒后自动收起（老项目 toggleRemPanel(还有未来?) 口径）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), `rem21-${Date.now()}`, 'pw');
+  try {
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.fill('.ns-rem-input', '开会');
+    await page.click('.ns-rem-add');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 1, { timeout: 5000 }),
+      6000, '等提醒进真源',
+    );
+    await page.click('#remBtn');
+    await page.waitForSelector('.ns-rembox', { state: 'visible', timeout: 5000 });
+    await page.click('.ns-rem-off');
+    await withTimeout(
+      page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 0, { timeout: 5000 }),
+      6000, '等提醒被取消',
+    );
+    // 🔴 hidden 挂在 mask（#remMask）上；.ns-rembox 是内容盒，从不带 hidden
+    const panelHidden = await page.evaluate(
+      () => document.querySelector('#remMask')?.classList.contains('hidden') ?? false,
+    );
+    assert.ok(panelHidden, '删光未来提醒后面板必须自动收起（老项目口径）');
   } finally {
     await page.close();
   }

@@ -32,7 +32,7 @@ import {
   type EditorState,
   type LexicalEditor,
 } from 'lexical';
-import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode, $isTextNode } from 'lexical';
+import { $createParagraphNode, $createTextNode, $getRoot, $isElementNode, $isTextNode, type LexicalNode } from 'lexical';
 // 🔴 官方链接可点扩展：让识别出来的链接**真的点得动**（探针实锤，见 registerClickableLink 处注释）
 // 🔴 0.52 的 LexicalEditor **没有 editor.use()**（typecheck TS2339 直接报出来），
 //   所以只能调底层 registerClickableLink(editor, signals)，用不了官方那个 Extension 包装。
@@ -42,7 +42,7 @@ import { namedSignals } from '@lexical/extension';
 import { APP_VERSION, BUILD_DATE, SCHEMA_VERSION } from './version.ts';
 import { registerBehaviors } from './behaviors.ts';
 import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
-import { $isFoldNode } from './nodes.ts';
+import { $isFoldNode, $isReminderMarkNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
 import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
@@ -124,7 +124,7 @@ import {
   type BakMaterial,
 } from './migrate/bak-note.ts';
 import { collectBakMaterials, proveBakMaterials } from './migrate/bak-materials.ts';
-import { createImeGate, type ImeGate } from './sync/ime-gate.ts';
+import { createImeGate, TYPE_ACTIVE_MS, type ImeGate } from './sync/ime-gate.ts';
 import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
@@ -1636,6 +1636,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   detachImeRef = imeGate.attach(editorHost);
   // 挂到模块级：三条回灌路径（setDoc / 对账回灌 / 提醒回灌）都要判它。
   imeGateRef = imeGate;
+  // 补铺定时器句柄（IME 门控推迟标记回写后的最终一致兜底，见 update listener
+  // 门控跳过分支的注释）。挂在 mountEditor 闭包内：它要读本篇的 latestDoc，
+  // 换笔记重建编辑器时旧句柄随闭包一起废弃（destroy 侧不持有它也无所谓——
+  // 到点后的 walk 读的是新的 root，旧笔记的 key 早已 detach，isAttached 挡住）。
+  let strayMarkFlushTimer: number | undefined = undefined;
 
   // 🔴🔴🔴 链接可点：必须装官方 `registerClickableLink`（0.52 新增，@lexical/link）。
   //
@@ -1822,6 +1827,24 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   （index.html:7299 showUploadStatus('已过去的时间不能设提醒')）。
     //   不接这一条，被拒就是**完全静默** —— 用户点了"添加提醒"，界面毫无反应，像是坏了。
     onStatus: (kind, text) => showUploadNote(kind, text, 2200),
+    // 🔴🔴 到点即重铺标记（用户拍板 2026-10-08「时间过了就画」）。done 是派生态，
+    //   且老项目 v6.3 的删除线覆盖「时间+分隔+事项」整段 —— 事项段要等 markAll
+    //   按 done 重新切分才会进真源，所以这里必须**重新对账 + 整篇重铺**，
+    //   只把已有节点 setDone 摘不掉"事项段缺失"。
+    //   ⚠️ 权衡：整篇重建在到点瞬间冲光标 —— 与老项目 fireReminder 到点重画
+    //   同一风险（老项目没有 IME 门控照做），到点恰逢组字的概率低，接受。
+    refreshDone: () => {
+      if (!ed) return;
+      const rec = reconcileReminders(latestDoc);
+      latestDoc = rec.doc;
+      latestDocRef = rec.doc;
+      ed.update(
+        () => {
+          docToLexical(latestDoc);
+        },
+        { discrete: true },
+      );
+    },
   });
 
   let latestDoc: Doc = initial;
@@ -1917,6 +1940,40 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       if (imeGateRef && !imeGateRef.canApply()) {
         // 🔴 跳过铺标记，**但 schedule() 与 noteEdit() 照旧要走**
         //   （它们在下面）：提醒的增删是真源事实，不该被门控拦住。
+        //
+        // 🔴🔴🔴 补铺（用户报障 2026-10-08「删掉时间串里的分钟，提醒没自动删」）：
+        //   真源这一轮已经判死（latestDoc = rec.doc），但标记层回写被门控推迟——
+        //   不补铺的话，正文里那条下划线要**残留到下一次用户编辑**才被冲掉，
+        //   症状正是"提醒没删掉"（用户看到的是下划线还在）。老项目没有这层问题：
+        //   它是输入后同轮重画（纯 DOM span 重写），从不受门控约束。
+        //   补铺只做**点状摘除**（unwrap 树里 remId 已不在真源 reminders 的标记节点），
+        //   不整篇重建：别的块一个节点都不碰，光标在被摘标记内的 TextNode
+        //   随 key 存活（insertBefore 移动不换 key）。幂等：已清时 walk 空跑。
+        if (strayMarkFlushTimer !== undefined) window.clearTimeout(strayMarkFlushTimer);
+        strayMarkFlushTimer = window.setTimeout(() => {
+          strayMarkFlushTimer = undefined;
+          const live = new Set((latestDoc.reminders ?? []).map((r) => r.id));
+          const doomed: string[] = [];
+          ed.update(() => {
+            const walk = (n: LexicalNode): void => {
+              if ($isReminderMarkNode(n)) {
+                if (!live.has(n.remId)) doomed.push(n.getKey());
+                return; // 标记节点是行内包裹层，不再下钻
+              }
+              if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
+            };
+            walk($getRoot());
+          });
+          if (doomed.length === 0) return;
+          ed.update(() => {
+            for (const key of doomed) {
+              const n = $getNodeByKey(key);
+              if (!n || !$isReminderMarkNode(n) || !n.isAttached()) continue;
+              for (const c of n.getChildren()) n.insertBefore(c);
+              n.remove();
+            }
+          }, { discrete: true });
+        }, TYPE_ACTIVE_MS + 150);
       } else {
         // 🔴🔴🔴 **局部重写**（用户拍板 B 的后半段），替掉原来的整篇 docToLexical。
         //
@@ -2049,7 +2106,15 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   判据用 dueReminders（未完成 + at <= now），已完成的永远不补弹。
   const missed = dueReminders(initial).filter((r) => !r.done);
   if (missed.length > 0) {
-    window.setTimeout(() => reminderRef?.showCard(missed, true), 500);
+    // 🔴🔴 用户拍板（2026-10-08）：补弹**只弹最早的一条**（最老欠账先还，
+    //   dueReminders 本身按 at 升序，slice(0,1) 即最早），其余带一句
+    //   「还有 N 条已过期提醒」——绝不整列表塞一张卡（v2.0.0 Bug7 用户实测
+    //   截图里那张"大卡"的另一半）。迟到时长文案一并退役（见 showCard 注释）。
+    const first = missed[0];
+    if (first) {
+      const more = missed.length - 1;
+      window.setTimeout(() => reminderRef?.showCard([first], more), 500);
+    }
   }
   // 起调度。到点由 schedule() 自己算下一条并重排。
   // 🔴 schedule() 内含「同步提醒列表到原生闹钟层」，所以这一句同时覆盖了

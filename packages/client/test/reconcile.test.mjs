@@ -100,17 +100,19 @@ test('R2 🔴 红线1：正文写了时间串但没点过添加提醒 ⇒ 一条
 });
 
 test('R3 走addReminder 后 reconcile 才认这条', () => {
-  const base = docOf('3月1日10:00 开会');
-  const target = new Date(2027, 2, 1, 10, 0, 0).getTime(); // 3月1日10:00
+  // 🔴 时刻必须取**未来**（11:00 > NOW=10:00）：老项目两族口径下「过期」会整段
+  //   划删除线（U1），「下划线只包时间串」只在未来侧成立 —— 这条要钉的是未来侧。
+  const base = docOf('3月1日11:00 开会');
+  const target = new Date(2027, 2, 1, 11, 0, 0).getTime(); // 3月1日11:00
   const { doc: withRem, rem } = addReminder(base, target, '开会');
   assert.equal(withRem.reminders?.length, 1);
-  assert.equal(rem.at, ISO(2027, 3, 1, 10, 0), 'at 存完整 ISO');
+  assert.equal(rem.at, ISO(2027, 3, 1, 11, 0), 'at 存完整 ISO');
   const r = reconcileReminders(withRem, NOW);
   assert.equal(r.doc.reminders?.length, 1, '对账后这条还在');
   assert.equal(r.removed.length, 0);
   // 🔴 守恒：正文文字一个字都不能变，只允许多出 rem 标记
-  assert.equal(fullText(r.doc), '3月1日10:00 开会');
-  assert.deepEqual(remTexts(r.doc), ['3月1日10:00'], '下划线只盖时间串，不盖后面的「 开会」');
+  assert.equal(fullText(r.doc), '3月1日11:00 开会');
+  assert.deepEqual(remTexts(r.doc), ['3月1日11:00'], '下划线只盖时间串，不盖后面的「 开会」');
 });
 
 /* ============ 3. 双向联动 ============ */
@@ -127,44 +129,44 @@ test('R4 🔴 正向联动：正文删掉时间串 ⇒ 对应提醒必须消失'
 });
 
 test('R5 🔴 反向联动：删提醒 ⇒ 正文下划线必须同时消失', () => {
-  const target = new Date(2027, 2, 1, 10, 0, 0).getTime();
-  const { doc: withRem } = addReminder(docOf('3月1日10:00 开会'), target, '开会');
+  const target = new Date(2027, 2, 1, 11, 0, 0).getTime(); // 未来侧（见 R3 注）
+  const { doc: withRem } = addReminder(docOf('3月1日11:00 开会'), target, '开会');
   const r1 = reconcileReminders(withRem, NOW);
-  assert.deepEqual(remTexts(r1.doc), ['3月1日10:00'], '前置：下划线在');
+  assert.deepEqual(remTexts(r1.doc), ['3月1日11:00'], '前置：下划线在');
   const r2 = reconcileReminders(removeReminder(r1.doc, r1.doc.reminders[0].id), NOW);
   assert.equal(r2.doc.reminders, undefined);
   assert.deepEqual(remTexts(r2.doc), [], '删提醒后下划线必须一起走，否则用户看到"删了还划着"');
-  assert.equal(fullText(r2.doc), '3月1日10:00 开会', '🔴 删提醒绝不能删正文文字');
+  assert.equal(fullText(r2.doc), '3月1日11:00 开会', '🔴 删提醒绝不能删正文文字');
 });
 
 /* ============ 4. span 切分：下划线只盖时间串 ============ */
 
 test('R6 🔴 时间串跨两个 span ⇒ 只在切点范围内挂标记', () => {
-  // 「会议 3月1日10:00 开始」，时间串从第 1 个 span 跨到第 2 个
-  const target = new Date(2027, 2, 1, 10, 0, 0).getTime();
+  // 「会议 3月1日11:00 开始」，时间串从第 1 个 span 跨到第 2 个
+  const target = new Date(2027, 2, 1, 11, 0, 0).getTime();
   const base = {
     v: 1,
-    blocks: [{ t: 'p', spans: [{ t: '会议 ' }, { t: '3月1日10' }, { t: ':00 ' }, { t: '开始' }] }],
+    blocks: [{ t: 'p', spans: [{ t: '会议 ' }, { t: '3月1日11' }, { t: ':00 ' }, { t: '开始' }] }],
   };
   const { doc: withRem } = addReminder(base, target, '会议');
   const r = reconcileReminders(withRem, NOW);
   const texts = remTexts(r.doc);
-  assert.equal(texts.join(''), '3月1日10:00', '挂标记的 span 拼起来必须正好是时间串');
+  assert.equal(texts.join(''), '3月1日11:00', '挂标记的 span 拼起来必须正好是时间串');
   // 🔴 守恒：整段拼回去必须与原文完全一致
-  assert.equal((r.doc.blocks[0].spans ?? []).map((s) => s.t).join(''), '会议 3月1日10:00 开始');
+  assert.equal((r.doc.blocks[0].spans ?? []).map((s) => s.t).join(''), '会议 3月1日11:00 开始');
   // 🔴「开始」绝不能被划上下划线
   assert.equal((r.doc.blocks[0].spans ?? []).find((s) => s.t === '开始')?.rem, undefined);
 });
 
 test('R7 一个 span 内时间串只占中间 ⇒ 不许整段都划', () => {
-  const target = new Date(2027, 2, 1, 10, 0, 0).getTime();
-  const base = { v: 1, blocks: [{ t: 'p', spans: [{ t: '会议 3月1日10:00 开始' }] }] };
+  const target = new Date(2027, 2, 1, 11, 0, 0).getTime();
+  const base = { v: 1, blocks: [{ t: 'p', spans: [{ t: '会议 3月1日11:00 开始' }] }] };
   const { doc: withRem } = addReminder(base, target, '会议');
   const r = reconcileReminders(withRem, NOW);
   const spans = r.doc.blocks[0].spans ?? [];
   assert.ok(spans.length > 1, '必须被切开，1 个 span 说明没切');
-  assert.equal(spans.map((s) => s.t).join(''), '会议 3月1日10:00 开始', '🔴 切开不许丢字');
-  assert.equal(spans.filter((s) => s.rem !== undefined).map((s) => s.t).join(''), '3月1日10:00');
+  assert.equal(spans.map((s) => s.t).join(''), '会议 3月1日11:00 开始', '🔴 切开不许丢字');
+  assert.equal(spans.filter((s) => s.rem !== undefined).map((s) => s.t).join(''), '3月1日11:00');
 });
 
 test('R8 🔴 切分后格式标记要跟着各自的片段走', () => {
@@ -356,20 +358,20 @@ test('R23 同一时刻不同事项各占一条（id 不同，不会互相覆盖�
 });
 
 test('R24 fold块里的时间串也能标（children 递归）', () => {
-  const t = new Date(2027, 2, 1, 10, 0, 0).getTime();
+  const t = new Date(2027, 2, 1, 11, 0, 0).getTime(); // 未来侧（见 R3 注）
   const base = {
     v: 1,
     blocks: [
       {
         t: 'fold',
         title: [{ t: '日程' }],
-        children: [{ t: 'p', spans: [{ t: '3月1日10:00 开会' }] }],
+        children: [{ t: 'p', spans: [{ t: '3月1日11:00 开会' }] }],
       },
     ],
   };
   const { doc: withRem } = addReminder(base, t, '开会');
   const r = reconcileReminders(withRem, NOW);
-  assert.deepEqual(remTexts(r.doc), ['3月1日10:00'], '折叠块内的提醒也要标，否则合起来就看不到下划线');
+  assert.deepEqual(remTexts(r.doc), ['3月1日11:00'], '折叠块内的提醒也要标，否则合起来就看不到下划线');
   assert.equal(r.removed.length, 0);
 });
 
@@ -400,4 +402,38 @@ test('R26 空文档不炸', () => {
   const j = JSON.parse(canonicalize(e));
   assert.equal(j.reminders.length, 1);
   assert.equal('blocks' in j, false, '空文档不该凭空长出 blocks 键');
+});
+
+/* ═════════════ U 系：过期删除线整段切法（用户拍板 2026-10-08「时间过了就画」）════════════
+ * 🔴 老项目 remMatchesFor（index.html:3762-3786）两族形态：
+ *   未来 → u.rem-mark 只包时间串；过期 → s.rem-done 覆盖「时间串+分隔符+事项(≤20字)」整段。
+ *   bj 旧实现只有一族（恒 rem-mark 只包时间串）——删除线渲染整个缺失（grep rem-done 全库
+ *   零挂载，CSS 是死代码）。done 判据 = at <= now（v5.54 起实时判断，不依赖推送成功）。
+ */
+
+test('U1 过期提醒：标记段覆盖「时间+分隔+事项」整段', () => {
+  // NOW = 2027-03-01 10:00；提醒 09:00（已过 1 小时）
+  let doc = normalize(docOf('3月1日09:00 开会'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 9, 0).getTime(), '开会').doc);
+  const rec = reconcileReminders(doc, NOW);
+  const spans = rec.doc.blocks[0].spans;
+  const marked = spans.filter((s) => s.rem !== undefined).map((s) => s.t).join('');
+  assert.equal(marked, '3月1日09:00 开会', '删除线要覆盖时间串+分隔符+事项整段，不是只有时间串');
+});
+
+test('U2 未来提醒：标记只包时间串，事项段不带', () => {
+  let doc = normalize(docOf('3月2日09:00 开会'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 2, 9, 0).getTime(), '开会').doc);
+  const rec = reconcileReminders(doc, NOW);
+  const spans = rec.doc.blocks[0].spans;
+  const marked = spans.filter((s) => s.rem !== undefined).map((s) => s.t).join('');
+  assert.equal(marked, '3月2日09:00', '未来提醒保持老项目下划线口径：只包时间串');
+});
+
+test('U3 过期且正文找不到时间串 ⇒ 照旧判死（done 不豁免对账）', () => {
+  let doc = normalize(docOf('3月1日09:00 开会'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 9, 0).getTime(), '开会').doc);
+  const rec = reconcileReminders(editText(doc, '开会'), NOW);
+  assert.equal(rec.removed.length, 1, '时间串没了照旧判死');
+  assert.deepEqual(rec.doc.reminders ?? [], []);
 });
