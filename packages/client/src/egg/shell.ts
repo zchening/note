@@ -101,6 +101,13 @@ export interface DomGameDef {
   id: string;
   tip: string;
   dom: (mount: HTMLElement, g: GameCtx) => void;
+  /**
+   * 拆除回调（老项目 mirror 的 destroy 同语义）：
+   * 🔴 镜像模式往 **body** 上挂 ns-mirror-* 类，退出时必须摘掉——
+   *    类挂在 shell 的 root 之外，root.remove() 清不到它；
+   *    不摘的后果是"退出镜像后整站还是反的"，刷新才能救。
+   */
+  destroy?: () => void;
 }
 
 /** 两种游戏定义的联合。 */
@@ -498,6 +505,8 @@ export function buildShell(
     cv = undefined;
     ctx = null;
     stage = undefined;
+    // dom 型的拆除回调要在 cur 清空之前调（mirror 要摘 body 上的镜像类）
+    if (cur && isDomGame(cur)) cur.destroy?.();
     cur = null;
     over = false;
     paused = false;

@@ -2560,35 +2560,55 @@ function renderPanel(mount: HTMLElement, g: GameCtx): void {
 export function mirrorGame(): DomGameDef {
   return {
     id: 'mirror',
-    tip: '把当前笔记内容镜像放大/缩小',
+    // 🔴 tip 逐字对齐老项目（index.html:11145）
+    tip: '整站左右镜像 · 文字与图片已反回 · 刷新即回正常',
     dom: (mount, g) => {
-      mount.className = 'ns-mirror-stage';
-      const text = document.getElementById('nsMirrorText');
-      const box = document.createElement('div');
-      box.className = 'ns-mirror-box';
-      const title = document.createElement('div');
-      title.className = 'ns-mirror-title';
-      title.textContent = '镜像模式';
-      const pre = document.createElement('pre');
-      pre.className = 'ns-mirror-pre';
-      pre.id = 'nsMirrorPre';
-      pre.textContent = text?.textContent ?? '';
-      box.appendChild(title);
-      box.appendChild(pre);
-      mount.appendChild(box);
-      let scale = 1;
-      const apply = (): void => {
-        pre.style.transform = `scale(${scale})`;
+      // 镜像壳透明：站点必须可见（否则「镜像模式」只是看一块白板）
+      mount.className = 'ns-mirror-panel';
+      const h = document.createElement('h2');
+      h.textContent = '镜像模式';
+      const p = document.createElement('p');
+      p.textContent = '整站左右翻面。文字、图片、二维码、导出图都会自动反回来——反了的二维码扫不出来、反了的人脸像坏了。';
+      const row = document.createElement('div');
+      row.className = 'ns-mrow';
+      const mnote = document.createElement('p');
+      mnote.className = 'ns-mnote';
+      mnote.textContent = '导出的图片永远是正的：html2canvas 前摘掉 transform。刷新即回正常，不写 localStorage。';
+      let mode: 'A' | 'B' | 'C' = 'B'; // 老版默认 B
+      const btns: HTMLButtonElement[] = [];
+      const labels: Record<'A' | 'B' | 'C', string> = {
+        A: 'A 全镜像（字也反）',
+        B: 'B 镜像不反字',
+        C: 'C 只翻装饰',
       };
-      mount.addEventListener('click', (e) => {
-        const t = e.target as HTMLElement;
-        if (t.closest('.ns-mirror-stage')) {
-          scale = scale >= 2 ? 0.6 : scale + 0.2;
+      const apply = (): void => {
+        // 🔴 class 必须挂 body：样式选择器写的是 body.ns-mirror-*，
+        //    挂 html 上等于零效果（老版闸自检实锤）。会话态不落盘（老版口径）。
+        const de = document.body;
+        de.classList.remove('ns-mirror-A', 'ns-mirror-B', 'ns-mirror-C');
+        de.classList.add('ns-mirror-' + mode);
+        for (const b of btns) b.classList.toggle('on', b.dataset.m === mode);
+      };
+      for (const m of ['A', 'B', 'C'] as const) {
+        const b = document.createElement('button');
+        b.dataset.m = m;
+        b.textContent = labels[m];
+        b.addEventListener('click', () => {
+          mode = m;
           apply();
           g.fx('tap');
-        }
-      });
+        });
+        btns.push(b);
+        row.appendChild(b);
+      }
+      mount.appendChild(h);
+      mount.appendChild(p);
+      mount.appendChild(row);
+      mount.appendChild(mnote);
       apply();
+    },
+    destroy: () => {
+      document.body.classList.remove('ns-mirror-A', 'ns-mirror-B', 'ns-mirror-C');
     },
   };
 }
