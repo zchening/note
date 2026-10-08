@@ -887,146 +887,206 @@ export function dragonGame(getCtx: () => { body: string; favs: string[]; cur?: s
 }
 
 /* ------------------------------------------------------------------ *
- * 3. /brick 打砖块 —— 砖面优先取正文词
+ * 3. /brick 打砖块 —— 砖面是你正文里的词
+ *
+ * 🔴🔴 移植老项目 index.html:11817-11894 逐条比对。此前的自造实现
+ *   是"漂移挡板+5行杂砖"的另一个游戏（审计实测只剩 1 块砖、无连击）。
+ *   老版要点：6×3=18 块（第 1 行偶数列硬砖 hp2、第 0 行第 4 块钢砖不碎）、
+ *   挡板/鼠标横拖、连击计数（触板+1、碎砖+1、最长连击进结算）、
+ *   结算「打掉 N 块 / 最长连击 / 用时」、文案「全清了 / 球掉了」。
  * ------------------------------------------------------------------ */
 
 export function brickGame(getCtx: () => { body: string; favs: string[] }): GameDef {
   const COLS = 6;
-  const ROWS = 5;
-  let bw = 60;
-  let bh = 22;
-  let ox = 0;
-  let oy = 0;
-  let bricks: { x: number; y: number; label: string; alive: boolean; pts: number }[] = [];
-  let px = 0;
-  let py = 0;
-  let vx = 320;
-  let vy = -260;
+  const ROWS = 3;
+  interface Brick { x: number; y: number; w: number; h: number; name: string; kind: 'norm' | 'hard' | 'steel'; hp: number; alive: boolean }
+  let bw = 58;
+  const bh = 24;
+  const gap = 3;
+  let bricks: Brick[] = [];
+  let ball: { x: number; y: number; vx: number; vy: number; r: number } = { x: 0, y: 0, vx: 118, vy: -196, r: 5 };
+  let pad: { x: number; w: number } = { x: 0, w: 74 };
   let score = 0;
-  let left = 0;
+  let combo = 0;
+  let best = 0;
+  let t0 = 0;
+  let dead = false;
 
   const reset = (g: GameCtx): void => {
-    const words = names('brick', getCtx().body, getCtx().favs, ['灵感', '草稿', '计划', '备忘', '片段', '清单', '随手', '待办']);
+    const nm = names('brick', getCtx().body, getCtx().favs, ['灵感池', '工作随记', '九月周报', '读书笔记', '菜谱', '健身', '发票', '备忘', '会议', '想法池', '旧文', '待办']);
     bricks = [];
-    let i = 0;
     for (let r = 0; r < ROWS; r++) {
-      for (let cIdx = 0; cIdx < COLS; cIdx++) {
-        const lb = words[i % words.length] ?? '词';
-        bricks.push({ x: 0, y: 0, label: lb.slice(0, 4), alive: true, pts: lb.length });
-        i++;
+      for (let c = 0; c < COLS; c++) {
+        const kind: 'norm' | 'hard' | 'steel' = r === 1 && c % 2 === 0 ? 'hard' : r === 0 && c === 3 ? 'steel' : 'norm';
+        bricks.push({
+          x: 6 + c * (bw + gap),
+          y: 26 + r * (bh + gap),
+          w: bw,
+          h: bh,
+          name: nm[(r * COLS + c) % nm.length] ?? '词',
+          kind,
+          hp: kind === 'hard' ? 2 : 1,
+          alive: true,
+        });
       }
     }
-    left = bricks.length;
+    ball = { x: g.w() / 2, y: g.h() - 70, vx: 118, vy: -196, r: 5 };
+    pad.x = g.w() / 2 - pad.w / 2;
     score = 0;
-    px = g.w() / 2 - 40;
-    py = g.h() - 30;
-    vx = 320;
-    vy = -260;
-    g.setScore('0');
-    g.setLevel('');
+    combo = 0;
+    best = 0;
+    t0 = 0;
+    dead = false;
+    g.setScore('0 / ' + bricks.length);
+    g.setLevel('连击 0');
+  };
+
+  const finish = (win: boolean, g: GameCtx): void => {
+    if (dead) return;
+    dead = true;
+    g.setScore(String(score));
+    g.fx(win ? 'win' : 'die');
+    g.end(win ? '全清了' : '球掉了', [
+      ['打掉', score + ' 块'],
+      ['最长连击', String(best)],
+      ['用时', Math.round(t0) + 's'],
+    ]);
   };
 
   return {
     id: 'brick',
-    tip: '左右移动挡板 · 打完所有砖过关',
-    start: reset,
-    resize: (w, h) => {
-      bw = Math.floor((w - 40) / COLS);
-      bh = 24;
-      ox = 20;
-      oy = 60;
-      void h;
+    tip: '单指横拖 / 鼠标移动 = 挡板 · 砖面是你正文里的词 · 打掉只计分，不改一条数据',
+    start: (g) => reset(g),
+    resize: (w) => {
+      bw = Math.floor((w - 12 - gap * (COLS - 1)) / COLS);
+    },
+    move: (x, _y, g) => {
+      pad.x = Math.max(0, Math.min(g.w() - pad.w, x - pad.w / 2));
+    },
+    down: (x, _y, g) => {
+      pad.x = Math.max(0, Math.min(g.w() - pad.w, x - pad.w / 2));
+    },
+    key: (down, e) => {
+      if (!down) return;
+      if (e.key === 'ArrowLeft') {
+        pad.x = Math.max(0, pad.x - 22);
+        e.preventDefault();
+      }
+      if (e.key === 'ArrowRight') {
+        pad.x = Math.min(window.innerWidth - pad.w, pad.x + 22);
+        e.preventDefault();
+      }
     },
     frame: (dt, g) => {
-      px += vx * dt;
-      if (px < 0) {
-        px = 0;
-        vx = -vx;
+      if (dead) return;
+      t0 += dt;
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+      if (ball.x < ball.r) {
+        ball.x = ball.r;
+        ball.vx *= -1;
       }
-      if (px + 80 > g.w()) {
-        px = g.w() - 80;
-        vx = -vx;
+      if (ball.x > g.w() - ball.r) {
+        ball.x = g.w() - ball.r;
+        ball.vx *= -1;
       }
-      py += vy * dt;
-      const top = oy;
-      const bot = g.h() - 24;
-      if (py < top + bh) {
-        py = top + bh;
-        vy = -vy;
+      if (ball.y < ball.r + 6) {
+        ball.y = ball.r + 6;
+        ball.vy *= -1;
       }
-      // 撞砖
+      if (ball.y > g.h() - 30 && ball.y < g.h() - 14 && ball.x > pad.x - 4 && ball.x < pad.x + pad.w + 4 && ball.vy > 0) {
+        ball.vy = -Math.abs(ball.vy);
+        ball.vx += ((ball.x - (pad.x + pad.w / 2)) / pad.w) * 150;
+        combo++;
+        best = Math.max(best, combo);
+        g.fx('tap');
+      }
+      if (ball.y > g.h() + 10) {
+        finish(false, g);
+        return;
+      }
       for (const b of bricks) {
         if (!b.alive) continue;
-        const bx = ox + b.x * bw;
-        const by = oy + b.y * bh;
-        if (py - 8 > by && py - 8 < by + bh && px + 40 > bx && px + 40 < bx + bw) {
-          b.alive = false;
-          left -= 1;
-          score += b.pts;
-          g.fx('brk');
-          g.setScore(score);
-          vy = -vy;
+        if (ball.x > b.x - ball.r && ball.x < b.x + b.w + ball.r && ball.y > b.y - ball.r && ball.y < b.y + b.h + ball.r) {
+          if (b.kind === 'steel') {
+            ball.vy *= -1;
+            g.fx('hit');
+            break;
+          }
+          b.hp--;
+          ball.vy *= -1;
+          if (b.hp <= 0) {
+            b.alive = false;
+            score++;
+            combo++;
+            best = Math.max(best, combo);
+            g.fx('brk');
+            g.setScore(score + ' / ' + bricks.length);
+            if (bricks.every((x) => !x.alive || x.kind === 'steel')) {
+              finish(true, g);
+              return;
+            }
+          } else g.fx('hit');
           break;
         }
       }
-      if (left <= 0) {
-        g.fx('up');
-        g.end('全清了这个', [
-          [COPY.gameRowScore, String(score)],
-        ]);
-        return;
-      }
-      if (py > bot) {
-        g.fx('die');
-        g.end(COPY.gameOver, [
-          [COPY.gameRowScore, String(score)],
-          [COPY.gameRowExtra, `${left} 块`],
-        ]);
-      }
+      g.setLevel('连击 ' + combo);
     },
     draw: (g) => {
       const cv = document.getElementById('nsCv') as HTMLCanvasElement | null;
       const c = cv?.getContext('2d');
       if (!c) return;
-      const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 砖
-      bricks.forEach((b, i) => {
-        if (!b.alive) return;
-        const bx = ox + (b.x % COLS) * bw;
-        const by = oy + b.y * bh;
-        void i;
-        c.fillStyle = p.soft;
-        rr(c, bx + 1, by + 1, bw - 2, bh - 2, 5);
+      const P = pal(g);
+      const W = g.w();
+      const H = g.h();
+      c.clearRect(0, 0, W, H);
+      // 背景横线（老版 17 条）
+      c.strokeStyle = P.line;
+      c.lineWidth = 1;
+      for (let i = 1; i < 17; i++) {
+        c.beginPath();
+        c.moveTo(0, i * 26 + 0.5);
+        c.lineTo(W, i * 26 + 0.5);
+        c.stroke();
+      }
+      // 砖：norm=白底灰框、hard=soft底accent框（hp1 时半透明示破）、steel=虚线框不碎
+      for (const b of bricks) {
+        if (!b.alive) continue;
+        c.lineWidth = 1.7;
+        c.lineJoin = 'round';
+        c.fillStyle = b.kind === 'hard' ? P.soft : P.boxBg;
+        c.strokeStyle = b.kind === 'hard' ? P.accent : P.line;
+        if (b.kind === 'hard' && b.hp === 1) c.globalAlpha = 0.55;
+        rr(c, b.x, b.y, b.w, b.h, 4);
         c.fill();
-        txt(c, b.label, bx + bw / 2, by + bh / 2, 11, p.fg);
-      });
-      // 球
-      c.fillStyle = p.accent;
+        c.stroke();
+        c.globalAlpha = 1;
+        if (b.kind === 'steel') {
+          c.strokeStyle = P.fg;
+          c.setLineDash([2.6, 2.4]);
+          rr(c, b.x + 2, b.y + 2, b.w - 4, b.h - 4, 3);
+          c.stroke();
+          c.setLineDash([]);
+        }
+        c.fillStyle = b.kind === 'hard' ? P.accent : P.muted;
+        c.font = '10px ui-monospace,Consolas,monospace';
+        c.textBaseline = 'middle';
+        c.fillText(String(b.name).slice(0, 4), b.x + 6, b.y + b.h / 2 + 0.5);
+        c.textBaseline = 'alphabetic';
+      }
+      // 挡板 + 球（老版同款形态）
+      c.lineWidth = 1.7;
+      c.strokeStyle = P.accent;
+      c.fillStyle = P.soft;
+      rr(c, pad.x, H - 24, pad.w, 8, 4);
+      c.fill();
+      c.stroke();
+      c.strokeStyle = P.fg;
+      c.fillStyle = P.boxBg;
       c.beginPath();
-      c.arc(px + 40, py - 8, 5, 0, Math.PI * 2);
+      c.arc(ball.x, ball.y, ball.r, 0, 7);
       c.fill();
-      // 挡板
-      c.fillStyle = p.fg;
-      rr(c, px, g.h() - 24, 80, 8, 4);
-      c.fill();
-    },
-    move: (x) => {
-      px = x - 40;
-    },
-    swipe: (d) => {
-      void d;
-    },
-    tap: (g) => {
-      // 点一下把球打回去（老项目同款：防止球一直往下掉没法玩）
-      if (vy > 0) vy = -Math.abs(vy) * 0.9;
-      void g;
-    },
-    key: (down, e, g) => {
-      if (!down) return;
-      if (e.key === 'ArrowLeft' || e.key === 'a') vx = -420;
-      if (e.key === 'ArrowRight' || e.key === 'd') vx = 420;
-      void g;
+      c.stroke();
     },
   };
 }
