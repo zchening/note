@@ -38,8 +38,15 @@ import {
   bindTypewriterSound,
 } from '../src/egg/typewriter.ts';
 
-const TY_SRC = readFileSync(new URL('../src/egg/typewriter.ts', import.meta.url), 'utf8');
-const SOUND_SRC = readFileSync(new URL('../src/egg/sound.ts', import.meta.url), 'utf8');
+/**
+ * 🔴 源码一律先归一成 LF 再判。
+ *   本机 `core.autocrlf=true` ⇒ `sound.ts` 检出来是 CRLF，而 `draw.ts`（工具新写）是 LF；
+ *   带 `\n {4}\},\n` 这类跨行锚点的正则只在 LF 上命中 ⇒ 判据会因**换行风格**假红
+ *   （判的是代码在不在，不是行尾是什么）。归一只为去掉这个环境噪声，不放宽任何断言。
+ */
+const lf = (s) => s.replace(/\r\n/g, '\n');
+const TY_SRC = lf(readFileSync(new URL('../src/egg/typewriter.ts', import.meta.url), 'utf8'));
+const SOUND_SRC = lf(readFileSync(new URL('../src/egg/sound.ts', import.meta.url), 'utf8'));
 
 /** 去注释后的源码（判"某段代码不存在"/"共 N 处"时必须先做这一步）。 */
 const clean = (src) => stripComments(src);

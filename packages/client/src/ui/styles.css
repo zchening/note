@@ -901,11 +901,28 @@ header.ns-top {
 }
 
 /* 🔴 打印时展开全部折叠（老项目 index.html:423，浏览器 Ctrl+P 直打活的编辑器，
-   收起态正文会整段丢在纸外）。三角是用边框画的，所以"去三角"必须连边框一起清零 ——
-   只清 content 会留下一枚画出来的三角。 */
+   收起态正文会整段丢在纸外）。老项目那条 @media print 一共 6 条声明：
+     `#editor .ns-fold-hide{display:block}`（还原正文）
+     `#editor .ns-fold-mark{font-size:inherit}`（显回 [折叠] 标记文本）
+     `#editor .ns-fold-mark::before,#editor .ns-fold-open>.ns-fold-mark::before{content:'';display:none;border:0;width:0;height:0;top:0}`（去三角，两态）
+   bj 逐条对照：
+     · 还原正文 —— 下面 ① 对应。
+     · 显回 [折叠] 文本 —— **bj 无此对象**：老项目把 `[折叠]` 字面文本留在 DOM 里、
+       用 `font-size:0` 藏起来，打印时还原；bj 的把手是纯 ::before 三角（模型见 nodes.ts
+       FoldNode，标题存字段），DOM 里根本没有这串文本，故无对应声明（不是漏了）。
+     · 去三角 —— 下面 ② 对应，且**必须两态都杀**。
+   三角是用边框画的，所以"去三角"必须连边框一起清零 —— 只清 content 会留下一枚画出来的三角。 */
 @media print {
+  /* ① 还原正文 */
   .ns-fold[data-open="false"] > :not(:first-child) { display: block; }
-  .ns-fold > :first-child::before {
+  /* ② 去三角（两态）
+     🔴🔴 bj 的展开态三角是**另一条规则** `.ns-fold[data-open="true"] > :first-child::before`，
+     specificity (0,2,1)，高于这里单写 `.ns-fold > :first-child::before` 的 (0,1,1) ——
+     只写一条会被展开态压回去，**打印时"展开的折叠块"仍会画出三角**
+     （老项目为此在 :423 同时挂了 `.ns-fold-mark::before` 与 `.ns-fold-open>.ns-fold-mark::before`
+     两条选择器，原因同此）。所以展开态必须单列一条同 specificity 的选择器。 */
+  .ns-fold > :first-child::before,
+  .ns-fold[data-open="true"] > :first-child::before {
     content: ""; display: none; border: 0; width: 0; height: 0; top: 0;
   }
 }

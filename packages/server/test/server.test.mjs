@@ -268,6 +268,85 @@ test('arcade 记录可读写（彩蛋层用）', async () => {
   assert.equal(await miss.text(), '');
 });
 
+/* ================= 街机档案鉴权（老护照 ns1，v2.1.0 移植）=================
+ *
+ * 🔴🔴 为什么单开一组：老版街机档案的语义是「id 只寻址 + 请求头凭据 + 服务端只存哈希 +
+ *   钥匙错与不存在同形 404」。A3(终) 移植时把 id 判据写成"先 toUpperCase 再判"，
+ *   于是 `arc1` 这类**本项目早期的小写形状**被误判成大写档案 ⇒ 无钥匙一律 404，
+ *   旧数据凭空消失，上面「arcade 记录可读写」那条当场变红（CI 单测闸会拦下出包）。
+ *   两组必须同时存在：一组钉"小写形状照旧裸存取"，一组钉"大写形状必须凭据"。
+ */
+
+test('arcade 老护照（大写 id）：建档幂等 + 凭据必带 + 钥匙错与不存在同形 404 + 回包剥哈希', async () => {
+  const ID = 'ABC23456'; // 8 位大写（老版 ARC_ID_RE 口径）
+  const KEY = 'k'.repeat(16);
+  const create = (body) =>
+    fetch(`${base}/api/arcade`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  // 建档：POST /api/arcade {id,key}（客户端 pet.ts adoptNs1Code 就是这个形状）
+  const c1 = await create({ id: ID, key: KEY });
+  assert.equal(c1.status, 200, '建档应 200');
+  assert.deepEqual(await c1.json(), { ok: true });
+
+  // 幂等：再建一次必须**同形** ok（回 exists:true 等于告诉探测者该 id 有人占）
+  const c2 = await create({ id: ID, key: KEY });
+  assert.equal(c2.status, 200);
+  assert.deepEqual(await c2.json(), { ok: true });
+
+  // 无钥匙 ⇒ 404
+  assert.equal((await fetch(`${base}/api/arcade/${ID}`)).status, 404, '无钥匙应 404');
+  // 错钥匙与"档案不存在"必须**同形**（防枚举）
+  const bad = await fetch(`${base}/api/arcade/${ID}`, { headers: { 'X-Arcade-Key': 'w'.repeat(16) } });
+  const gone = await fetch(`${base}/api/arcade/ZZZ99999`, { headers: { 'X-Arcade-Key': 'w'.repeat(16) } });
+  assert.equal(bad.status, 404, '错钥匙应 404');
+  assert.equal(gone.status, 404, '不存在应 404');
+  assert.deepEqual(await bad.json(), await gone.json(), '钥匙错与不存在必须同形（防枚举）');
+
+  // 对钥匙 ⇒ 200，且回包剥掉 keyHash 与 id（连哈希都不出门）
+  const ok = await fetch(`${base}/api/arcade/${ID}`, { headers: { 'X-Arcade-Key': KEY } });
+  assert.equal(ok.status, 200);
+  const pub = await ok.json();
+  assert.equal(pub.keyHash, undefined, '回包不许带 keyHash');
+  assert.equal(pub.id, undefined, '回包不许带 id');
+});
+
+test('arcade 老护照：PUT 合并（counters 取最大 / shelf 并集）绝不整篇覆盖', async () => {
+  const ID = 'DEF23456';
+  const KEY = 'm'.repeat(16);
+  await fetch(`${base}/api/arcade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: ID, key: KEY }),
+  });
+  const put = (body) =>
+    fetch(`${base}/api/arcade/${ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Arcade-Key': KEY },
+      body: JSON.stringify(body),
+    });
+  // 设备 A：counters.snake=5, shelf=[3,9]
+  assert.equal((await put({ counters: { snake: 5 }, shelf: [3, 9] })).status, 200);
+  // 设备 B：counters.snake=2（更小）, shelf=[9,12] —— 整篇覆盖会把 A 的成绩抹掉
+  assert.equal((await put({ counters: { snake: 2 }, shelf: [9, 12] })).status, 200);
+  const r = await fetch(`${base}/api/arcade/${ID}`, { headers: { 'X-Arcade-Key': KEY } });
+  const o = await r.json();
+  assert.equal(o.counters.snake, 5, 'counters 必须取最大（跨设备互抹是旧 bug 根因）');
+  assert.deepEqual(o.shelf, [3, 9, 12], 'shelf 必须并集且排序');
+});
+
+test('arcade 老护照：建档 id 非法 ⇒ 400，绝不静默建档', async () => {
+  const bad = await fetch(`${base}/api/arcade`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'ab', key: 'k'.repeat(16) }),
+  });
+  assert.equal(bad.status, 400, '过短的 id 建档应 400');
+});
+
 test('/api/latest 无发布元数据时 404（App 靠这个查新版）', async () => {
   const r = await fetch(`${base}/api/latest`);
   // 隔离 DATA_DIR 下没有 deploy/latest_app.json，应 404

@@ -742,36 +742,52 @@ async function route(req, res) {
    *  兼容：小写 id（本项目早期形状）继续走无鉴权存取；老护照迁移建档走大写 id 有鉴权。
    */
   if (p.startsWith('/api/arcade')) {
-    // 建档（老版 POST /api/arcade {id,key}）：id 在**体**里，先于路径段校验处理
+    const aid = (p === '/api/arcade' ? url.searchParams.get('id') || '' : p.slice('/api/arcade/'.length));
+    const ARC_ID_RE = /^[A-Z0-9]{4,16}$/;
+    // 🔴🔴 只认**字面大写**的 id 走老版鉴权路（老护照 `ns1:id=39CLCAR9` 是 8 位大写）。
+    //   绝不能先 `toUpperCase` 再判 —— 那样 `arc1` 这类**本项目早期的小写形状**会被
+    //   误判成大写档案 ⇒ 无钥匙一律 404，旧数据凭空消失（判据见 test/server.test.mjs
+    //   「arcade 记录可读写（彩蛋层用）」，A3(终) 曾把这条打成红）。
+    const isUpperArc = typeof aid === 'string' && ARC_ID_RE.test(aid);
+    const arcadePath = path.join(ARCADE_DIR, `${aid}.json`);
+
+    // 建档（老版 POST /api/arcade {id,key}）：id 在**体**里，**不看路径段** ——
+    //   客户端认领老护照正是 POST 到无 id 段的 `/api/arcade`（egg/pet.ts adoptNs1Code）。
+    //   体里没有合法的 id+key ⇒ 落到下面「早期形状」的裸写入（裸 body、小写 id）。
     if (method === 'POST') {
-      let inc0;
+      let raw;
       try {
-        inc0 = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+        raw = await readBody(req);
       } catch {
-        inc0 = {};
+        return sendJson(res, 413, { error: 'too large' });
+      }
+      let inc0 = null;
+      try {
+        inc0 = JSON.parse(raw.toString('utf8') || '{}');
+      } catch {
+        inc0 = null;
       }
       const kid0 = String((inc0 && inc0.id) || '').toUpperCase();
       const kk0 = String((inc0 && inc0.key) || '');
-      const ARC_RE0 = /^[A-Z0-9]{4,16}$/;
-      if (!ARC_RE0.test(kid0) || kk0.length < 8 || kk0.length > 64) return sendJson(res, 400, { error: 'bad id/key' });
-      const createPath = path.join(ARCADE_DIR, `${kid0}.json`);
-      if (fs.existsSync(createPath)) return sendJson(res, 200, { ok: true });
-      const rec0 = { id: kid0, keyHash: guards.wkHash(kk0), counters: {}, shelf: [], updatedAt: Number(inc0.updatedAt) || Date.now(), born: Date.now() };
+      if (inc0 && typeof inc0 === 'object' && ARC_ID_RE.test(kid0) && kk0.length >= 8 && kk0.length <= 64) {
+        const createPath = path.join(ARCADE_DIR, `${kid0}.json`);
+        if (fs.existsSync(createPath)) return sendJson(res, 200, { ok: true });
+        const rec0 = { id: kid0, keyHash: guards.wkHash(kk0), counters: {}, shelf: [], updatedAt: Number(inc0.updatedAt) || Date.now(), born: Date.now() };
+        try {
+          await writeAtomic(createPath, JSON.stringify(rec0));
+          return sendJson(res, 200, { ok: true });
+        } catch {
+          return sendJson(res, 500, { error: 'write failed' });
+        }
+      }
+      if (!validId(aid)) return sendJson(res, 400, { error: 'bad id' });
       try {
-        await writeAtomic(createPath, JSON.stringify(rec0));
+        await writeAtomic(arcadePath, raw.toString('utf8'));
         return sendJson(res, 200, { ok: true });
       } catch {
         return sendJson(res, 500, { error: 'write failed' });
       }
     }
-    const aid = (p === '/api/arcade' ? url.searchParams.get('id') || '' : p.slice('/api/arcade/'.length));
-    const upper = typeof aid === 'string' ? aid.toUpperCase() : '';
-    const ARC_ID_RE = /^[A-Z0-9]{4,16}$/;
-    const isUpperArc = ARC_ID_RE.test(upper);
-    if (!isUpperArc && !validId(aid)) return sendJson(res, 400, { error: 'bad id' });
-    const id2 = isUpperArc ? upper : aid;
-    const arcadePath = path.join(ARCADE_DIR, `${id2}.json`);
-    const arcadeExists = () => fs.existsSync(arcadePath);
 
     if (isUpperArc && (method === 'GET' || method === 'PUT')) {
       // 老版语义：凭据必带、哈希必中、同形 404
@@ -822,46 +838,14 @@ async function route(req, res) {
       }
     }
 
-    if (isUpperArc && method === 'POST') {
-      // 建档：客户端自带 id+key，服务端只留哈希（老版同款：已存在回同形 ok）
-      let inc;
-      try {
-        inc = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      } catch {
-        inc = {};
-      }
-      const kid = String((inc && inc.id) || '').toUpperCase();
-      const kk = String((inc && inc.key) || '');
-      if (!ARC_ID_RE.test(kid) || kk.length < 8 || kk.length > 64) return sendJson(res, 400, { error: 'bad id/key' });
-      if (arcadeExists()) return sendJson(res, 200, { ok: true });
-      const rec = { id: kid, keyHash: guards.wkHash(kk), counters: {}, shelf: [], updatedAt: Number(inc.updatedAt) || Date.now(), born: Date.now() };
-      try {
-        await writeAtomic(arcadePath, JSON.stringify(rec));
-        return sendJson(res, 200, { ok: true });
-      } catch {
-        return sendJson(res, 500, { error: 'write failed' });
-      }
-    }
-
+    // bj 早期形状：小写 id、无鉴权裸读（旧数据必须还能读回来）。
+    //   PUT 到小写 id 仍是 405 —— 老版对非档案 id 也只在 GET/POST 上有语义。
+    if (!validId(aid)) return sendJson(res, 400, { error: 'bad id' });
     if (method === 'GET') {
       try {
         return send(res, 200, await fsp.readFile(arcadePath, 'utf8'));
       } catch {
         return send(res, 200, '');
-      }
-    }
-    if (method === 'POST') {
-      let body;
-      try {
-        body = await readBody(req);
-      } catch {
-        return sendJson(res, 413, { error: 'too large' });
-      }
-      try {
-        await writeAtomic(arcadePath, body.toString('utf8'));
-        return sendJson(res, 200, { ok: true });
-      } catch {
-        return sendJson(res, 500, { error: 'write failed' });
       }
     }
     return sendJson(res, 405, { error: 'method not allowed' });

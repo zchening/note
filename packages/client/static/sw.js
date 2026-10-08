@@ -90,6 +90,27 @@ self.addEventListener('activate', (event) => {
 /** 10s 超时：网络不响应就回落，不让首屏干等 */
 const NET_TIMEOUT_MS = 10_000;
 
+/**
+ * 🔴 点提醒通知 → 聚焦已打开的窗口，没有则打开首页（老项目 sw.js:24-30 v5.36 同款）。
+ *
+ * 为什么必须补：提醒是**从 SW 推的**（reminder/ui.ts 走 `reg.showNotification`），
+ * 用户点通知时事件落在这里、而不是页面里 —— 没有这个监听器，点通知**什么都不发生**
+ * （通知消失、App 不亮），用户会以为提醒是坏的。
+ * 老项目这段只在通知里带 tag（不带 data），所以这里也保持"聚焦任意已开窗口 / 否则开首页"，
+ * 不自己发明"跳到某一篇"的语义（那需要通知 data 里带笔记名，是另一条链路）。
+ */
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        if (c.focus) return c.focus();
+      }
+      return self.clients.openWindow('/');
+    }),
+  );
+});
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;

@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "cn.xuyinji.bj",
+    "sha256_cert_fingerprints": ["92:39:7D:CA:56:35:54:A5:B7:79:8E:EF:5B:8B:A0:D8:61:F5:C3:60:4B:F7:6B:E2:75:8A:60:66:F4:7C:5A:DE"]
+  }
+}]

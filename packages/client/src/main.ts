@@ -90,7 +90,7 @@ import { exportNotePng } from './export/index.ts';
 import { copyNoteToClipboard, docToClipboardPayload } from './export/copy.ts';
 import { buildPairPanel, closePairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
-import { parsePairLink } from './scan/pair-link.ts';
+import { parsePairLink, PAIR_FRAGMENT_KEY } from './scan/pair-link.ts';
 import {
   buildMigrateCode,
   fitsInMigrateCode,
@@ -3677,9 +3677,11 @@ function openFavBackupTake(initialCode?: string): void {
       const r = await applyFavBackupRestore(code, passphrase);
       if (!r.ok) return { ok: false, reason: r.reason };
       // 老项目 :9270-9273 逐字（含覆盖与丢弃两个括号）
+      // 🔴🔴 追加"旧码不免输"的如实说明（C5）：`nsfav1:` 清单只有篇名、没有材料，
+      //   恢复后进这些笔记仍要输一次口令 —— 不提示会让用户以为"恢复了却还要输口令=坏了"。
       return {
         ok: true,
-        reason: favRestoreTip(r.count, r.renewed, r.capped, FAVS_MAX),
+        reason: favRestoreTip(r.count, r.renewed, r.capped, FAVS_MAX) + COPY.bakOldCodeNoExempt,
       };
     },
     onClosed: () => {
@@ -3850,6 +3852,65 @@ function tryResumeLastNote(): boolean {
   return true;
 }
 
+/**
+ * 从 `location.hash` 取 `#p=` 直链口令（B1）。
+ *
+ * 🔴 为什么需要它：扫码那条路走 `handleScanRaw`，而**把配对链接直接贴进地址栏 /
+ *   收藏书签 / 别的 App 里点开**是另一条入口 —— 此前没有任何人读 `location.hash`，
+ *   于是"链接发给自己点开"照样弹口令框（老项目 `#k=` 是直开的）。
+ *
+ * 返回 `present=false` = 地址里没有 `p=` fragment；`present=true, passphrase=null`
+ * = 有 fragment 但载荷形状不对（域不符 / 非 `p=` / 笔记名非法 / base64 解不开）。
+ * 🔴 只回口令本身，不回其它信息 —— 与 `__NOTESYNC_PARSE_PAIR__` 同款安全边界。
+ */
+function pairFragment(): { present: boolean; passphrase: string | null } {
+  const h = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
+  if (!h.startsWith(PAIR_FRAGMENT_KEY + '=')) return { present: false, passphrase: null };
+  // 🔴 必须走 `resolveScan` 这个唯一收口，不自己调 `parsePairLink`（判据 PAIR-17：
+  //   解析口径只写一遍，分叉的根源从来不是"忘了改"，而是"改了一处"）。
+  const { parsed } = resolveScan(location.href);
+  if (!parsed.ok) return { present: true, passphrase: null };
+  return { present: true, passphrase: parsed.link.passphrase };
+}
+
+/**
+ * 落地一条 `#p=` 直链：解口令 → 挂编辑器（B1）。
+ *
+ * 🔴🔴 顺序与 `handleScanRaw` 的配对分支**逐条对齐**，两条入口不许分叉：
+ *   ① 先 `history.replaceState` 清掉地址栏里的口令 —— fragment 虽不上行服务器，
+ *      但会留在地址栏 / 历史 / 截图 / 复制出的链接里；口令用完即弃。
+ *   ② 备份笔记（`nsbak-`）先进只读恢复卡，绝不挂编辑器（甲案三闸①）。
+ *   ③ 口令错 / 数据坏给**与手输同一句**文案（ARCH 安全不变量，不给暴力破解 oracle），
+ *      然后退回口令框让用户手输 —— 直链失败不该把人卡在空白页。
+ */
+async function landPairFragment(noteId: string, passphrase: string | null): Promise<void> {
+  history.replaceState({}, '', '/' + encodeURIComponent(noteId));
+  if (passphrase === null) {
+    showUploadNote('bad', COPY.scanNotPair, COPY.uploadFailMs);
+    showPass(noteId);
+    return;
+  }
+  if (await tryEnterBakMode(noteId, passphrase)) return;
+  showUploadNote('doing', COPY.pairLanded, 0);
+  const r = await unlock({ noteId, passphrase });
+  if (!r.ok) {
+    showUploadNote('bad', r.message, COPY.uploadFailMs);
+    showPass(noteId);
+    return;
+  }
+  sessionPass = passphrase;
+  pendingFresh = r.fresh;
+  rememberLastNote(noteId);
+  mountEditor(noteId, r.doc);
+  tryShowInstallBar();
+  // 🔴 此处**不**兑现开奖（DR-07b 钉着全项目恰两处 consume：手输口令 + 记忆解锁）。
+  //   老版 `#k=` 直链是「存密钥 → location.replace 整页重载 → 自动解锁分支」，
+  //   而那条分支（index.html:10258）**没有** nsDrawConsume —— 兑现只发生在
+  //   applyUnlocked:3479 与离线解锁:3511。bj 的 `#p=` 是扫码同族的"配对落地"入口，
+  //   与 handleScanRaw 一样不该在这里兑现；多写一条等于让直链入口凭空吞掉刷新开奖。
+  greetThisNote(noteId);
+}
+
 function route(): void {
   const raw = noteNameFromPath();
   if (raw === '') {
@@ -3894,8 +3955,16 @@ function route(): void {
   //   老项目用标记当记忆，于是"标记在、密钥没了"时依然进编辑器 = 假成功。
   //   resolveKey 走内存 → IndexedDB，都拿不到才要口令。
   void (async () => {
+    // 🔴🔴 B1：`#p=` 直链（对齐老版 `#k=`「直接打开此笔记，无需输入口令」）。
+    //   扫码那条路走 handleScanRaw；把链接**直接贴进地址栏/书签/别的 App** 是另一条入口，
+    //   此前没有任何人处理 location.hash ⇒ 照样弹口令框。
+    //   必须在"记忆解锁"之前取到口令：新设备上这条链接是**唯一**的钥匙来源。
+    const pf = pairFragment();
     const rec = await unlockIfRemembered(name);
     if (rec && rec.ok) {
+      // 🔴 本机已记得：记忆解锁优先 —— 直链里的口令可能已过期（改过口令），
+      //   不能让一条过期链接把本机还能用的密钥顶掉。顺手清掉地址栏里的口令。
+      if (pf.present) history.replaceState({}, '', '/' + encodeURIComponent(name));
       // 🔴 记忆解锁也要把口令交给 sessionPass，否则「点扫码配对/扫码换机还要输口令」。
       //   （此前只有"本次会话手输过口令"才有值 ⇒ 记忆进来的用户每次都被卡。）
       //   口令来自本机保险箱（./sync/pass-vault.ts），与密钥同生共死、锁定即失效。
@@ -3914,6 +3983,10 @@ function route(): void {
       tryShowInstallBar();
       eggDraw.consume();
       greetThisNote(name);
+      return;
+    }
+    if (pf.present) {
+      await landPairFragment(name, pf.passphrase);
       return;
     }
     showPass(name);

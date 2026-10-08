@@ -258,10 +258,18 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
     ufill.style.width = '0%';
     umsg.textContent = '';
     const onProgress: ProgressFn = (d, t) => {
+      // 🔴 首次收到进度就把按钮切成「下载中…」（老项目 :8166 同款）：
+      //   「准备下载…」是 downloadApk 发车前的态，进了轮询还挂着它，
+      //   用户会以为一直没开始下。
+      if (uyes.textContent !== COPY.upd.downloadingBtn) uyes.textContent = COPY.upd.downloadingBtn;
       // 🔴 total 为 0 时不显示百分比：显示 "0%" 再跳 100% 比不显示更让人以为卡住。
-      const pct = t > 0 ? Math.min(100, Math.round((d / t) * 100)) : 0;
+      if (t <= 0) return;
+      // 🔴 下载期上限 99%（老项目 :8179 同款）：100% 只留给"已完成"，
+      //   否则进度条满了却还在下，用户以为卡在最后 1%。
+      const pct = Math.min(99, Math.round((d / t) * 100));
       ufill.style.width = pct + '%';
-      umsg.textContent = COPY.upd.downloading(pct);
+      const mb = (n: number): string => (n / 1048576).toFixed(1);
+      umsg.textContent = COPY.upd.downloading(pct, mb(d), mb(t));
     };
     const msg = await runUpdate(deps.native, rel, onProgress);
     uprog.classList.add('hidden');

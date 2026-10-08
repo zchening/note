@@ -88,6 +88,13 @@ const STATIC_REQUIRED = [
   'favicon.svg',
   // iOS 加到主屏图标。缺 ⇒ iOS 上"添加到主屏幕"是网页截图，很丑。
   'apple-touch-icon.png',
+  // 🔴 安卓 App Links 域名归属校验（Manifest autoVerify 的真前提）。
+  //   缺 ⇒ 点 bj 域链接系统只"询问"不直达，autoVerify 白配。
+  //   注意它是 **.well-known 点目录**，物化时被"跳过点文件"的过滤器挡过（见 materializeStatic）。
+  '.well-known/assetlinks.json',
+  // 配对中转页（老项目同源 surface）。缺 ⇒ 走中转形态的配对链接落到 SPA 兜底，
+  //   拿到整页 index.html 而不是"跳转"逻辑。
+  'bridge.html',
 ];
 
 /**
@@ -111,7 +118,11 @@ async function materializeStatic() {
       `静态资源目录不存在：${STATIC_SRC}（${STATIC_REQUIRED.join(' / ')} 不会进 CI 产物）`,
     );
   }
-  const top = names.filter((n) => !n.startsWith('.'));
+  // 🔴 跳过点文件（.DS_Store 等编辑器/系统垃圾），但 **`.well-known` 必须放行**：
+  //   它是 App Links 校验文件（assetlinks.json）的承载目录，被一起跳过就等于
+  //   "文件在仓库里、构建产物里没有"，线上 /.well-known/assetlinks.json 404，
+  //   而构建日志一切正常（readdir 不报错，必需清单在别的分支才报）。
+  const top = names.filter((n) => !n.startsWith('.') || n === '.well-known');
   // 🔴 先量出"文件"与"目录"再动手：`stat` 要 await，不能一边遍历一边改容器。
   const dirs = [];
   for (const n of top) {

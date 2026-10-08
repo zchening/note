@@ -152,7 +152,10 @@ test('EGG-E 彩蛋层全链路', async (t) => {
       const exit = (await page.textContent('.ns-x'))?.trim();
       assert.match(exit ?? '', /退出/, `退出键应有「退出」文案，实得 ${exit}`);
       const score = (await page.textContent('.ns-sc'))?.trim();
-      assert.equal(score, '0', '开局分数应为 0');
+      // 🔴 分数带「字」单位是老项目**稳态**口径（index.html:11698 `SC(score + ' 字')`）——
+      //   snake 的分就是吃到的字数。bj 在 start 里就写 `'0 字'`（games.ts），开局读数
+      //   必然是 `'0 字'`；裸 `'0'` 只是 HUD 建壳那一瞬的初值（老项目也是下一帧才被覆写）。
+      assert.equal(score, '0 字', `开局分数应为「0 字」，实得 ${score}`);
     } finally {
       await page.close();
     }

@@ -185,7 +185,7 @@ export async function runUpdate(
     // 🔴 老壳无桥：退到打开下载页，不装死。老项目的原话是
     //   「当前版本壳不支持一键升级，正在打开官方下载页」。
     deps.openExternal(rel.url);
-    return '当前版本壳不支持一键升级，正在打开下载页';
+    return '当前版本壳不支持一键升级，正在打开官方下载页';
   }
 
   let dl: DownloadResult;
@@ -256,7 +256,7 @@ async function finishInstall(br: AppUpdateBridge, path: string): Promise<string>
     // 🔴 授权结果无法回传（跳的是系统设置页），所以"已尽力"就是全部语义。
     //   用户授权后需要自己再点一次更新。老项目同款处理。
     try { await br.requestInstallPermission?.(); } catch { /* 无此页的 ROM 静默咽下 */ }
-    return '请在系统设置里允许「安装未知应用」，然后再点一次更新';
+    return '在设置里允许「安装未知应用」后，回到这里再点一次';
   }
   return '拉起安装失败：' + (r.error || '未知原因');
 }

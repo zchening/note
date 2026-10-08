@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NoteSync 配对中转</title>
+<style>
+  body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#FBFBF8;color:#0F0F11}
+  .status{color:#98958A}
+</style>
+</head>
+<body>
+<div class="status">正在跳转…</div>
+<script>
+/*
+ * 配对中转页 —— 老项目 index.html 同源 surface（v5.22/v5.23 引入）。
+ *
+ * 🔴 与老项目的**唯一差异**是 fragment 键名：老项目 `#k=`（可导出的 raw key），
+ *   bj 是 `#p=`（口令）—— 见 scan/pair-link.ts 文件头：bj 的密钥是
+ *   extractable:false 的 CryptoKey，物理上导不出，配对载荷只能是口令。
+ *
+ * 🔴 本页只做一件事：把 `#t=<目标笔记 URL>&p=<口令>` 重写成 `<目标>#p=<口令>`。
+ *   口令全程留在 fragment（不上行服务器、不进任何日志），零知识不变。
+ *   只放行 http/https，其余协议直接判无效 —— 防 javascript:/data: 当跳板。
+ *
+ * 🔴 服务端必须显式路由本文件（老项目 server.js 的 /bridge.html 分支）：
+ *   否则会被 SPA 兜底返回 index.html（text/html），中转逻辑根本没执行。
+ *   bj 的 server.js 是通用静态服务（www/bridge.html 命中即返回），
+ *   本文件放进 packages/client/static/ 由 build.mjs 物化到 www/。
+ */
+(function(){
+  var p=new URLSearchParams(location.hash.slice(1));
+  var t=p.get('t'),k=p.get('p');
+  if(!t||!k){document.body.textContent='配对链接无效';return;}
+  try{var u=new URL(t)}catch(e){document.body.textContent='配对链接无效';return;}
+  if(u.protocol!=='https:'&&u.protocol!=='http:'){document.body.textContent='配对链接无效';return;}
+  location.replace(t+'#p='+k);
+})();
+</script>
+</body>
+</html>
