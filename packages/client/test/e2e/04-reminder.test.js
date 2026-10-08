@@ -857,7 +857,7 @@ test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 
   }
 });
 
-test('REM-20 🔴 补弹只弹最早一条 + 「还有 N 条已过期提醒」（用户拍板 2026-10-08）', async () => {
+test('REM-20 🔴 补弹只弹离现在最近一条（无「还有 N 条」行，用户拍板 2026-10-08 修订）', async () => {
   // 🔴 唯一笔记名 + pageA/pageB **共用同一个名字**（pageB 要打开同一篇）
   const note = `rem20-${Date.now()}`;
   const pageA = await openEditor(h.browser(), h.baseUrl(), note, 'pw');
@@ -921,9 +921,9 @@ test('REM-20 🔴 补弹只弹最早一条 + 「还有 N 条已过期提醒」�
       more: document.querySelector('#remCard .ns-rem-more')?.textContent ?? '',
       late: document.querySelectorAll('#remCard .ns-rem-late').length,
     }));
-    assert.equal(card.items, 1, `补弹只弹最早一条，绝不整列表塞一张卡（真源=${JSON.stringify(remsB)}）`);
-    assert.ok(card.first.includes('第一'), `弹的必须是最早那条，实际=${card.first}`);
-    assert.ok(card.more.includes('1'), `次要行要报「还有 1 条」，实际=${card.more}`);
+    assert.equal(card.items, 1, `补弹只弹最近一条，绝不整列表塞一张卡（真源=${JSON.stringify(remsB)}）`);
+    assert.ok(card.first.includes('第二'), `弹的必须是离现在最近的那条（at 最大、过期最晚），实际=${card.first}`);
+    assert.equal(card.more, '', `「还有 N 条」次要行已按用户要求移除，实际=${card.more}`);
     assert.equal(card.late, 0, '「过期了X分钟」文案已退役');
   } finally {
     await pageB.close();

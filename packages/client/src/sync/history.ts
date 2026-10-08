@@ -177,7 +177,11 @@ export function _resetAutoSnapshot(): void {
 }
 
 /**
- * 时间戳 → `MM-DD HH:mm`（老项目 fmtSyncShort :5386-5392 逐字同款）。
+ * 时间戳 → `YYYY-MM-DD HH:mm:ss`（完整时间，含年与秒，不再截断到 `MM-DD`）。
+ *
+ * 🔴🔴 2026-10-08 修订：原先只出 `MM-DD HH:mm`，丢掉了**年份**，
+ *   跨年的历史版本根本分不清是哪一年；用户也明确要求"显示完整的时间，不要截断"。
+ *   这里改成含年含秒的完整时间戳，且下游 `.hist-meta` 不再做 ellipsis 截断。
  *
  * 🔴 不自己写一套格式化：老项目那处是全项目共用的，
  *   这里另写一个就会与「最后同步」那行的时间长得不一样。
@@ -186,5 +190,8 @@ export function _resetAutoSnapshot(): void {
 export function fmtHistTime(ts: number): string {
   const d = new Date(ts);
   const p = (n: number): string => String(n).padStart(2, '0');
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  );
 }

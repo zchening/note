@@ -751,6 +751,17 @@ export class SyncClient {
       this.d.setDoc(remoteDoc);
       this.base = remoteDoc;
       this.conflicts = [];
+      // 🔴🔴 采纳远端必须同步刷新本机离线缓存（2026-10-08 对抗审计 S4）：
+      //   不刷的话缓存里还是旧信封，而 unlock 的缓存命中分支**不查服务器** ——
+      //   下次离线（或弱网）重开这篇，用户看到的是被静默回滚的旧版。
+      //   与 push 成功路径（~:828）和 unlock.ts:195 的写缓存同一条通路同一条契约；
+      //   写进去的就是刚从服务器拉到的信封本体，与真源同源，换口令场景无分叉。
+      //   🔴 三方合并分支不走这里：合并结果以本地新内容为准、随后的 push 会写缓存。
+      try {
+        writeCache(this.d.noteId, env);
+      } catch {
+        // 不能因此把整次采纳搞失败（离线缓存是增强项，见 local-cache.ts 文件头）
+      }
       this.send('pulled');
       return;
     }

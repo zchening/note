@@ -109,9 +109,6 @@ export class ReminderUI {
   /** 提醒面板的遮罩。 */
   private mask: HTMLDivElement;
 
-  /** 本次已弹过卡片的提醒 at，避免同一批反复弹（老项目 cardShownAts）。 */
-  private shownAts = new Set<string>();
-
   /**
    * 🔴 chip 状态三件（老项目 chipData / chipDeleteAt / chipAutoHideTimer+chipFeedbackUntil）
    *
@@ -448,7 +445,6 @@ export class ReminderUI {
     ack.setAttribute('tabindex', '0');
     ack.textContent = COPY.remCardAck;
     const close = (): void => {
-      this.shownAts.clear();
       el.classList.add('hidden');
     };
     ack.addEventListener('click', close);
@@ -472,21 +468,25 @@ export class ReminderUI {
   /**
    * 弹响铃卡（到点当次 & 进笔记补弹共用一张壳）。
    *
-   * @param more 补弹场景下「除本条外还有 N 条已过期」——>0 时卡上带一句次要提示，
-   *   **绝不把整列表塞进一张卡**（用户拍板 2026-10-08：只弹最早的一条，
-   *   其余的一句话带过；此前全塞的「大卡」是 v2.0.0 Bug7 用户实测截图的另一半）。
-   *   到点当次恒为单条，more 恒 0。
+   * 🔴🔴 2026-10-08 二次修订（现行口径，覆盖当天早些时候的第一次拍板）：
+   *   **补弹只承载一条 —— 离现在最近的那条过期提醒**（at 最大 = 过期最晚 = 距当下最近，
+   *   见 main.ts 补弹路径的 nearest 归约），**「还有 N 条」次要行整个移除**（用户明确：
+   *   "这个不要"）。据此本方法签名里已没有 `more` 参数。
+   *   此前「只弹最早一条 + 一句话带过其余」是同日第一次拍板，已被上面这次取代；
+   *   绝不把整列表塞进一张卡的约束不变（v2.0.0 Bug7 用户实测截图的另一半）。
+   *   到点当次恒为单条，与补弹共用本方法。
    *
    * 🔴 「过期了 X 分钟」文案**整个退役**（用户拍板：没用的信息）——
    *   老项目 v5.54 起过期彻底静默，迟到时长从来不是老项目的元素，
    *   它是 bj 自己发明的（COPY.remCardLate + fmtLate 的 UI 引用已一并摘除；
    *   fmtLate 纯函数本体与 F7 判据保留，另作他用不删）。
    */
-  showCard(items: readonly { id: string; at: string; text: string }[], more = 0): void {
+  showCard(items: readonly { id: string; at: string; text: string }[]): void {
     // 🔴 空数组必须早退：否则 showCard([]) 会把卡片显示成空壳，
     //   而调用方（补弹路径）传空数组是完全正常的。
+    // 🔴🔴 2026-10-08 二次修订：去掉 `more` 参数与「还有 N 条」那一行 ——
+    //   补弹只承载单条（离现在最近的过期提醒），其余不堆叠进同一张卡。
     if (items.length === 0) return;
-    for (const it of items) this.shownAts.add(it.at);
     const list = this.card.querySelector('.ns-remcard-list');
     if (!list) return;
     list.textContent = '';
@@ -498,12 +498,6 @@ export class ReminderUI {
       t.textContent = fmtChipTime(r.at) + (r.text ? `　${escapeTruncPlain(r.text, 40)}` : '');
       row.appendChild(t);
       list.appendChild(row);
-    }
-    if (more > 0) {
-      const moreEl = document.createElement('div');
-      moreEl.className = 'ns-rem-more';
-      moreEl.textContent = COPY.remCardMore(more);
-      list.appendChild(moreEl);
     }
     this.card.classList.remove('hidden');
     this.hideChip();

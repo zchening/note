@@ -254,7 +254,7 @@ test('BAK-MAT-W1 接线：出码装材料、恢复才 putKey', async () => {
 
   // 出码侧必须调 collectBakMaterials 并把材料传进 buildBakDoc
   assert.match(main, /collectBakMaterials\(/, 'makeBakBackup 必须为每篇装材料');
-  assert.match(main, /buildBakDoc\(entries,\s*now,\s*mats\)/, '材料必须传进 buildBakDoc（不传就还是 v1，恢复端拿不到）');
+  assert.match(main, /buildBakDoc\(entries,\s*now,\s*mats(,\s*envs)?\)/, '材料必须传进 buildBakDoc（不传就还是 v1，恢复端拿不到）');
 
   // 恢复侧必须调 proveBakMaterials（自证），且必须真写钥匙
   assert.match(main, /proveBakMaterials\(/, 'applyBakRestore 必须走自证，不能只靠 putKey');

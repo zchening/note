@@ -382,3 +382,36 @@ test('FSM-15 SyncDeps 同时提供两条通道，且 onInternalError 是可选�
     'send() 的 catch 里绝不许再调 onError —— 那正是把内部异常推给用户的根因',
   );
 });
+
+test('FSM-16 🔴 采纳远端必须刷新本机离线缓存（S4：不刷 = 离线重开读到静默回滚的旧版）', async () => {
+  // 场景：两次拉取之间本地没改（local == base）→ 走 client.ts 的"直接采纳"分支。
+  // 🔴 该分支此前只 setDoc 不写缓存 ⇒ 缓存里还是第一次 pull 的旧信封，
+  //   而 unlock 的缓存命中分支**不查服务器** ⇒ 下次离线重开，用户看到旧正文且零报错。
+  const env1 = await seal(docOf('first'));
+  const env2 = await seal(docOf('second'));
+  assert.notEqual(env1.iv, env2.iv, '前置：两封信封 iv 必须真的不同（GCM 随机 iv），否则判据恒真');
+  let n = 0;
+  const { c, userErrors } = mkClient(async (u, init) => {
+    if (init && init.method === 'POST') return ok({ v: 9 });
+    n += 1;
+    return ok(n === 1 ? env1 : env2);
+  });
+  await c.start(); // 第一次 pull：远端 first → 采纳
+
+  // 前置：采纳后缓存里必须是第一封信封
+  const raw1 = globalThis.localStorage.getItem('notesync_bj_cache_fsm-probe');
+  assert.ok(raw1, '第一次采纳后离线缓存必须已有记录');
+  const c1 = JSON.parse(raw1);
+  assert.equal(c1.iv, env1.iv, '前置：缓存存的是第一封信封');
+
+  deliverSse(); // 第二次 pull：远端 second → 走采纳分支
+  await settle();
+
+  assert.deepEqual(userErrors, [], '全程零用户可见错误');
+  const raw2 = globalThis.localStorage.getItem('notesync_bj_cache_fsm-probe');
+  assert.ok(raw2, '第二次采纳后缓存记录必须还在');
+  const c2 = JSON.parse(raw2);
+  assert.equal(c2.iv, env2.iv, '🔴 采纳远端后缓存必须刷新成新信封（承重断言）');
+  assert.equal(c2.ct, env2.ct, 'ct 也必须是新信封的（只刷 iv 不刷 ct = 半截修复）');
+  c.stop();
+});

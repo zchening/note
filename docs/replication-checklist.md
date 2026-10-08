@@ -89,3 +89,17 @@ const browser = await launchBrowser();          // 从 harness.mjs 借，playwri
 - 🔴 新增用例前先 `grep` 同文件编号防撞号。
 - 🔴 断言"某段代码不存在/存在"，输入必须是**去注释后**的代码。
 - 🔴 判据不许对排版过敏（硬编码多行缩进 = 换个缩进就假红）。
+
+### e2e 时钟与键盘的三个坑（2026-10-08 REM-18/19 三连红换来的）
+
+- 🔴🔴 **Playwright 假钟 install 后 rAF 全停**：install 放在测试开头会让打开/打字阶段
+  的渲染间歇性停摆（三红两绿的根因）。install 必须推迟到"被测 timer 排上之后、
+  fastForward 之前"的窗口（如 chip 加提醒之后、clock.fastForward 之前）。
+- 🔴🔴 **测试里的提醒时刻要留足容差余量**：`Date.now()+60s` 经分钟取整后，
+  剩余秒数均匀落在 0–60s，其中一半会撞进 chip 的 30 秒过期容差
+  （`at <= now+30s` 视为 expired 不弹卡）→ 用 **+120s** 起步。
+- 🔴🔴 **桌面 e2e 的 Backspace 走 contenteditable 原生路径**：焦点不严格落在
+  Lexical root 时，DOM 被原生删掉而**树完全不动**（DOM/树分叉，判死不触发）——
+  与真机 beforeinput 不同构。需要精确删字符的判据用
+  `Control+a + 重新输入` 的树替换形状（REM-05/REM-19 已证），别赌逐字符 Backspace；
+  "部分编辑+标记残留"的真机形状在桌面 e2e 无法隔离复现，判据降级为行为最终一致。

@@ -69,7 +69,7 @@
  */
 
 import { buildPairLink, parsePairLink } from '../scan/pair-link.ts';
-import { blockText, type Doc } from '@bj/shared-schema';
+import { blockText, type Doc, type Envelope } from '@bj/shared-schema';
 
 /* ------------------------------------------------------------------ *
  * 篇名形状（老项目 :8950-8951 逐字）
@@ -187,6 +187,10 @@ export const BAK_TEXT_PREFIX = 'notesync-bak:1:';
  * 🔴 与 bj 收藏夹上限 FAVS_MAX 同值（都是 100）⇒ 收藏夹里的**每一篇都必然能被备份**，
  *   一个都不漏。老项目的 BAK_MAX 与 FAVS_MAX 是两个独立数字，收藏超过 100 时
  *   会出现"收藏夹里有、但备份装不下"的静默缺口 —— bj 这里天然没有。
+ *
+ * 🔴🔴 注释里的「1MB」是**老项目口径**；bj 服务端单条密文上限是
+ *   **8MB**（server/src/server.js:44 `MAX_BODY = 8 * 1024 * 1024`）——
+ *   v3 清单带 100 篇密文信封的真实字节预算由 BAK-NOTE-34 量化钉住（远低于 8MB）。
  */
 export const BAK_MAX = 100;
 
@@ -240,13 +244,19 @@ export interface BakMaterial {
  *  也不可能因为"材料字段改名"而让篇名读不出来。
  */
 interface BakManifest {
-  /** 1 = v1（只有篇名，老版本）；2 = v2（篇名 + 每篇材料）。 */
-  v: 1 | 2;
+  /** 1 = v1（只有篇名，老版本）；2 = v2（篇名 + 每篇材料）；
+   *  3 = v3（篇名 + 材料 + **每篇的密文信封**，自包含收藏备份，见文件头）。 */
+  v: 1 | 2 | 3;
   ts: number;
   /** 篇名，保序去重。**只有篇名，永远没有密钥**（见文件头）。 */
   f: string[];
   /** 与 `f` 同下标的材料。v1 为空数组；缺料的那篇是 null。 */
   m: (BakMaterial | null)[];
+  /** 与 `f` 同下标的**密文信封**（v3 才有；缺内容的那篇是 null）。
+   * 🔴🔴 这是 v3 自包含收藏备份的核心：把每篇的加密正文**也**带进备份笔记，
+   *   恢复端直接 re-push + 写缓存，无需服务器恰好有正文、也无需逐篇问口令。
+   *   信封是非机密的密文，零知识属性不因此改变（见本文件头）。 */
+  e: (Envelope | null)[];
 }
 
 function manifestJson(m: BakManifest): string {
@@ -260,7 +270,51 @@ function manifestJson(m: BakManifest): string {
   const mm = m.m
     .map((x) => (x === null ? 'null' : '{"s":' + JSON.stringify(x.s) + ',"c":' + JSON.stringify(x.c) + '}'))
     .join(',');
-  return '{"v":2,"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + ']}';
+  if (m.v === 2) {
+    return '{"v":2,"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + ']}';
+  }
+  // v3：在 v2 基础上再带 `e`（每篇密文信封，紧凑序列化）。
+  const ee = m.e
+    .map((x) => (x === null ? 'null' : envJsonCompact(x)))
+    .join(',');
+  return '{"v":3,"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + '],"e":[' + ee + ']}';
+}
+
+/** 信封 → 紧凑 JSON（键序由代码决定，与 fav-backup.ts 的 envJsonCompact 同款）。 */
+function envJsonCompact(env: Envelope): string {
+  return (
+    '{"v":' +
+    env.v +
+    ',"alg":"' +
+    env.alg +
+    '","kdf":{"name":"' +
+    env.kdf.name +
+    '","iter":' +
+    env.kdf.iter +
+    ',"salt":"' +
+    env.kdf.salt +
+    '"},"iv":"' +
+    env.iv +
+    '","ct":"' +
+    env.ct +
+    '"}'
+  );
+}
+
+/** 信封形状校验（v3 用）。**任何一项不满足返回 null**（= 那篇当无内容）。 */
+function parseEnvelope(o: unknown): Envelope | null {
+  if (typeof o !== 'object' || o === null) return null;
+  const e = o as Partial<Envelope>;
+  if (e.v !== 1) return null;
+  if (e.alg !== 'AES-256-GCM') return null;
+  if (typeof e.iv !== 'string' || e.iv === '') return null;
+  if (typeof e.ct !== 'string' || e.ct === '') return null;
+  const kdf = e.kdf;
+  if (typeof kdf !== 'object' || kdf === null) return null;
+  if (kdf.name !== 'PBKDF2-HMAC-SHA256') return null;
+  if (!Number.isInteger(kdf.iter) || kdf.iter < 100_000) return null;
+  if (typeof kdf.salt !== 'string' || kdf.salt === '') return null;
+  return e as Envelope;
 }
 
 /** 🔴 自证块的定长常量明文。**绝不能含用户数据**。
@@ -307,6 +361,7 @@ export function encodeBakText(
   ids: readonly string[],
   ts: number,
   mats?: readonly (BakMaterial | null)[] | null,
+  envs?: readonly (Envelope | null)[] | null,
 ): string | null {
   if (!Array.isArray(ids)) return null;
   const out: string[] = [];
@@ -320,10 +375,11 @@ export function encodeBakText(
   }
   if (out.length === 0) return null;
   if (out.length > BAK_MAX) return null;
-  // 🔴 材料按下标**跟着篇名一起过滤**（上面 continue 掉的那几条名不能留下材料），
-  //   否则 ids 与 mats 的下标会错位 —— 那是"给 A 篇装上 B 篇的钥匙"，
+  // 🔴 材料与信封**都**按下标跟着篇名一起过滤（上面 continue 掉的那几条名不能留下
+  //   材料/信封），否则 ids 与 mats/envs 的下标会错位 —— 那是"给 A 篇装上 B 篇的钥匙"，
   //   症状是恢复后随机的某篇打不开，且极难自查。
   const kept: (BakMaterial | null)[] = [];
+  const keptEnvs: (Envelope | null)[] = [];
   const origIdx: number[] = [];
   {
     const seen2 = new Set<string>();
@@ -341,13 +397,18 @@ export function encodeBakText(
     const m = mats && mats[i] !== undefined ? mats[i] : null;
     // 形状不对的（出码侧不该发生，但清单是外部输入）一律降级成"没材料"
     kept.push(parseMaterial(m) ?? null);
+    const e = envs && envs[i] !== undefined ? envs[i] : null;
+    // 信封形状不对 ⇒ 那篇当"无内容"（恢复时照常要从服务器拉 / 或就空着）
+    keptEnvs.push(parseEnvelope(e) ?? null);
   }
   const anyMat = kept.some((x) => x !== null);
+  const anyEnv = keptEnvs.some((x) => x !== null);
   const json = manifestJson({
-    v: anyMat ? 2 : 1,
+    v: anyEnv ? 3 : anyMat ? 2 : 1,
     ts,
     f: out,
-    m: anyMat ? kept : [],
+    m: anyMat || anyEnv ? kept : [],
+    e: anyEnv ? keptEnvs : [],
   });
   return BAK_TEXT_PREFIX + b64ToB64Url(btoa(json));
 }
@@ -365,8 +426,9 @@ export function encodeBakText(
  *   把材料坏升级成整份拒收，等于"一次坏数据把 99 篇好笔记一起卡住"。
  *
  * @returns `mats` 与 `ids` 同下标；缺料/坏料的那篇是 `null`。
+ *   `envs` 与 `ids` 同下标；v3 才有，缺内容/坏信封的那篇是 `null`。
  */
-export function decodeBakText(text: string): { ids: string[]; ts: number; mats: (BakMaterial | null)[] } | null {
+export function decodeBakText(text: string): { ids: string[]; ts: number; mats: (BakMaterial | null)[]; envs: (Envelope | null)[] } | null {
   if (typeof text !== 'string') return null;
   const raw = text.trim();
   if (!raw.startsWith(BAK_TEXT_PREFIX)) return null;
@@ -388,7 +450,7 @@ export function decodeBakText(text: string): { ids: string[]; ts: number; mats: 
   const m = o as Partial<BakManifest>;
   // 🔴 版本闸：v1（老备份，只��篇名）与 v2（带材料）都收，其余拒收。
   //   注意这是**升版后唯一**的版本判断点 —— 降级/再升版都只改这一行。
-  if (m.v !== 1 && m.v !== 2) return null;
+  if (m.v !== 1 && m.v !== 2 && m.v !== 3) return null;
   if (!Array.isArray(m.f) || m.f.length === 0) return null;
   const out: string[] = [];
   const seen = new Set<string>();
@@ -405,14 +467,20 @@ export function decodeBakText(text: string): { ids: string[]; ts: number; mats: 
   if (out.length === 0) return null;
   // 🔴 材料多于篇数 ⇒ 整份拒收（清单被改过，或生成侧有 bug）。
   //   静默截到篇数会让"清单里多出来的那份材料"变成一份对不上的账。
-  const rawMats = m.v === 2 && Array.isArray(m.m) ? m.m : [];
+  const rawMats = (m.v === 2 || m.v === 3) && Array.isArray(m.m) ? m.m : [];
   if (rawMats.length > out.length) return null;
+  // 🔴 v3 的信封允许多于篇数（多出来的忽略，不拒收整份 —— 信封丢了顶多是那篇没内容，
+  //   比"因为一份坏数据把 99 篇好笔记一起卡住"轻）。
+  const rawEnvs = m.v === 3 && Array.isArray(m.e) ? m.e : [];
   const mats: (BakMaterial | null)[] = [];
+  const envs: (Envelope | null)[] = [];
   for (let i = 0; i < out.length; i++) {
     // 🔴 少材料 / 坏形状 → null（那篇老实要口令），**不影响其余篇**。
     mats.push(parseMaterial(rawMats[i]) ?? null);
+    // 🔴 少信封 / 坏形状 → null（那篇恢复时照常从服务器拉，或就空着）。
+    envs.push(parseEnvelope(rawEnvs[i]) ?? null);
   }
-  return { ids: out, ts: typeof m.ts === 'number' ? m.ts : 0, mats };
+  return { ids: out, ts: typeof m.ts === 'number' ? m.ts : 0, mats, envs };
 }
 
 /* ------------------------------------------------------------------ *
@@ -449,7 +517,7 @@ export function isBakNoteDoc(doc: Doc | null | undefined): boolean {
 }
 
 /** 备份笔记 → 清单。不是备份笔记或清单解不开，一律返回 null。 */
-export function readBakManifest(doc: Doc | null | undefined): { ids: string[]; ts: number; mats: (BakMaterial | null)[] } | null {
+export function readBakManifest(doc: Doc | null | undefined): { ids: string[]; ts: number; mats: (BakMaterial | null)[]; envs: (Envelope | null)[] } | null {
   if (!isBakNoteDoc(doc)) return null;
   const b = (doc as Doc).blocks?.[0];
   if (!b) return null;
@@ -460,9 +528,15 @@ export function readBakManifest(doc: Doc | null | undefined): { ids: string[]; t
  * 造一篇备份笔记的真源（生产与判据共用同一条路，见 BAK-NOTE-12）。
  *
  * @param mats 每篇解锁材料，与 ids 同下标（可省 ⇒ 编成 v1）。
+ * @param envs 每篇密文信封，与 ids 同下标（可省 ⇒ 编成 v1/v2，不自带内容）。
  */
-export function buildBakDoc(ids: readonly string[], ts: number, mats?: readonly (BakMaterial | null)[] | null): Doc | null {
-  const text = encodeBakText(ids, ts, mats);
+export function buildBakDoc(
+  ids: readonly string[],
+  ts: number,
+  mats?: readonly (BakMaterial | null)[] | null,
+  envs?: readonly (Envelope | null)[] | null,
+): Doc | null {
+  const text = encodeBakText(ids, ts, mats, envs);
   if (text === null) return null;
   return { v: 1, blocks: [{ t: 'code', text, lang: 'nsbak' }] };
 }

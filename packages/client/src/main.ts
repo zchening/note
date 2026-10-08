@@ -56,7 +56,7 @@ import {
 } from './sync/history.ts';
 import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
-import { writeCache } from './sync/local-cache.ts';
+import { readCache, writeCache, envelopeOf } from './sync/local-cache.ts';
 import { buildChangePass, buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { COPY } from './ui/copy.ts';
@@ -316,10 +316,10 @@ declare global {
        🔴 同上：一律不回显清单内容与口令。清单与口令正是这功能要保护的东西。 */
     /** 当次甲案备份的备份笔记篇名（`nsbak-xxxxxx`）。空 = 还没出码。 */
     __NOTESYNC_BAK_ID__?: () => string;
-    /** 走生产甲案链路出码。回显成败/篇名/篇数，**不回显清单**。 */
+    /** 走生产甲案链路出码。回显成败/篇名/篇数/未装进正文的篇数，**不回显清单**。 */
     __NOTESYNC_BAK_MAKE__?: (
       passphrase: string,
-    ) => Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number }>;
+    ) => Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number; skipped?: number }>;
     /** 本机备份槽（`{id, salt}` 或 null）。盐是公链上的东西，回显无害。 */
     __NOTESYNC_BAK_SLOT__?: () => { id: string; salt: string | null } | null;
     /** 甲案清单的篇数上限。 */
@@ -2106,15 +2106,15 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   判据用 dueReminders（未完成 + at <= now），已完成的永远不补弹。
   const missed = dueReminders(initial).filter((r) => !r.done);
   if (missed.length > 0) {
-    // 🔴🔴 用户拍板（2026-10-08）：补弹**只弹最早的一条**（最老欠账先还，
-    //   dueReminders 本身按 at 升序，slice(0,1) 即最早），其余带一句
-    //   「还有 N 条已过期提醒」——绝不整列表塞一张卡（v2.0.0 Bug7 用户实测
-    //   截图里那张"大卡"的另一半）。迟到时长文案一并退役（见 showCard 注释）。
-    const first = missed[0];
-    if (first) {
-      const more = missed.length - 1;
-      window.setTimeout(() => reminderRef?.showCard([first], more), 500);
-    }
+    // 🔴🔴 用户拍板（2026-10-08 二次修订）：补弹**只弹离现在最近的那一条**
+    //   （at 最大且 ≤ now 的那条＝"最近的欠账先还"），**绝不**带「还有 N 条」那一行。
+    //   用户的原始诉求是"只弹最近的一条，不要其他弹窗、不要'还有N条'"——
+    //   所以这里取 missed 里 at 最大的一条，过时弹卡只承载单条。
+    //   其余过期的留在提醒列表里，各自到点或下次打开再分别提示，不再堆叠进一张卡。
+    const nearest = missed.reduce((a, b) =>
+      Date.parse(b.at) > Date.parse(a.at) ? b : a,
+    );
+    window.setTimeout(() => reminderRef?.showCard([nearest]), 500);
   }
   // 起调度。到点由 schedule() 自己算下一条并重排。
   // 🔴 schedule() 内含「同步提醒列表到原生闹钟层」，所以这一句同时覆盖了
@@ -2361,7 +2361,7 @@ async function deriveKeyFor(name: string): Promise<DerivedKey | undefined> {
  *
  * 🔴🔴 `at` 存的是**服务端给的 ts 字符串**，不是格式化过的时间：
  *   它同时是 `GET /history/<ts>` 的路径段与行上的 `data-at`，
- *   格式化过就取不回原文（`fmtHistTime` 出的 `MM-DD HH:mm` 是给人看的，
+ *   格式化过就取不回原文（`fmtHistTime` 出的 `YYYY-MM-DD HH:mm:ss` 是给人看的，
  *   见 menu.ts MenuState.histList 的注释）。
  *
  * 🔴 失败**不伪装成空列表**：网络不通时列表显示"历史版本读取失败"，
@@ -2618,6 +2618,16 @@ let lastMigrateTip = '';
  */
 let lastMigrateFavCount = 0;
 /**
+ * 当次甲案备份里**没能装进正文**的篇数（本机缓存与服务器都取不到，v3 自包含的缺口数）。
+ *
+ * 🔴🔴 **不呈现给用户就是静默缺口**：这几篇恢复后将依赖服务器上的原文，
+ *   服务器也没有就是空笔记 —— 正是用户报障「所有收藏的笔记都是空的」的形状。
+ *   出码时在 scanTip 里如实预警（bakEnvSkipWarn），恢复时由 bakNoContentTip 兜底报数。
+ *   🔴 走收藏码（nsfav1）路径时必须清零 —— 那条路没有"信封缺口"的概念，留着旧值
+ *   会让收藏码的提示里挂着上一次甲案备份的警告。
+ */
+let lastMigrateBakSkipped = 0;
+/**
  * 当次甲案备份的**备份笔记篇名**（`nsbak-xxxxxx`）。
  *
  * 🔴 与 lastMigrateCode / lastMigrateFavCount 同款理由：老项目 :9186 在出码那一刻
@@ -2705,6 +2715,7 @@ window.__NOTESYNC_FAVBAK_MAKE__ = async (
   lastMigrateCode = r.code;
   lastMigrateTip = favBackupTip(r.ids.length, 0);
   lastMigrateFavCount = r.ids.length;
+  lastMigrateBakSkipped = 0; // 收藏码没有"信封缺口"概念，清掉上一次甲案备份可能留下的警告
   return { ok: true };
 };
 
@@ -2745,7 +2756,7 @@ window.__NOTESYNC_BAK_ID__ = (): string => lastMigrateBakId;
  */
 window.__NOTESYNC_BAK_MAKE__ = async (
   passphrase: string,
-): Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number }> => {
+): Promise<{ ok: boolean; reason?: string; bakId?: string; count?: number; skipped?: number }> => {
   const slot = readBakSlot();
   const ids = collectBakEntries(favBackupSourceIds(), slot ? slot.id : null);
   const r = await makeBakBackup(ids, passphrase);
@@ -2753,8 +2764,10 @@ window.__NOTESYNC_BAK_MAKE__ = async (
   lastMigrateCode = r.link;
   lastMigrateBakId = r.bakId;
   lastMigrateFavCount = r.count;
-  lastMigrateTip = COPY.migrateBakScanTip(r.count);
-  return { ok: true, bakId: r.bakId, count: r.count };
+  lastMigrateBakSkipped = r.skipped;
+  lastMigrateTip = COPY.migrateBakScanTip(r.count) +
+    (r.skipped > 0 ? COPY.bakEnvSkipWarn(r.skipped) : '');
+  return { ok: true, bakId: r.bakId, count: r.count, skipped: r.skipped };
 };
 
 /** 本机备份槽（`{id, salt}` 或 null）。e2e 用来确认"备份槽自身被剔出清单"。 */
@@ -2987,12 +3000,58 @@ export interface BakMakeOk {
   bakId: string;
   /** 清单里的篇数（出码提示与只读恢复卡都要报它）。 */
   count: number;
+  /** 因本机/服务器都拿不到正文而没带进备份的篇数（如实告知，不谎报已备份）。 */
+  skipped: number;
 }
 
 export interface BakMakeErr {
   ok: false;
   reason: BakMakeFail;
   message: string;
+}
+
+/**
+ * 收集每篇的密文信封（自包含收藏备份用，v3 清单）。
+ *
+ * 🔴🔴 优先级：**服务器 → 本机缓存兜底**（2026-10-08 对抗审计 A3 修订，原为缓存优先）。
+ *   备份装的是"这篇笔记现在的内容"，服务器才是真源 —— 本机缓存可能是旧的
+ *   （另一台设备改过、这台还没同步），缓存优先会把**旧信封**当真理装进备份，
+ *   恢复端又"有缓存就不再查服务器"，用户就会拿到一份静默回滚的旧版笔记。
+ *   服务器拿不到（离线/失败/没有正文）时缓存才兜底 —— 离线备份仍可用，只是那篇
+ *   装的是本机最后已知的版本（此时它本来就是这台设备能给出的最好的那份）。
+ *   两处都没有 ⇒ 这篇当"无内容"（计入 skipped，出码时 bakEnvSkipWarn 明说）。
+ *
+ * 🔴 与 `collectBakMaterials` 同一条纪律：返回的数组与 `ids` **同下标**，
+ *   拿不到的那篇是 null，绝不错位（错位 = "给 A 篇装了 B 篇的正文"）。
+ *
+ * @returns 与 ids 同下标的信封数组；`skipped` = 两处都拿不到的篇数。
+ */
+async function collectBakEnvelopes(
+  ids: readonly string[],
+  f: typeof fetch = fetch,
+): Promise<{ envs: (Envelope | null)[]; skipped: number }> {
+  const envs: (Envelope | null)[] = [];
+  let skipped = 0;
+  for (const id of ids) {
+    let env: Envelope | null = null;
+    try {
+      const remote = await fetchBakNote(id, f);
+      if (remote.env) env = remote.env;
+    } catch {
+      /* 离线/失败 ⇒ 落到缓存兜底 */
+    }
+    if (!env) {
+      const cached = readCache(id);
+      if (cached) env = envelopeOf(cached);
+    }
+    if (env) {
+      envs.push(env);
+    } else {
+      envs.push(null);
+      skipped++;
+    }
+  }
+  return { envs, skipped };
 }
 
 /**
@@ -3036,7 +3095,14 @@ export async function makeBakBackup(
   //   本机没钥匙的那篇给 null（恢复后那篇照常要口令，不假装成功）。
   const mats = await collectBakMaterials(entries, deriveKeyFor);
 
-  const doc = buildBakDoc(entries, now, mats);
+  // 🔴🔴🔴 自包含收藏备份（用户报障：扫备份码后每篇都要输口令、且全是空的）：
+  //   把每篇的**密文信封**（加密正文）也带进备份笔记。恢复端直接 re-push + 写缓存，
+  //   无需服务器恰好有正文、也无需逐篇问口令 —— 真正"一键恢复"。
+  //   信封是非机密密文，零知识属性不变（见 bak-note.ts 文件头）。
+  //   本机缓存优先（离线也能拿），没有的再去服务器拉；两处都没有 ⇒ 这篇当无内容。
+  const { envs, skipped } = await collectBakEnvelopes(entries, fetchImpl);
+
+  const doc = buildBakDoc(entries, now, mats, envs);
   if (doc === null) return { ok: false, reason: 'too-long', message: COPY.migrateTooManyFav };
 
   const id = slot ? slot.id : newBakId();
@@ -3100,7 +3166,7 @@ export async function makeBakBackup(
   writeBakSlot(id, saltB64 ?? dk.saltB64);
   await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
 
-  return { ok: true, link: buildBakLink(location.origin, id, passphrase), bakId: id, count: entries.length };
+  return { ok: true, link: buildBakLink(location.origin, id, passphrase), bakId: id, count: entries.length, skipped };
 }
 
 /** 篇名形状闸：`nsbak-xxxxxx`。零成本，老项目 BAK_ID_RE 同款。 */
@@ -3119,7 +3185,7 @@ export function isBakNoteId(noteId: string): boolean {
  *
  * @returns true = 这是备份笔记，已进恢复卡，调用方**不要**再挂编辑器
  */
-export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey): boolean {
+export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey, f: typeof fetch = fetch): boolean {
   if (!isBakNoteId(noteId)) return false;
   const manifest = readBakManifest(doc);
   if (manifest === null) {
@@ -3136,7 +3202,7 @@ export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey): boolean
   //   `dk` 是解开这篇备份笔记的那把钥匙（用来解密清单正文），
   //   而各篇的钥匙必须用**口令 + 各篇 salt** 重新派生再自证 ——
   //   备份笔记的钥匙与收藏夹里那些钥匙毫无关系，拿它去开收藏夹是错的。
-  showBakRestoreCard(manifest.ids, manifest.ts, manifest.mats);
+  showBakRestoreCard(manifest.ids, manifest.ts, manifest.mats, manifest.envs, f);
   return true;
 }
 
@@ -3174,11 +3240,17 @@ export async function tryEnterBakMode(noteId: string, passphrase: string, f: typ
   }
 
   // 判定与呈现交给同一个函数 —— 扫码/手输/记忆三条路共用它（见 presentBakDoc 的注释）。
-  return presentBakDoc(noteId, doc, dk);
+  return presentBakDoc(noteId, doc, dk, f);
 }
 
 /** 开只读恢复卡，并把「恢复这 N 篇」接到生产合并链路。 */
-function showBakRestoreCard(ids: readonly string[], ts: number, mats: readonly (BakMaterial | null)[]): void {
+function showBakRestoreCard(
+  ids: readonly string[],
+  ts: number,
+  mats: readonly (BakMaterial | null)[],
+  envs: readonly (Envelope | null)[],
+  f: typeof fetch = fetch,
+): void {
   buildBakRestoreCard({
     ids,
     ts,
@@ -3188,7 +3260,7 @@ function showBakRestoreCard(ids: readonly string[], ts: number, mats: readonly (
       //   而恢复卡按钮已经先置灰成「正在恢复…」，用户看得见进度（老项目 :9242 同款）。
       //   先合并后自证的话，用户已经"恢复成功"跳走了，钥匙才在后台慢慢写 ——
       //   而 route() 早就跑完了，命中的是"没钥匙"分支，照样弹口令框。
-      const r = await applyBakRestore(ids, mats);
+      const r = await applyBakRestore(ids, mats, envs, f);
       if (!r.ok) throw new Error(r.message);
       // 🔴 与老项目 :9274-9278 同款：恢复完整页跳第一篇。
       //   理由与老项目一致 —— 只 setStatus 的话，首页页脚会被落地页盖住，
@@ -3230,6 +3302,8 @@ interface BakRestoreOutcome {
 async function applyBakRestore(
   ids: readonly string[],
   mats: readonly (BakMaterial | null)[],
+  envs: readonly (Envelope | null)[],
+  f: typeof fetch = fetch,
 ): Promise<BakRestoreOutcome> {
   if (ids.length === 0) return { ok: false, message: COPY.migrateNothingRestored };
 
@@ -3259,13 +3333,64 @@ async function applyBakRestore(
   menuState.favList = favListOf(favStore);
   menuRef?.render();
 
+  // 🔴🔴🔴 自包含收藏备份（v3）落地：把每篇密文信封**写进本机缓存 + 必要时 re-push 服务器**。
+  //   这样恢复后每篇收藏的正文**就在本机**，打开即见、不再逐篇问口令、也不再是空的 ——
+  //   即便服务器恰好没正文，也能从备份里捞回来（"无论口令是否同一个都能正常恢复"）。
+  //   🔴 顺序：先写本机缓存（离线也能读），再"服务器没正文才补推"，绝不覆盖服务器上更新的内容。
+  let envRestored = 0;
+  let noContent = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (id === undefined) continue; // noUncheckedIndexedAccess：下标越界保护
+    const env = envs[i];
+    if (!env) {
+      // 这篇备份时没拿到正文 ⇒ 探一下服务器有没有；两处皆无就是"恢复后为空"，如实报。
+      // 🔴 离线探不了 ⇒ 不计入 noContent（宁可不报，也不谎报"会是空的"）。
+      try {
+        const remote = await fetchBakNote(id, f);
+        if (!remote.env) noContent++;
+      } catch { /* 离线/失败：无法判定，不算 */ }
+      continue;
+    }
+    // 🔴🔴 顺序：先探服务器，再决定缓存写哪份（对抗审计 A3 修订，原为"先写备份信封"）。
+    //   服务器有正文 ⇒ 缓存**镜像服务器**（那才是最新版；用备份里的旧信封盖掉它
+    //   等于把用户刚换机的笔记静默回滚到备份时刻）。服务器没有 ⇒ 备份信封
+    //   re-push 补回服务器 + 写缓存。离线 ⇒ 备份信封先进缓存兜底（离线也能读）。
+    try {
+      const remote = await fetchBakNote(id, f);
+      if (remote.env) {
+        try {
+          writeCache(id, remote.env);
+        } catch { /* 隐私模式/配额满：忽略，在线时 unlock 会从服务器拿 */ }
+      } else {
+        try {
+          await putBakNote(id, env, 0, f);
+          envRestored++;
+        } catch { /* 推送失败：下面仍把备份信封写进缓存兜底 */ }
+        try {
+          writeCache(id, env);
+        } catch { /* 隐私模式/配额满：忽略 */ }
+      }
+    } catch {
+      /* 离线/失败：本机先把备份信封写进缓存兜底，恢复后离线也能读正文 */
+      try {
+        writeCache(id, env);
+      } catch { /* 隐私模式/配额满：忽略 */ }
+    }
+  }
+
   return {
     ok: true,
     first: merged[0] as string,
     // 🔴 如实报数：免输几篇、还要口令几篇（用户报障第 3 条）。
     //   收藏夹那套口径（favRestoreTip，含覆盖/截断统计）也一起留着 ——
     //   用户真正要知道的是"我的收藏夹现在对不对"，免输只是附带的好消息。
-    message: favRestoreTip(count, renewed, capped, FAVS_MAX) + COPY.bakRestExemptTip(pre.exempt.length, pre.needPass.length),
+    // 🔴🔴 v3 再补两段如实报数：envRestored（正文从备份直接救回几篇）与 noContent
+    //   （备份没带正文、服务器也没有 ⇒ 恢复后必然空的几篇）——两头都不许静默。
+    message: favRestoreTip(count, renewed, capped, FAVS_MAX) +
+      COPY.bakRestExemptTip(pre.exempt.length, pre.needPass.length) +
+      (envRestored > 0 ? COPY.bakEnvRestoredTip(envRestored) : '') +
+      (noContent > 0 ? COPY.bakNoContentTip(noContent) : ''),
   };
 }
 
@@ -3337,7 +3462,9 @@ function openMigrateMake(): void {
       lastMigrateCode = r.link;
       lastMigrateBakId = r.bakId;
       lastMigrateFavCount = r.count;
-      lastMigrateTip = COPY.migrateBakScanTip(r.count);
+      lastMigrateBakSkipped = r.skipped;
+      lastMigrateTip = COPY.migrateBakScanTip(r.count) +
+        (r.skipped > 0 ? COPY.bakEnvSkipWarn(r.skipped) : '');
       return { ok: true, code: r.link };
     },
     // 🔴 出码提示的篇数**取自当次出码的真实结果**（lastMigrateFavCount，由上面那次
@@ -3345,9 +3472,12 @@ function openMigrateMake(): void {
     //   面板开着的时候用户可能又收藏/取消收藏，闭包那份 ids 已经过期，
     //   屏上会报"一键恢复 3 篇"而码里其实是 4 篇（老项目 :9187 用的是 col.f.length，
     //   同样是**出码那一刻**的清单，不是开面板那一刻的）。
+    // 🔴🔴 skipped（没装进正文的篇数）必须跟着一起呈现 —— 现算 tip 时若只拼篇数，
+    //   onMake 里拼好的警告会被这条重算覆盖掉，静默缺口又回来了。
     scanTip: () =>
       lastMigrateFavCount > 0
-        ? COPY.migrateBakScanTip(lastMigrateFavCount)
+        ? COPY.migrateBakScanTip(lastMigrateFavCount) +
+          (lastMigrateBakSkipped > 0 ? COPY.bakEnvSkipWarn(lastMigrateBakSkipped) : '')
         : lastMigrateTip || COPY.migrateScanTip,
     // 🔴 老项目 :9186 那行「备份笔记：nsbak-xxxxxx」是**独立一行**（#bakBakId），
     //   不是拼进 tip —— 换机时用户要靠它对号/手输，混在一句指引里就找不到了。

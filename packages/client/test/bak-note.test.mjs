@@ -53,6 +53,7 @@ import {
   decodeBakText,
   isBakNoteDoc,
   readBakManifest,
+  buildBakDoc,
   buildBakLink,
   parseBakLink,
   collectBakEntries,
@@ -567,6 +568,232 @@ test('BAK-NOTE-21 🔴🔴 容量闸必须按**真实字节**算（加了材料�
   const back = decodeBakText(text);
   assert.equal(back.ids.length, BAK_MAX, '100 篇全部保序读回');
   assert.equal(back.mats.length, BAK_MAX, '100 份材料全部读回');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 8. 🔴🔴 v3：清单同时装「每篇的密文信封」，恢复端自包含（无需服务器恰好有正文、
+ *     也无需逐篇问口令）—— 用户报障「恢复后每篇都要输口令、且都是空的」的根治。
+ *
+ *    🔴🔴 为什么 v3 必须带"密文信封"而不是只带材料：
+ *      用户实锤的失败形态是「扫备份码 → 每篇收藏都要输口令、且打开都是空的」。
+ *      根因是旧路径（甲案 + nsfav1）**只合并名字、不携带正文**，恢复时正文要从
+ *      服务器拉、而服务器恰好没有（换机/换环境）→ 空编辑器。带信封后，恢复端
+ *      直接把信封写进本机缓存 + re-push 服务器，正文随备份走，打开即见。
+ *    🔴 信封是**密文**（iv+ct+kdf.salt），零知识属性不变：服务器/备份笔记里
+ *      只有密文，没有明文也没有密钥（密钥仍由口令派生）。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+const ENV_A = { v: 1, alg: 'AES-256-GCM', kdf: { name: 'PBKDF2-HMAC-SHA256', iter: 200_000, salt: SALT_A }, iv: 'aW12aW12aW12aW12', ct: 'Y2lwaGVydGV4dA==' };
+const ENV_B = { v: 1, alg: 'AES-256-GCM', kdf: { name: 'PBKDF2-HMAC-SHA256', iter: 200_000, salt: SALT_B }, iv: 'aW12aW12aW12aWly', ct: 'Y2lwaGVydGV4dDI=' };
+
+test('BAK-NOTE-24 🔴🔴 v3 清单必须装每篇的密文信封，且往返无损（ids/ts/envs 全部对齐）', () => {
+  const envs = [ENV_A, ENV_B];
+  const v3 = encodeBakText(['alpha', 'bravo'], 1_700_000_000_000, null, envs);
+  assert.ok(v3, 'v3 应能编码');
+  const back = decodeBakText(v3);
+  assert.ok(back, 'v3 应能读出');
+  assert.deepEqual(back.ids, ['alpha', 'bravo'], '篇名保序');
+  assert.equal(back.ts, 1_700_000_000_000, 'ts 必须带回来');
+  // 🔴 信封必须原样带回来（这是"自包含恢复"的数据基础）
+  assert.deepEqual(back.envs, [ENV_A, ENV_B], '每篇密文信封必须原样往返');
+  // 反向：v1（无 envs 无 mats）的形态不能被 v3 逻辑污染
+  const v1 = encodeBakText(['alpha', 'bravo'], 1);
+  assert.ok(!decodeBakText(v1).envs.some((e) => e !== null), 'v1 清单不应携带信封');
+});
+
+test('BAK-NOTE-25 🔴🔴 v3 安全不变量：信封只含密文 + 非机密 salt，绝不装密钥/明文', () => {
+  const v3 = encodeBakText(['alpha', 'bravo'], 1, [{ s: SALT_A, c: 'Y2lwaGVy' }, null], [ENV_A, ENV_B]);
+  const payload = v3.slice(BAK_TEXT_PREFIX.length);
+  const json = Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  // 信封字段只允许 v/alg/kdf{name,iter,salt}/iv/ct —— 任何像"密钥/明文"的字段都是回归
+  for (const e of decodeBakText(v3).envs) {
+    assert.deepEqual(
+      Object.keys(e).sort(),
+      ['alg', 'ct', 'iv', 'kdf', 'v'],
+      `信封只允许这五个键，实际=${JSON.stringify(Object.keys(e))}`,
+    );
+    assert.deepEqual(Object.keys(e.kdf).sort(), ['iter', 'name', 'salt'], 'kdf 不允许出现密钥字段');
+    // 🔴 ct 是密文（base64），salt 是 24 字符非机密 —— 都不该是 44 字符的 raw AES 密钥
+    assert.notEqual(e.ct.length, 44, 'ct 绝不能是 44 字符的 raw 密钥');
+    assert.equal(e.kdf.salt.length, 24, 'salt 是 16 字节 base64（24 字符），非机密');
+  }
+  assert.ok(!/"k"|"key"|"rawKey"|"aesKey"|"plain"|"text"/i.test(json), `结构里出现了疑似密钥/明文字段：${json.slice(0, 160)}`);
+});
+
+test('BAK-NOTE-26 🔴🔴 信封必须**跟着篇名一起过滤**（下标错位 = 给 A 篇装上 B 篇的密文）', () => {
+  // 与 BAK-NOTE-23 同一类致命 bug：被剔掉的篇名，其信封若不跟着剔，
+  // 就会整体前移一格 ⇒ 恢复端把 B 的密文写进 A 的缓存 ⇒ A 永远解不开（空笔记）。
+  const E = [ENV_A, ENV_B, ENV_A, ENV_B];
+  // 第 1 篇名非法（剔）+ 第 3 篇重复（去重）⇒ 篇名剩 [B, C]，信封必须剩 [ENV_B, ENV_A]
+  const text = encodeBakText(['A_invalid!', 'B', 'C', 'B'], 1, null, E);
+  assert.ok(text, '应能编码');
+  const back = decodeBakText(text);
+  assert.deepEqual(back.ids, ['B', 'C'], '非法名剔掉、重复去重');
+  assert.equal(back.envs.length, 2, '信封位必须与留下的篇数等长');
+  assert.deepEqual(back.envs[0], ENV_B, 'B 必须配 ENV_B（错位会装成 ENV_A）');
+  assert.deepEqual(back.envs[1], ENV_A, 'C 必须配 ENV_A（错位会装成 ENV_B）');
+});
+
+test('BAK-NOTE-27 🔴 v3 信封缺失/多余/坏形状：少则补 null、多则忽略、坏则那篇 null（绝不影响其余篇）', () => {
+  // ① 信封比篇数少（某篇备份时没正文）—— 生产路径：collectBakEnvelopes 返回 null 占位
+  const few = encodeBakText(['alpha', 'bravo', 'charlie'], 1, null, [ENV_A, null]);
+  const back = decodeBakText(few);
+  assert.equal(back.ids.length, 3, '篇名三篇都在');
+  assert.equal(back.envs[0] && back.envs[0].ct, ENV_A.ct, '有信封的那篇带回来');
+  assert.equal(back.envs[1], null, '缺的信封必须是 null');
+  assert.equal(back.envs[2], null, '缺的信封必须是 null');
+  assert.equal(back.envs.length, 3, '信封位必须与篇名等长');
+
+  // 🔴🔴 信封**多于**篇数 ⇒ 不拒收整份（与材料相反！多出来的忽略），因为信封丢了
+  //   顶多是那篇没内容，比"把 99 篇好笔记一起卡住"轻。这是 v3 刻意的取向。
+  const over = rawManifest({ v: 3, ts: 1, f: ['alpha'], m: [], e: [ENV_A, ENV_B] });
+  const b2 = decodeBakText(over);
+  assert.ok(b2, '信封多于篇数不得整份拒收');
+  assert.deepEqual(b2.envs, [ENV_A], '多出来的信封忽略，剩下的按篇数对齐');
+
+  // 🔴 坏形状信封 ⇒ 那篇 null，其余篇不受影响（用 rawManifest 造，因为 encodeBakText 不出坏形状）
+  const bad = [
+    { v: 2 },                          // 版本不对
+    { v: 1, alg: 'DES' },              // alg 不对
+    { v: 1, alg: 'AES-256-GCM', kdf: { name: 'X', iter: 1, salt: 'y' }, iv: '', ct: 'z' }, // iv/ct 空
+    { v: 1, alg: 'AES-256-GCM', kdf: { name: 'PBKDF2-HMAC-SHA256', iter: 50_000, salt: SALT_A }, iv: 'x', ct: 'z' }, // iter 太低
+    'notanobject',
+    null,
+  ];
+  for (const e of bad) {
+    const text = rawManifest({ v: 3, ts: 1, f: ['alpha', 'bravo'], m: [], e: [ENV_A, e] });
+    const back = decodeBakText(text);
+    assert.ok(back, `坏信封不该让整份清单作废（输入=${JSON.stringify(e)}）`);
+    assert.deepEqual(back.ids, ['alpha', 'bravo'], '篇名两篇都在');
+    assert.deepEqual(back.envs[0], ENV_A, `好信封那篇必须仍带回（输入=${JSON.stringify(e)}）`);
+    assert.equal(back.envs[1], null, `坏形状信封必须判为 null（输入=${JSON.stringify(e)}）`);
+  }
+});
+
+test('BAK-NOTE-28 🔴 版本闸：v3 收、v4(未知) 拒；v3 可含 null 信封', () => {
+  // v3 正常收
+  const v3 = encodeBakText(['alpha'], 1, null, [ENV_A]);
+  assert.ok(decodeBakText(v3), 'v3 必须收');
+  // v4 拒（未知版本）
+  const v4 = rawManifest({ v: 4, ts: 1, f: ['alpha'], m: [], e: [ENV_A] });
+  assert.equal(decodeBakText(v4), null, '未知版本 v4 必须整份拒收');
+  // v3 但 e 部分 null（混合态：有的篇没正文）
+  const mixed = encodeBakText(['alpha', 'bravo'], 1, null, [ENV_A, null]);
+  const bm = decodeBakText(mixed);
+  assert.deepEqual(bm.envs, [ENV_A, null], 'v3 允许部分篇无信封');
+});
+
+test('BAK-NOTE-29 🔴 版本升档逻辑：有信封→v3，有材料无信封→v2，都无→v1（逐字形态）', () => {
+  // 有信封 ⇒ v3
+  const e3 = encodeBakText(['a', 'b'], 1, null, [ENV_A, ENV_B]);
+  assert.ok(decodeBakText(e3).envs.every((x) => x !== null), 'v3 信封都在');
+  const j3 = Buffer.from(e3.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  assert.ok(j3.startsWith('{"v":3,'), '有信封必须编 v3');
+  // 有材料无信封 ⇒ v2（不得升 v3，否则空 e 数组浪费且形态漂移）
+  const e2 = encodeBakText(['a', 'b'], 1, [{ s: SALT_A, c: 'Y2lwaGVy' }, null], null);
+  const j2 = Buffer.from(e2.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  assert.ok(j2.startsWith('{"v":2,'), '有材料无信封必须编 v2');
+  assert.ok(!/,"e":/.test(j2), 'v2 不写 e 字段');
+  // 都无 ⇒ v1 逐字老形态
+  const e1 = encodeBakText(['a', 'b'], 1);
+  const j1 = Buffer.from(e1.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  assert.equal(j1, '{"v":1,"ts":1,"f":["a","b"]}', '都无必须逐字编 v1');
+});
+
+test('BAK-NOTE-30 🔴 buildBakDoc + readBakManifest 透传信封（恢复卡拿到的就是备份时的信封）', () => {
+  const doc = buildBakDoc(['alpha', 'bravo'], 1_700_000_000_000, [{ s: SALT_A, c: 'Y2lwaGVy' }, null], [ENV_A, ENV_B]);
+  assert.ok(doc, '应能造出备份笔记真源');
+  assert.equal(isBakNoteDoc(doc), true, '造出的必须是备份笔记');
+  const m = readBakManifest(doc);
+  assert.ok(m, '清单应读得出');
+  assert.deepEqual(m.ids, ['alpha', 'bravo'], '篇名保序');
+  assert.deepEqual(m.envs, [ENV_A, ENV_B], '信封随文档透传');
+  assert.equal(m.mats[0].s, SALT_A, '材料也随文档透传');
+});
+
+test('BAK-NOTE-31 🔴🔴 parseEnvelope 单缺陷攻击矩阵：每个缺陷**单独**出现都必须只判 null 那一篇', () => {
+  // 变异审计【高】项：BAK-NOTE-27 的坏形状列表是**叠加缺陷**（一项同时坏多处），
+  // 叠加攻击能被"恰好命中其中一个校验"的残缺实现放行。
+  // 这里每个用例只坏**一个**字段，其余全部合法 —— 七个单缺陷都必须各自命中。
+  const good = () => ({ v: 1, alg: 'AES-256-GCM', kdf: { name: 'PBKDF2-HMAC-SHA256', iter: 200_000, salt: SALT_A }, iv: 'aW12aW12aW12aW12', ct: 'Y2lwaGVydGV4dA==' });
+  const defects = [
+    ['iv 为空', (e) => { e.iv = ''; }],
+    ['ct 为空', (e) => { e.ct = ''; }],
+    ['缺 kdf', (e) => { delete e.kdf; }],
+    ['kdf.name 不对', (e) => { e.kdf.name = 'PBKDF2'; }],
+    ['kdf.salt 缺失', (e) => { delete e.kdf.salt; }],
+    ['kdf.salt 为空', (e) => { e.kdf.salt = ''; }],
+    ['kdf.iter 低于下限', (e) => { e.kdf.iter = 99_999; }],
+    ['envelope 版本不对', (e) => { e.v = 2; }],
+  ];
+  for (const [name, mutate] of defects) {
+    const e = good();
+    mutate(e);
+    const text = rawManifest({ v: 3, ts: 1, f: ['alpha', 'bravo'], m: [], e: [good(), e] });
+    const back = decodeBakText(text);
+    assert.ok(back, `单缺陷「${name}」不得让整份清单作废`);
+    assert.deepEqual(back.envs[0], good(), `好信封必须原样带回（缺陷=${name}）`);
+    assert.equal(back.envs[1], null, `单缺陷「${name}」必须判为 null（那篇当无内容）`);
+  }
+});
+
+test('BAK-NOTE-32 🔴🔴 m 与 e 的宽松取向**必须相反**：材料多于篇数仍拒收、信封多于篇数忽略', () => {
+  // 变异审计【中高】项：v3 把 e 改成"多于忽略"，最危险的回归是实现把这个宽松
+  // **顺手**用到 m 上（同一个循环里两行相邻）—— 那等于允许清单多装材料，
+  // 而"多出来的材料对应一篇不在清单里的笔记"正是 BAK-NOTE-19 要防的对不上账。
+  const overM = rawManifest({ v: 3, ts: 1, f: ['alpha'], m: [{ s: SALT_A, c: 'Y2lwaGVy' }, { s: SALT_B, c: 'Y2lwaGVyMg==' }], e: [ENV_A] });
+  assert.equal(decodeBakText(overM), null, 'v3 下材料多于篇数必须**仍然**整份拒收');
+  // 反向对照：同样的形状换到 e 上必须收（取向相反是刻意的，两条一起钉防"顺手统一"）
+  const overE = rawManifest({ v: 3, ts: 1, f: ['alpha'], m: [], e: [ENV_A, ENV_B] });
+  const back = decodeBakText(overE);
+  assert.ok(back, 'v3 下信封多于篇数必须忽略多余（对照材料）');
+  assert.deepEqual(back.envs, [ENV_A], '多出来的信封忽略，按篇数对齐');
+  // v3 但缺 m 字段 ⇒ 材料位补 null，不因缺字段拒收整份（变异审计【低】项）
+  const noM = rawManifest({ v: 3, ts: 1, f: ['alpha'], e: [ENV_A] });
+  const b2 = decodeBakText(noM);
+  assert.ok(b2, 'v3 缺 m 字段不得整份拒收');
+  assert.deepEqual(b2.mats, [null], 'v3 缺 m ⇒ 材料位补 null');
+  assert.deepEqual(b2.envs, [ENV_A], '信封照常带回');
+  // v2 冒充带 e（v 号 2 却多写了 e 字段）⇒ e 被忽略（版本闸之后才有 e 的资格）
+  const v2withE = rawManifest({ v: 2, ts: 1, f: ['alpha'], m: [], e: [ENV_A] });
+  const b3 = decodeBakText(v2withE);
+  assert.ok(b3, 'v2 带 e 不得整份拒收（多余字段不升级版本语义）');
+  assert.deepEqual(b3.envs, [null], 'v2 清单的 e 必须被忽略（那篇当无内容）');
+});
+
+test('BAK-NOTE-33 🔴 解码侧篇名形状闸在 v3 下不松动：非法篇名整份拒收', () => {
+  // 变异审计【中】项：v3 的 e 宽松容易让人把"篇名校验"也顺手放宽。
+  // 篇名坏 = 清单与用户以为的不一致 ⇒ 仍然整份拒收（与材料的"只退化那篇"相反）。
+  const bad = rawManifest({ v: 3, ts: 1, f: ['ok', '有中文!'], m: [], e: [ENV_A, ENV_B] });
+  assert.equal(decodeBakText(bad), null, 'v3 下非法篇名必须整份拒收');
+  const item = rawManifest({ v: 3, ts: 1, f: ['ok', 42], m: [], e: [ENV_A, ENV_B] });
+  assert.equal(decodeBakText(item), null, 'v3 下篇名不是字符串必须整份拒收');
+});
+
+test('BAK-NOTE-34 🔴🔴 v3 字节预算量化：100 篇 × 大信封仍远低于服务端 8MB 上限', () => {
+  // 变异审计【中】项 + 安全审计 S2：v1/v2 的体积判据（BAK-NOTE-21）没测 e 字段。
+  // 服务端单条密文上限 8MB（server.js:44 MAX_BODY = 8*1024*1024）——
+  // 这里按"每篇正文 12KB（ct base64 约 16K 字符）"的**大笔记**场景量化：
+  // 100 篇 × ~16.2KB ≈ 1.62MB，必须远低于 8MB 且往返无损。
+  const big = Array.from({ length: 100 }, (_, i) => ({
+    v: 1, alg: 'AES-256-GCM',
+    kdf: { name: 'PBKDF2-HMAC-SHA256', iter: 200_000, salt: i % 2 ? SALT_A : SALT_B },
+    iv: 'aW12aW12aW12aW12',
+    ct: 'Q'.repeat(16_000), // ≈ 12KB 明文的 ct
+  }));
+  const ids = Array.from({ length: 100 }, (_, i) => `n${i}`);
+  const text = encodeBakText(ids, 1, null, big);
+  assert.ok(text, '100 篇带大信封必须仍能编码');
+  const json = Buffer.from(
+    text.slice(BAK_TEXT_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'),
+    'base64',
+  ).toString('utf8');
+  // 🔴 量化上界：半数服务端上限（4MB）。超了说明信封形状失控（比如把明文塞进了 ct）。
+  assert.ok(json.length < 4_000_000, `100 篇大信封清单 ${json.length} 字节，必须低于 4MB（服务端上限 8MB 的一半）`);
+  const back = decodeBakText(text);
+  assert.equal(back.ids.length, 100, '100 篇全部保序读回');
+  assert.equal(back.envs.length, 100, '100 份信封全部读回');
+  assert.equal(back.envs[99].ct, 'Q'.repeat(16_000), '大 ct 必须原样往返（截断 = 静默丢正文）');
 });
 
 /* ── 本地脚手架 ──────────────────────────────────────────────────────────── */
