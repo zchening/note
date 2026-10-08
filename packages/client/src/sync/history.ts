@@ -21,6 +21,7 @@
 
 import { canonicalize, decryptString, encryptString, normalize, parseDoc } from '@bj/shared-schema';
 import type { DerivedKey, Doc, Envelope } from '@bj/shared-schema';
+import { getWriteKey } from './write-key.ts';
 
 /** 服务端列表里的一条（**不含密文**，与老项目同款：列表不下发正文） */
 export interface HistoryMeta {
@@ -136,9 +137,15 @@ export async function pushHistory(
   }
   let res: Response;
   try {
+    // 历史快照写入与正文写入同一道凭据闸（正门锁了侧门不锁等于白装，
+    // 老项目 wkJsonHeaders 同款）。失败静默的口径不变：拿不到凭据就不带，
+    // 服务端拒了也只是这次快照没存上（保险不是主链路）。
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const wk = await getWriteKey(noteId, key, dk);
+    if (wk) headers['x-note-key'] = wk;
     res = await fetch(histUrl(noteId), {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ ...env, manual }),
     });
   } catch {

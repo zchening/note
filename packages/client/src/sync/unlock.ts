@@ -44,13 +44,13 @@ import {
   type CachedEnvelope,
 } from './local-cache.ts';
 import { dropPassVault, readPassVault, savePassVault } from './pass-vault.ts';
+import { deriveWriteKey } from './write-key.ts';
 
 export { clearCache, readCache, writeCache, cacheKeyOf };
 export type { CachedEnvelope };
 
 /** 口令错 / 数据坏 —— 同一句话，不区分（ARCH 安全不变量） */
 export const PASS_ERROR = '口令不对，或数据无法解密';
-
 export interface UnlockDeps {
   noteId: string;
   passphrase: string;
@@ -284,11 +284,22 @@ export async function changePassphrase(
   }
   const plain = canonicalize(normalize(doc));
   const env = await encryptString(plain, dk.key, 'note', dk);
+  // 凭据原子换绑（老项目 apiPut 的 wkKey/wkOld 同款）：新凭据走新口令+新盐，
+  // wkOld 出示旧凭据自证——换绑与写入同批完成，无自锁窗口。
+  // 派生失败=按无凭据降级（off 档照写成功，full 档服务端拒 → 下面 403 分支如实报）。
+  const wkNew = await deriveWriteKey(noteId, newPass, dk);
+  const wkOld = await deriveWriteKey(noteId, oldPass, before.dk);
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (wkNew) headers['x-note-key'] = wkNew;
   const res = await f(`/api/note/${encodeURIComponent(noteId)}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...env, n: plain.length }),
+    headers,
+    body: JSON.stringify({ ...env, n: plain.length, ...(wkOld ? { wkOld } : {}) }),
   });
+  if (res.status === 403) {
+    // 凭据被服务端拒：本机密钥已作废（多半是口令又在别处改过）。文案与老项目 claim 同款。
+    return { ok: false, message: '本机保存的密钥已失效（口令可能在其他设备改过）。请退出锁定、重新输入口令解锁本篇，否则无法保存。' };
+  }
   if (!res.ok) return { ok: false, message: OFFLINE_MSG };
   await putKey({ id: noteId, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
   // 🔴 记住**新**口令（封在新密钥里）。此处必须是 newPass 而不是 oldPass：

@@ -57,6 +57,7 @@ import {
 import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { readCache, writeCache, envelopeOf } from './sync/local-cache.ts';
+import { deriveWriteKey } from './sync/write-key.ts';
 import { buildChangePass, buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
 import { COPY } from './ui/copy.ts';
@@ -2975,13 +2976,24 @@ async function fetchBakNote(id: string, f: typeof fetch = fetch): Promise<{ salt
   }
 }
 
-/** 写备份笔记（建档 + 覆盖同一把枪）。老项目 apiPutTo（:9063/:9088）同款。 */
-async function putBakNote(id: string, env: Envelope, plainLen: number, f: typeof fetch = fetch): Promise<void> {
+/**
+ * 写备份笔记（建档 + 覆盖同一把枪）。老项目 apiPutTo（:9063/:9088）同款。
+ * @param wk 该备份笔记的写入凭据（老项目 x-note-key 同款；off/new-only 档没有也照写成功）
+ */
+async function putBakNote(
+  id: string,
+  env: Envelope,
+  plainLen: number,
+  f: typeof fetch = fetch,
+  wk?: string | null,
+): Promise<void> {
   let res: Response;
   try {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (wk) headers['x-note-key'] = wk;
     res = await f(`/api/note/${encodeURIComponent(id)}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ ...env, n: plainLen }),
     });
   } catch {
@@ -3141,7 +3153,9 @@ export async function makeBakBackup(
   if (!remote.env) {
     const seed = await encryptString('', dk.key, 'note', dk);
     try {
-      await putBakNote(id, seed, 0, fetchImpl);
+      // 备份笔记自己的凭据：从用户输入的备份口令派生（建档即认领，full 档下其它人改不了）
+      const seedWk = await deriveWriteKey(id, passphrase, dk);
+      await putBakNote(id, seed, 0, fetchImpl, seedWk);
     } catch (e) {
       const msg = e && typeof e === 'object' && 'msg' in e ? String((e as { msg: unknown }).msg) : COPY.bakWriteFail;
       return { ok: false, reason: 'write', message: msg };
@@ -3155,7 +3169,9 @@ export async function makeBakBackup(
     return { ok: false, reason: 'crypto', message: COPY.migrateRenderFail };
   }
   try {
-    await putBakNote(id, env, plain.length, fetchImpl);
+    // 备份笔记自己的凭据：同一把枪（与建档同源，同一 dk ⇒ 同一缓存口径）
+    const realWk = await deriveWriteKey(id, passphrase, dk);
+    await putBakNote(id, env, plain.length, fetchImpl, realWk);
   } catch (e) {
     const msg = e && typeof e === 'object' && 'msg' in e ? String((e as { msg: unknown }).msg) : COPY.bakWriteFail;
     return { ok: false, reason: 'write', message: msg };
@@ -3364,7 +3380,11 @@ async function applyBakRestore(
         } catch { /* 隐私模式/配额满：忽略，在线时 unlock 会从服务器拿 */ }
       } else {
         try {
-          await putBakNote(id, env, 0, f);
+          // 每篇**自己的**凭据：口令 + 该篇信封里的 salt 派生（清单的材料不是备份笔记的钥匙，
+          // 与上面 proveBakMaterials 同一口径）。取不到凭据就不带——full 档服务端拒了
+          // 也走既有 catch 落缓存兜底，恢复不因此失败。
+          const wkI = sessionPass ? await deriveWriteKey(id, sessionPass, { saltB64: env.kdf.salt, iter: env.kdf.iter }) : null;
+          await putBakNote(id, env, 0, f, wkI);
           envRestored++;
         } catch { /* 推送失败：下面仍把备份信封写进缓存兜底 */ }
         try {

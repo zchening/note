@@ -26,6 +26,7 @@ import { canonicalize, decryptString, deriveKey, emptyDoc, encryptString, normal
 import type { DerivedKey, Envelope } from '@bj/shared-schema';
 import { mergeDocs } from '@bj/shared-schema';
 import { writeCache } from './local-cache.ts';
+import { getWriteKey } from './write-key.ts';
 import { snapshotOf, reduce, type SyncEvent, type SyncSnapshot, type SyncState } from './fsm.ts';
 
 /** 客户端与服务端之间的载荷：永远是**信封**，不是明文。 */
@@ -291,6 +292,10 @@ export class SyncClient {
     //   口径与老项目 index.html:3450 一致：base = 上次同步成功的那一版。
     if (this.d.initialDoc) this.base = this.d.initialDoc;
     await this.pull('syncing');
+    // 首次解锁即向服务端登记本机凭据（老项目 claimNote，index.html:2250-2261）。
+    // 纯登记不挡主链路：fire-and-forget，失败（网络/404 新笔记）不影响任何读写，
+    // 下一次解锁/保存仍会再试；403 才当场说（多半口令在别处改过）。
+    void this.claim();
     this.openStream();
     this.startPoll();
     // 🔴 浏览器从离线切回在线时立刻重拉。不监听的话"断网期间对方的改动"
@@ -790,6 +795,33 @@ export class SyncClient {
 
   /* ---------------- 推 ---------------- */
 
+  /**
+   * 认领：首次解锁即向服务端登记本机凭据（writeKey）。
+   *
+   * 移植老项目 claimNote（index.html:2250-2261）逐条语义：
+   *  - 纯登记：不改正文、不动版本，失败不影响任何读写（网络类失败静默，
+   *    下一次解锁/保存仍会再试，绝不因此打断打开笔记这条路）；
+   *  - 404（服务端还没有这篇）= 新笔记，建档交给首推那一枪，同样静默；
+   *  - 403 必须当场说，不能等用户保存到被拒才发现——此刻本机密钥已作废
+   *    （多半是口令在别处改过）。文案与老项目逐字一致。
+   */
+  private async claim(): Promise<void> {
+    const wk = await getWriteKey(this.d.noteId, this.d.key, this.d.dk);
+    if (!wk) return; // 没口令=没有凭据，不认领（也绝不能用别的凭据去认领）
+    try {
+      const r = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}/claim`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-note-key': wk },
+        body: '{}',
+      });
+      if (r.status === 403) {
+        this.d.onError('本机保存的密钥已失效（口令可能在其他设备改过）。请退出锁定、重新输入口令解锁本篇，否则无法保存。');
+      }
+    } catch {
+      /* 网络类失败静默：下一次解锁/保存仍会再试 */
+    }
+  }
+
   private async push(): Promise<void> {
     if (this.pushTimer !== undefined) {
       clearTimeout(this.pushTimer);
@@ -842,9 +874,14 @@ export class SyncClient {
     }
     let res: Response;
     try {
+      // 写入凭据（老项目 x-note-key 同款）：有就带上，没有就不带——
+      // off/new-only 档照写成功，full 档由服务端拒（下面 403 分支给出可见错误）。
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      const wk = await getWriteKey(this.d.noteId, this.d.key, this.d.dk);
+      if (wk) headers['x-note-key'] = wk;
       res = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
       });
     } catch {
@@ -854,6 +891,13 @@ export class SyncClient {
     }
     if (res.status === 429) {
       this.d.onError('尝试太频繁，请稍后再试');
+      this.send('network-fail');
+      return;
+    }
+    if (res.status === 403) {
+      // 凭据被服务端拒（老项目凭据闸 full 档）：多半是口令在别处改过、本机密钥已作废。
+      // 🔴 必须可见——静默失败 = 用户以为存上了，实际没有。文案与 claim 同款（老项目逐字）。
+      this.d.onError('本机保存的密钥已失效（口令可能在其他设备改过）。请退出锁定、重新输入口令解锁本篇，否则无法保存。');
       this.send('network-fail');
       return;
     }

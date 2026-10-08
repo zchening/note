@@ -23,6 +23,7 @@ import crypto from 'node:crypto';
 
 import * as failmap from './failmap.js';
 import { upsignSign } from './upsign.js';
+import * as guards from './guards.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,6 +52,8 @@ const FAILMAP_FILE = path.join(DATA_DIR, 'failmap.json');
 for (const d of [DATA_DIR, NOTES_DIR, META_DIR, ARCADE_DIR]) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
+
+guards.init(DATA_DIR); // wk-mode.txt 档位文件定位（热切用，见 guards.js）
 
 /* ------------------------------------------------------------------ *
  * 安全不变量（从老项目继承，不许放宽）
@@ -169,6 +172,30 @@ function notePath(id) {
 
 function metaPath(id) {
   return path.join(META_DIR, `${id}.json`);
+}
+
+/* ---------- 凭据闸配套：笔记档读取（解析版） ---------- */
+
+function noteExists(id) {
+  try {
+    return fs.existsSync(notePath(id));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读笔记档并解析。损坏/半截文件按 {} 处理（与"没有"同形，不抛、不 500）——
+ * 老项目 readNote 对坏档静默回落 EMPTY 同款口径；凭据判据只关心 wkHash 字段。
+ */
+async function readNoteParsed(id) {
+  try {
+    const obj = JSON.parse(await fsp.readFile(notePath(id), 'utf8'));
+    if (obj && typeof obj === 'object') return obj;
+  } catch {
+    // 没有 / 坏档：按空处理
+  }
+  return {};
 }
 
 /* ------------------------------------------------------------------ *
@@ -358,6 +385,52 @@ async function route(req, res) {
     return sendJson(res, 405, { error: 'method not allowed' });
   }
 
+  /* ---------- 认领笔记（凭据登记） ----------
+   * 🔴 移植老项目 server.js:430-456（v10.0.0 B1）逐条比对。
+   * 客户端首次解锁即调用，把「本机从口令派生出的写入凭据」登记到服务端。
+   * 纯登记：不改正文、不递增版本；已认领且凭据相符=幂等成功；
+   * 已认领而凭据不符=硬 403（绝不静默换绑——那是"可卸掉的防护"）。
+   * 不建档：名字不存在直接 404，建档仍由首次写入负责。三种模式都允许认领——
+   * off 档提前登记，正是为了让扫一遍笔记之后切 new-only/full 时存量已在保护圈内。
+   * 🔴 必须排在通用 POST /api/note/ 分支之前：/api/note/x/claim 的 id 含斜杠，
+   *   落到通用分支会被 validId 判 400。
+   */
+  if (method === 'POST' && /^\/api\/note\/[^/]+\/claim$/.test(p)) {
+    const id = p.slice('/api/note/'.length, -'/claim'.length);
+    if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
+    req.resume(); // POST 带体：先抽干，任何分支都不留悬挂请求体
+    const ip = clientIp(req);
+    const key = `${ip}:${id}`;
+    const st = failmap.checkLimit(key);
+    if (st.locked) {
+      return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
+    }
+    const wkLock = guards.wkLimited(ip, id); // 认领端点同样要节流，否则它是绕过凭据锁的枚举入口
+    if (wkLock) {
+      return sendJson(res, 429, { error: 'locked', retryAfter: wkLock });
+    }
+    const wk = guards.wkHashFromReq(req);
+    if (!wk) return sendJson(res, 400, { error: 'no credential' });
+    if (!noteExists(id)) return sendJson(res, 404, { error: 'not found' });
+    const cur = await readNoteParsed(id);
+    // 损坏/半截档（认不出盐）此时认领会把真档覆写成「空档 + 外来哈希」= 打开一次即永久毁文。
+    // 故一律拒写，并用 404 同形不多给信号（老项目复核②）。两种信封格式都认：
+    // 本项目 {kdf:{salt}} / 老格式 {salt}——服务端不解析正文，只认"有没有盐"。
+    const hasSalt = (cur.kdf && typeof cur.kdf.salt === 'string' && cur.kdf.salt) || (typeof cur.salt === 'string' && cur.salt);
+    if (!hasSalt) return sendJson(res, 404, { error: 'not found' });
+    const claimed = typeof cur.wkHash === 'string' && cur.wkHash.length === 64;
+    if (claimed && cur.wkHash !== wk) {
+      guards.wkRecordFail(ip, id);
+      return sendJson(res, 403, { error: 'forbidden' });
+    }
+    if (!claimed) {
+      cur.wkHash = wk; // 只加字段，其余原样不动
+      await writeAtomic(notePath(id), JSON.stringify(cur));
+      console.log('[claim] ' + id);
+    }
+    return sendJson(res, 200, { ok: true, claimed: true, v: cur.v || 0 });
+  }
+
   /* ---------- 历史版本 ----------
    * 🔴🔴 必须排在下面笔记读分支**之前**：ID_RE 不含斜杠，
    *   `/api/note/abc/history` 会被笔记读分支切成 `id="abc/history"` → 400。
@@ -427,6 +500,12 @@ async function route(req, res) {
         ) {
           return sendJson(res, 400, { error: 'missing fields' });
         }
+        // 历史环追加快照同样是写入，必须过同一道凭据闸（正门锁了侧门不锁等于白装，
+        // 老项目 server.js:524-526 同一注释）。
+        const wkLockH = guards.wkLimited(clientIp(req), id);
+        if (wkLockH) return sendJson(res, 429, { error: 'locked', retryAfter: wkLockH });
+        const wkcH = guards.wkCheckNote(req, clientIp(req), id, await readNoteParsed(id), obj, noteExists);
+        if (!wkcH.ok) return sendJson(res, wkcH.code, wkcH.mode ? { error: wkcH.error, mode: wkcH.mode } : { error: wkcH.error });
         const hist = await readHist(id);
         let ts = Date.now();
         // 同毫秒去重：否则两次快照 ts 相同，GET /:ts 永远只命中第一条
@@ -471,26 +550,46 @@ async function route(req, res) {
   if (method === 'GET' && p.startsWith('/api/note/')) {
     const id = p.slice('/api/note/'.length);
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
-    const key = `${clientIp(req)}:${id}`;
+    const ip = clientIp(req);
+    const key = `${ip}:${id}`;
     const st = failmap.checkLimit(key);
     if (st.locked) {
       return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
     }
+    // 扫描守卫（老项目 server.js:556-559 同款）：响应形状一字不改
+    // （旧客户端靠 200+空体判新建），只在旁路记 miss。
+    const scan = guards.scanCheck(ip);
+    if (scan.blocked) {
+      return sendJson(res, 429, { error: 'locked', retryAfter: scan.retryAfter });
+    }
     try {
       const txt = await fsp.readFile(notePath(id), 'utf8');
-      // 解密失败也要给 200 + 空体：客户端据此判定"此处无笔记"，
-      // 给 4xx 会让它当成网络错误重试（老项目这个坑踩过）
+      // 凭据哈希不出门：「是否已认领」本身就是探测者想要的信号（老项目 server.js:560-563）。
+      // JSON.parse 每次产出新对象，delete 即安全剥除，其余键与序逐字不变。
+      const obj = JSON.parse(txt);
+      if (obj && typeof obj === 'object' && 'wkHash' in obj) {
+        delete obj.wkHash;
+        return send(res, 200, JSON.stringify(obj));
+      }
       return send(res, 200, txt);
     } catch {
+      // 解密失败/没有这篇也要给 200 + 空体：客户端据此判定"此处无笔记"，
+      // 给 4xx 会让它当成网络错误重试（老项目这个坑踩过）
+      guards.scanRecordMiss(ip);
       return send(res, 200, '');
     }
   }
 
-  /* ---------- 笔记写 ---------- */
-  if (method === 'POST' && p.startsWith('/api/note/')) {
+  /* ---------- 笔记写（POST 本项目客户端 / PUT 老客户端与 MCP 兼容别名） ---------- */
+  if ((method === 'POST' || method === 'PUT') && p.startsWith('/api/note/')) {
+    // 门牌保留名：新建（服务器无此档）时才挡，存量笔记仍可正常读写（老项目 server.js:569-573）。
     const id = p.slice('/api/note/'.length);
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
-    const key = `${clientIp(req)}:${id}`;
+    if (guards.RESERVED_IDS.has(id) && !noteExists(id)) {
+      return sendJson(res, 400, { error: 'reserved name' });
+    }
+    const ip = clientIp(req);
+    const key = `${ip}:${id}`;
     const st = failmap.checkLimit(key);
     if (st.locked) {
       return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
@@ -503,20 +602,46 @@ async function route(req, res) {
       return sendJson(res, 400, { error: 'bad body' });
     }
     const text = body.toString('utf8');
+    // ===== 凭据闸（三态 off / new-only / full，判据见 guards.js，移植自老项目 v10.0.0）=====
+    // 服务端只挑 wkHash 落库；wkOld（改口令自证用）验完即弃，绝不持久化。
+    let obj = null;
     try {
-      await writeAtomic(notePath(id), text);
+      obj = JSON.parse(text);
+    } catch {
+      obj = null;
+    }
+    const wkLock = guards.wkLimited(ip, id);
+    if (wkLock) return sendJson(res, 429, { error: 'locked', retryAfter: wkLock });
+    const cur = await readNoteParsed(id);
+    const wkc = guards.wkCheckNote(req, ip, id, cur, obj, noteExists);
+    if (!wkc.ok) return sendJson(res, wkc.code, wkc.mode ? { error: wkc.error, mode: wkc.mode } : { error: wkc.error });
+    let toWrite = text;
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      delete obj.wkOld;
+      delete obj.wkHash;
+      if (wkc.swap || wkc.claim) obj.wkHash = wkc.wk;
+      else if (wkc.claimed && typeof cur.wkHash === 'string') obj.wkHash = cur.wkHash;
+      toWrite = JSON.stringify(obj);
+    }
+    try {
+      await writeAtomic(notePath(id), toWrite);
       failmap.recordOk(key);
       sseBroadcast(id, { t: 'note', id, v: Date.now() });
-      return sendJson(res, 200, { ok: true, size: text.length });
+      return sendJson(res, 200, { ok: true, size: toWrite.length });
     } catch (e) {
       return sendJson(res, 500, { error: 'write failed', detail: String(e && e.message) });
     }
   }
 
-  /* ---------- 删除 ---------- */
+  /* ---------- 删除（凭据闸同写入：能解密 ⇔ 能删） ---------- */
   if (method === 'DELETE' && p.startsWith('/api/note/')) {
     const id = p.slice('/api/note/'.length);
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
+    const ip = clientIp(req);
+    const wkLock = guards.wkLimited(ip, id);
+    if (wkLock) return sendJson(res, 429, { error: 'locked', retryAfter: wkLock });
+    const wkc = guards.wkCheckNote(req, ip, id, await readNoteParsed(id), null, noteExists);
+    if (!wkc.ok) return sendJson(res, wkc.code, wkc.mode ? { error: wkc.error, mode: wkc.mode } : { error: wkc.error });
     try {
       await fsp.rm(notePath(id), { force: true });
       sseBroadcast(id, { t: 'del', id, v: Date.now() });
