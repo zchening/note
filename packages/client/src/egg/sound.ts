@@ -83,6 +83,11 @@ const FX: Record<FxName, { semi: number; vol: number; seq?: number[] }> = {
   die: { semi: -7, vol: 0.24, seq: [0, -2, -5] },
   up: { semi: 7, vol: 0.14 },
   burp: { semi: -12, vol: 0.22 },
+  // 老项目同款音效名（v9.0.0 canvas 层）：ign=点火、horn=鸣笛、crack=撞碎、win=稀有奖励
+  ign: { semi: -5, vol: 0.18, seq: [0, -3] },
+  horn: { semi: 2, vol: 0.2 },
+  crack: { semi: -2, vol: 0.14 },
+  win: { semi: 12, vol: 0.2, seq: [0, 4, 9] },
 };
 
 export function buildSound(): Sound {

@@ -1440,240 +1440,443 @@ export function tankGame(getCtx: () => { body: string; favs: string[]; cur: stri
 }
 
 /* ------------------------------------------------------------------ *
- * 7. /spacex 垂直着陆 —— 按住=推力
+ * 7. /spacex 垂直着陆 —— 按住=推力，松手=自由落体
+ *
+ * 🔴🔴 移植老项目 index.html:12253-12324（v9.4.0 形态）逐条比对，**不靠推理定案**。
+ *   此前的自造实现有三个偏差，全部按老版改回：
+ *   ① 物理错：老版 y += vy*dt*12（重力 9.8、推力 17.4、姿态耦合 cos/sin），
+ *      自造版 y += vy*dt 且推力 900 ⇒ 无操作也"稳稳落住"（审计实测的假着陆根因）；
+ *   ② 落稳判据缺两条：老版 |vy|<=4.2 && |rot|<=0.055 && 偏移<=26px，自造版只看偏移；
+ *   ③ 仪表盘整条缺失：HUD 中格「垂直 X · 角 Y° · 油 Z%」、结算行
+ *      剩余燃料/落地速度/倾角、坠毁标题「姿态歪了/摔了」二选一（按滞空时长）。
+ *   桌宠 garnish（稳落挥手/摔了掀跟头）依赖 petFig 画笔，列 TODO 不在本批。
  * ------------------------------------------------------------------ */
 
 export function spacexGame(): GameDef {
-  let x = 0;
   let y = 0;
   let vy = 0;
-  let thrust = 0;
-  let score = 0;
-  let landed = false;
-  let targetY = 0;
-  let padHalf = 40;
-  let groundY = 0;
+  let vx = 0;
+  let rot = 0;
+  let rotV = 0;
+  let fuel = 100;
+  let thrust = false;
+  let t = 0;
+  let done = false;
+  let PADX = 0;
+  let GY = 0;
+  let mx = 0;
 
   const reset = (g: GameCtx): void => {
-    x = g.w() / 2;
-    y = 40;
+    y = g.h() * 0.16;
     vy = 0;
-    thrust = 0;
-    score = 0;
-    landed = false;
-    groundY = g.h() - 50;
-    targetY = groundY;
-    padHalf = Math.max(30, g.w() * 0.18);
-    g.setScore('0');
+    vx = rf(-8, 8);
+    rot = rf(-0.12, 0.12);
+    rotV = 0;
+    fuel = 100;
+    thrust = false;
+    t = 0;
+    done = false;
+    PADX = g.w() * 0.5;
+    GY = g.h() - 34;
+    mx = g.w() / 2;
+    g.setScore('0m');
     g.setLevel('');
+  };
+
+  /** 结束（老版 end(win)）：胜按剩余油量计分（+100），败 0；标题按滞空时长二选一。 */
+  const finish = (win: boolean, g: GameCtx): void => {
+    if (done) return;
+    done = true;
+    thrust = false;
+    if (win) g.fx('up');
+    else g.fx('die');
+    g.setScore(win ? String(Math.round(fuel + 100)) : '0');
+    g.end(win ? '稳稳落在船上' : t > 3 ? '姿态歪了' : '摔了', [
+      ['剩余燃料', Math.round(fuel) + '%'],
+      ['落地速度', Math.abs(vy).toFixed(1) + ' m/s'],
+      ['倾角', (Math.abs(rot) * 57.3).toFixed(1) + '°'],
+    ]);
   };
 
   return {
     id: 'spacex',
-    tip: '按住屏幕 / 空格 = 推力 · 落稳在驳船中线',
-    start: reset,
+    tip: '按住屏幕 = 开推力，松手 = 自由落体 · 落稳条件写在仪表上',
+    start: (g) => {
+      reset(g);
+      g.fx('ign');
+    },
+    down: () => {
+      thrust = true;
+    },
+    up: () => {
+      thrust = false;
+    },
+    key: (down, e) => {
+      // 老版：Space/ArrowUp 按住点火（keydown/keyup 各一次，含系统自动重复）；
+      // 左右键只改 rotV（keydown 事件驱动 ±0.9，keyup 不清零，靠每帧 *0.92 衰减）
+      if (e.code === 'Space' || e.code === 'ArrowUp') {
+        e.preventDefault();
+        thrust = down;
+      }
+      if (down && e.code === 'ArrowLeft') rotV -= 0.9;
+      if (down && e.code === 'ArrowRight') rotV += 0.9;
+    },
     resize: (w, h) => {
-      groundY = h - 50;
-      targetY = groundY;
-      padHalf = Math.max(30, w * 0.18);
+      PADX = w * 0.5;
+      GY = h - 34;
     },
     frame: (dt, g) => {
-      if (landed) return;
-      vy += 420 * dt; // 重力
-      vy -= thrust * 900 * dt; // 推力
-      y += vy * dt;
-      if (thrust > 0) g.fx('thrust');
-      // 触地判定
-      if (y >= groundY) {
-        y = groundY;
-        const off = Math.abs(x - g.w() / 2);
-        const ok = off <= padHalf;
-        landed = true;
-        if (ok) {
-          score = Math.max(0, 100 - Math.round(off * 2) - Math.round(Math.abs(vy) / 4));
-          g.fx('up');
-          g.setScore(score);
-          g.end('稳稳落住了', [
-            [COPY.gameRowScore, String(score)],
-            [COPY.gameRowExtra, `偏 ${Math.round(off)}px`],
-          ]);
-        } else {
-          g.fx('die');
-          g.end('摔了', [
-            [COPY.gameRowScore, '0'],
-            [COPY.gameRowExtra, `偏 ${Math.round(off)}px`],
-          ]);
-        }
+      if (done) return;
+      t += dt;
+      const acc = thrust && fuel > 0 ? 17.4 : 0;
+      if (thrust && fuel > 0) fuel = Math.max(0, fuel - dt * 17.5);
+      vy += 9.8 * dt - acc * dt * Math.cos(rot);
+      vx += -acc * dt * Math.sin(rot) + Math.sin(t * 1.7) * 0.6 * dt;
+      rot += rotV * dt * 0.06;
+      rotV *= 0.92;
+      rot *= 0.995;
+      y += vy * dt * 12;
+      mx = g.w() / 2 + vx * t * 6;
+      g.setScore(Math.max(0, Math.round(GY - y)) + 'm');
+      g.setLevel('垂直 ' + vy.toFixed(1) + ' · 角 ' + (Math.abs(rot) * 57.3).toFixed(1) + '° · 油 ' + Math.round(fuel) + '%');
+      if (y >= GY - 12) {
+        const off = Math.abs(mx - PADX);
+        finish(Math.abs(vy) <= 4.2 && Math.abs(rot) <= 0.055 && off <= 26, g);
       }
+      if (Math.abs(rot) > 0.5 && t > 1.2) finish(false, g);
     },
     draw: (g) => {
       const cv = document.getElementById('nsCv') as HTMLCanvasElement | null;
       const c = cv?.getContext('2d');
       if (!c) return;
-      const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 驳船
-      c.fillStyle = p.line;
-      c.fillRect(0, groundY + 20, g.w(), 30);
-      c.fillStyle = p.soft;
-      c.fillRect(g.w() / 2 - padHalf, groundY + 12, padHalf * 2, 8);
-      // 火箭
-      c.fillStyle = landed && p.accent !== '' ? p.fg : p.fg;
-      rr(c, x - 10, y - 22, 20, 22, 6);
-      c.fill();
-      // 尾焰
-      if (thrust > 0 && !landed) {
-        c.fillStyle = p.accent;
+      const P = pal(g);
+      const W = g.w();
+      const H = g.h();
+      c.clearRect(0, 0, W, H);
+      // 背景横线（老版 12 条）+ 星点
+      c.strokeStyle = P.line;
+      c.lineWidth = 1;
+      for (let i = 1; i < 12; i++) {
         c.beginPath();
-        c.moveTo(x - 6, y);
-        c.lineTo(x + 6, y);
-        c.lineTo(x, y + 18);
-        c.closePath();
-        c.fill();
+        c.moveTo(0, i * 26 + 0.5);
+        c.lineTo(W, i * 26 + 0.5);
+        c.stroke();
       }
-      // 高度标
-      txt(c, `高度 ${Math.max(0, Math.round(groundY - y))}`, g.w() / 2, 24, 12, p.muted);
-    },
-    down: (_x, _y, g) => {
-      thrust = 1;
-      void g;
-    },
-    up: (_x, _y, g) => {
-      thrust = 0;
-      void g;
-    },
-    key: (down, e) => {
-      if (e.key === ' ' || e.key === 'ArrowUp') thrust = down ? 1 : 0;
+      c.fillStyle = P.muted;
+      const starPos: ReadonlyArray<[number, number]> = [[0.12, 0.18], [0.8, 0.11], [0.46, 0.26], [0.22, 0.4], [0.7, 0.46]];
+      for (const s of starPos) c.fillRect(W * s[0], H * s[1], 2, 2);
+      // 驳船：accent 实线 + 中线虚标 + 海浪
+      c.strokeStyle = P.accent;
+      c.lineWidth = 1.7;
+      c.beginPath();
+      c.moveTo(PADX - 62, GY);
+      c.lineTo(PADX + 62, GY);
+      c.stroke();
+      c.setLineDash([3, 4]);
+      c.beginPath();
+      c.moveTo(PADX, GY);
+      c.lineTo(PADX, GY - 12);
+      c.stroke();
+      c.setLineDash([]);
+      c.strokeStyle = P.muted;
+      c.beginPath();
+      for (let k = 0; k <= W; k += 14) {
+        const yy = GY + 10 + Math.sin((k + t * 30) / 22) * 2.2;
+        if (k === 0) c.moveTo(k, yy);
+        else c.lineTo(k, yy);
+      }
+      c.stroke();
+      // 火箭（老版贝塞尔轮廓 + 翼 + 落窗支撑腿提示 + 尾焰）
+      c.save();
+      c.translate(mx || W / 2, y);
+      c.rotate(rot);
+      c.strokeStyle = P.fg;
+      c.lineWidth = 1.7;
+      c.lineJoin = 'round';
+      c.beginPath();
+      c.moveTo(0, -30);
+      c.bezierCurveTo(7, -20, 9, -10, 9, 0);
+      c.lineTo(9, 22);
+      c.lineTo(-9, 22);
+      c.lineTo(-9, 0);
+      c.bezierCurveTo(-9, -10, -7, -20, 0, -30);
+      c.closePath();
+      c.stroke();
+      c.beginPath();
+      c.moveTo(-9, 2);
+      c.lineTo(-19, 22);
+      c.lineTo(-17, 6);
+      c.moveTo(9, 2);
+      c.lineTo(19, 22);
+      c.lineTo(17, 6);
+      c.stroke();
+      c.beginPath();
+      c.moveTo(-9, 22);
+      c.lineTo(9, 22);
+      c.stroke();
+      if (Math.abs(mx - PADX) <= 26 && Math.abs(vy) <= 4.2 && Math.abs(rot) <= 0.055) {
+        c.strokeStyle = P.accent;
+        c.beginPath();
+        c.moveTo(-12, 22);
+        c.lineTo(-16, 30);
+        c.moveTo(12, 22);
+        c.lineTo(16, 30);
+        c.moveTo(0, 22);
+        c.lineTo(0, 30);
+        c.stroke();
+      }
+      if (thrust && fuel > 0) {
+        c.strokeStyle = P.accent;
+        c.beginPath();
+        c.moveTo(-4, 23);
+        c.bezierCurveTo(-1, 30, 1, 32, 0, 38);
+        c.bezierCurveTo(2, 32, 4, 28, 4, 23);
+        c.stroke();
+      }
+      c.restore();
     },
   };
 }
 
 /* ------------------------------------------------------------------ *
- * 8. /tesla 轨道巡航 —— 微调推力撞碎飘过的标题
+ * 8. /tesla 轨道巡航 —— 左半屏摇杆/方向键微调姿态，撞碎飘过的笔记标题
+ *
+ * 🔴🔴 移植老项目 index.html:12325-12400 逐条比对，**不靠推理定案**。
+ *   此前的自造实现是"按住推力飞全屏"的另一个游戏（审计实测：开局 0 秒结束），
+ *   与老版玩法完全不同。老版要点：
+ *   - 左半屏拖动 = 摇杆（ax/ay 归一化），方向键同源；右半屏点一下 = 鸣笛；
+ *   - 推进 150·p、阻尼 0.985、油量推进耗 6/s·p、松开回油 3/s；
+ *   - 上下界撞火星判负（py<16 || py>H-40），左右墙夹住不判死；
+ *   - 碎片 = 74×18 的笔记标题牌，从右往左 -28~-62 px/s，16% 稀有；
+ *   - 相撞窗 |Δx|<w/2+12 且 |Δy|<h/2+10；
+ *   - HUD：轨道 X AU（0.7 起步、0.05/s 递增）· 燃料 Y%；计分「N 片」。
  * ------------------------------------------------------------------ */
 
 export function teslaGame(getCtx: () => { body: string; favs: string[] }): GameDef {
-  let y = 0;
+  interface Frag {
+    x: number;
+    y: number;
+    vx: number;
+    w: number;
+    h: number;
+    rare: boolean;
+    label: string;
+    gone: boolean;
+  }
+  let px = 0;
+  let py = 0;
+  let vx = 0;
   let vy = 0;
-  let thrust = 0;
-  let score = 0;
-  let targets: { x: number; y: number; vx: number; label: string; alive: boolean }[] = [];
-  let t = 0;
-  let landed = false;
-  let groundY = 0;
+  let fuel = 100;
+  let dist = 0;
+  let hit = 0;
+  let dead = false;
+  let AU = 0.7;
+  let ax = 0;
+  let ay = 0;
+  let frags: Frag[] = [];
+  let stars: Array<[number, number, number]> = [];
+
+  const newFrag = (g: GameCtx, init: boolean): Frag => {
+    const words = names('tesla', getCtx().body, getCtx().favs, [
+      '读书笔记', '便签纸', '发票', '愿望', '健身', '灵感池', '工作随记', '备忘',
+    ]);
+    return {
+      x: init ? rf(g.w() * 0.5, g.w() - 40) : g.w() + 40,
+      y: rf(30, g.h() - 40),
+      vx: -rf(28, 62),
+      w: 74,
+      h: 18,
+      rare: Math.random() < 0.16,
+      label: words[Math.floor(Math.random() * words.length)] ?? '笔记',
+      gone: false,
+    };
+  };
 
   const reset = (g: GameCtx): void => {
-    y = g.h() - 80;
+    px = g.w() * 0.3;
+    py = g.h() * 0.5;
+    vx = 0;
     vy = 0;
-    thrust = 0;
-    score = 0;
-    t = 0;
-    landed = false;
-    groundY = g.h() - 60;
-    const words = names('tesla', getCtx().body, getCtx().favs, ['灵感', '草稿', '计划', '备忘', '待办', '清单', '片段', '随手']);
-    targets = [];
-    for (let i = 0; i < 8; i++) {
-      targets.push({
-        x: 40 + Math.random() * Math.max(40, g.w() - 80),
-        y: 40 + i * 60,
-        vx: (Math.random() > 0.5 ? 1 : -1) * 40,
-        label: (words[i % words.length] ?? '词').slice(0, 5),
-        alive: true,
-      });
-    }
-    g.setScore('0');
+    fuel = 100;
+    dist = 0;
+    hit = 0;
+    dead = false;
+    AU = 0.7;
+    ax = 0;
+    ay = 0;
+    frags = [];
+    for (let i = 0; i < 7; i++) frags.push(newFrag(g, true));
+    stars = [];
+    for (let j = 0; j < 26; j++) stars.push([rf(0, g.w()), rf(0, g.h()), rf(0.2, 1)]);
+    g.setScore('0 片');
     g.setLevel('');
   };
 
   return {
     id: 'tesla',
-    tip: '按住屏幕 / 空格 = 推力 · 撞碎飘过的笔记标题',
+    tip: '左半屏摇杆 / 方向键微调姿态 · 撞碎飘过的笔记标题 · 点右半屏鸣笛',
     start: reset,
-    resize: (w, h) => {
-      groundY = h - 60;
+    down: (x, y, g) => {
+      // 右半屏 = 鸣笛（老版 FX('horn') 同款，计分不变）
+      if (x > g.w() / 2) g.fx('horn');
+    },
+    move: (x, y, g) => {
+      // 左半屏 = 摇杆（老版同款归一化：以左半屏中点为原点）
+      if (x < g.w() / 2) {
+        ax = (x - g.w() / 4) / (g.w() / 4);
+        ay = (y - g.h() / 2) / (g.h() / 2);
+      }
+    },
+    up: () => {
+      ax = 0;
+      ay = 0;
+    },
+    key: (down, e) => {
+      const m: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const d = m[e.key];
+      if (d && down) {
+        e.preventDefault();
+        ax = d[0];
+        ay = d[1];
+      }
     },
     frame: (dt, g) => {
-      if (landed) return;
-      t += dt;
-      vy += 300 * dt;
-      vy -= thrust * 700 * dt;
-      y += vy * dt;
-      if (y > groundY) {
-        y = groundY;
-        landed = true;
-        g.end(COPY.gameOver, [
-          [COPY.gameRowScore, String(score)],
-          [COPY.gameRowExtra, `${Math.round(t)}${COPY.gameUnitSec}`],
+      if (dead) return;
+      const p = Math.min(1, Math.hypot(ax, ay));
+      if (p > 0.05 && fuel > 0) {
+        vx += ax * 150 * dt * p;
+        vy += ay * 150 * dt * p;
+        fuel = Math.max(0, fuel - dt * 6 * p);
+      } else {
+        fuel = Math.min(100, fuel + dt * 3);
+      }
+      vx *= 0.985;
+      vy *= 0.985;
+      px += vx * dt;
+      py += vy * dt;
+      px = Math.max(18, Math.min(g.w() - 18, px));
+      if (py < 16 || py > g.h() - 40) {
+        dead = true;
+        g.fx('die');
+        const rare = frags.filter((f) => f.rare).length;
+        g.setScore(String(hit));
+        g.end('撞上火星了', [
+          ['撞碎', hit + ' 片'],
+          ['轨道', AU.toFixed(2) + ' AU'],
+          ['稀有', String(rare)],
         ]);
         return;
       }
-      if (y < 20) {
-        y = 20;
-        vy = Math.abs(vy) * 0.5;
-      }
-      // 目标飘动
-      for (const tg of targets) {
-        if (!tg.alive) continue;
-        tg.x += tg.vx * dt;
-        if (tg.x < 20 || tg.x > g.w() - 20) tg.vx = -tg.vx;
-      }
-      // 撞碎
-      for (const tg of targets) {
-        if (!tg.alive) continue;
-        if (Math.abs(tg.x - g.w() / 2) < 22 && Math.abs(tg.y - y) < 16) {
-          tg.alive = false;
-          score += tg.label.length;
-          g.fx('brk');
-          g.setScore(score);
+      dist += dt * 0.012;
+      AU = 0.7 + dist * 0.05;
+      for (const f of frags) f.x += f.vx * dt;
+      frags = frags.filter((f) => f.x > -90);
+      if (frags.length < 7) frags.push(newFrag(g, false));
+      for (const f of frags) {
+        if (!f.gone && Math.abs(px - (f.x + f.w / 2)) < f.w / 2 + 12 && Math.abs(py - (f.y + f.h / 2)) < f.h / 2 + 10) {
+          f.gone = true;
+          hit++;
+          g.fx(f.rare ? 'win' : 'crack');
+          if (f.rare) g.fx('coin');
         }
       }
-      if (targets.every((x) => !x.alive)) {
-        landed = true;
-        g.fx('up');
-        g.end('全清了这个', [[COPY.gameRowScore, String(score)]]);
-      }
+      g.setScore(hit + ' 片');
+      g.setLevel('轨道 ' + AU.toFixed(2) + ' AU · 燃料 ' + Math.round(fuel) + '%');
     },
     draw: (g) => {
       const cv = document.getElementById('nsCv') as HTMLCanvasElement | null;
       const c = cv?.getContext('2d');
       if (!c) return;
-      const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 地面
-      c.fillStyle = p.line;
-      c.fillRect(0, groundY + 20, g.w(), 40);
-      // 目标（飘着的笔记标题）
-      for (const tg of targets) {
-        if (!tg.alive) continue;
-        c.fillStyle = p.soft;
-        rr(c, tg.x - 26, tg.y - 12, 52, 24, 6);
-        c.fill();
-        txt(c, tg.label, tg.x, tg.y, 11, p.fg);
+      const P = pal(g);
+      const W = g.w();
+      const H = g.h();
+      c.clearRect(0, 0, W, H);
+      // 星空 + 底部行星弧线 + 外圈虚线轨道（老版同款几何）
+      for (const s of stars) {
+        c.globalAlpha = 0.3 + s[2] * 0.5;
+        c.fillStyle = P.muted;
+        c.fillRect(s[0], s[1], 1.6, 1.6);
       }
-      // 飞船
-      c.fillStyle = p.fg;
-      rr(c, g.w() / 2 - 12, y - 8, 24, 16, 6);
+      c.globalAlpha = 1;
+      c.strokeStyle = P.line;
+      c.lineWidth = 1;
+      c.beginPath();
+      c.arc(W / 2, H + 190, 230, Math.PI * 1.15, Math.PI * 1.85);
+      c.stroke();
+      c.setLineDash([3, 5]);
+      c.strokeStyle = P.accent;
+      c.globalAlpha = 0.5;
+      c.beginPath();
+      c.arc(W / 2, H + 190, 258, Math.PI * 1.2, Math.PI * 1.8);
+      c.stroke();
+      c.setLineDash([]);
+      c.globalAlpha = 1;
+      // 飘过的笔记标题牌（稀有 = accent 描边 + 实底）
+      for (const f of frags) {
+        if (f.gone) continue;
+        c.lineWidth = 1.7;
+        c.strokeStyle = f.rare ? P.accent : P.fg;
+        c.fillStyle = P.boxBg;
+        c.globalAlpha = f.rare ? 1 : 0.9;
+        rr(c, f.x, f.y, f.w, f.h, 4);
+        c.fill();
+        c.stroke();
+        c.fillStyle = f.rare ? P.accent : P.muted;
+        c.font = '10px ui-monospace,Consolas,monospace';
+        c.textBaseline = 'middle';
+        c.fillText(clipTo(c, f.label, f.w - 12), f.x + 6, f.y + f.h / 2 + 0.5);
+        c.textBaseline = 'alphabetic';
+        c.globalAlpha = 1;
+      }
+      // 车（老版贝塞尔轮廓 + 轮 + 头灯 + 推进尾迹），姿态角随 vy 夹 ±0.3
+      c.save();
+      c.translate(px, py);
+      c.rotate(Math.max(-0.3, Math.min(0.3, vy / 260)));
+      c.strokeStyle = P.fg;
+      c.lineWidth = 1.7;
+      c.lineJoin = 'round';
+      c.beginPath();
+      c.moveTo(-30, 6);
+      c.bezierCurveTo(-29, -3, -25, -8, -19, -10);
+      c.lineTo(-10, -17);
+      c.bezierCurveTo(-4, -20, 3, -20, 8, -17);
+      c.lineTo(16, -11);
+      c.bezierCurveTo(24, -10, 29, -5, 30, 2);
+      c.lineTo(30, 6);
+      c.closePath();
+      c.stroke();
+      c.beginPath();
+      c.moveTo(-30, 6);
+      c.lineTo(30, 6);
+      c.stroke();
+      c.beginPath();
+      c.arc(-19, 9, 5.4, 0, 7);
+      c.stroke();
+      c.beginPath();
+      c.arc(18, 9, 5.4, 0, 7);
+      c.stroke();
+      c.fillStyle = P.accent;
+      c.beginPath();
+      c.arc(25, 1, 1.8, 0, 7);
       c.fill();
-      if (thrust > 0) {
-        c.fillStyle = p.accent;
+      if (Math.hypot(ax, ay) > 0.05) {
+        c.strokeStyle = P.accent;
+        c.globalAlpha = 0.8;
         c.beginPath();
-        c.moveTo(g.w() / 2 - 5, y + 8);
-        c.lineTo(g.w() / 2 + 5, y + 8);
-        c.lineTo(g.w() / 2, y + 22);
-        c.closePath();
-        c.fill();
+        c.moveTo(-32, 2);
+        c.lineTo(-42, 4);
+        c.moveTo(-32, -1);
+        c.lineTo(-40, -2);
+        c.stroke();
+        c.globalAlpha = 1;
       }
-    },
-    down: (_x, _y, g) => {
-      thrust = 1;
-      void g;
-    },
-    up: (_x, _y, g) => {
-      thrust = 0;
-      void g;
-    },
-    key: (down, e) => {
-      if (e.key === ' ' || e.key === 'ArrowUp') thrust = down ? 1 : 0;
+      c.restore();
     },
   };
 }

@@ -37,7 +37,23 @@ export interface GameCtx {
   fx: (name: FxName) => void;
 }
 
-export type FxName = 'tap' | 'start' | 'eat' | 'die' | 'coin' | 'shot' | 'thrust' | 'brk' | 'burp' | 'up' | 'enter';
+export type FxName =
+  | 'tap'
+  | 'start'
+  | 'eat'
+  | 'die'
+  | 'coin'
+  | 'shot'
+  | 'thrust'
+  | 'brk'
+  | 'burp'
+  | 'up'
+  | 'enter'
+  // 老项目同款音效名（v9.0.0 canvas 层）：ign=点火、horn=鸣笛、crack=撞碎、win=稀有
+  | 'ign'
+  | 'horn'
+  | 'crack'
+  | 'win';
 
 export interface GameDef {
   id: string;
