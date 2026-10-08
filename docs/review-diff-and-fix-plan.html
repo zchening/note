@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NoteSyncX 新老版本差异 · 大白话版</title>
+<style>
+  :root{
+    color-scheme:dark;
+    --paper:#0F0F11;
+    --card:#191A1D;
+    --ink:#F2F1EC;
+    --ink-soft:#C7C6C0;
+    --muted:#8B8A85;
+    --line:#2C2D31;
+    --line-soft:#232428;
+    --gold:#D0AC5A;
+    --gold-soft:rgba(208,172,90,.14);
+    --red:#E0706A;
+    --red-soft:rgba(224,112,106,.15);
+    --green:#6FBF8B;
+    --green-soft:rgba(111,191,139,.15);
+    --amber:#DDA94E;
+    --amber-soft:rgba(221,169,78,.15);
+  }
+  *{box-sizing:border-box;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Source Han Sans SC","Noto Sans CJK SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    font-size:16px;
+    line-height:1.85;
+    letter-spacing:.01em;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:56px 24px 96px;}
+
+  /* ── 头部 ── */
+  header.top{margin-bottom:40px;}
+  .eyebrow{
+    display:inline-block;font-size:12.5px;letter-spacing:.18em;
+    color:var(--gold);text-transform:uppercase;font-weight:600;
+    border:1px solid var(--gold);border-radius:999px;padding:4px 14px;margin-bottom:18px;
+  }
+  h1{
+    font-size:34px;line-height:1.3;margin:0 0 14px;font-weight:700;
+    letter-spacing:-.01em;
+  }
+  h1 .sub{display:block;font-size:16px;font-weight:400;color:var(--muted);letter-spacing:0;margin-top:10px;}
+  .lede{
+    font-size:16.5px;color:var(--ink-soft);
+    border-left:3px solid var(--gold);padding:2px 0 2px 16px;margin:0;
+  }
+
+  /* ── 一分钟看懂 ── */
+  .glance{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:34px 0 8px;
+  }
+  .glance .g{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:16px 16px 14px;text-align:center;
+  }
+  .glance .n{font-size:30px;font-weight:700;line-height:1.1;}
+  .glance .n.red{color:var(--red);}
+  .glance .n.green{color:var(--green);}
+  .glance .n.gold{color:var(--gold);}
+  .glance .t{font-size:13px;color:var(--muted);margin-top:6px;}
+
+  /* ── 分区标题 ── */
+  h2{
+    font-size:23px;margin:52px 0 6px;font-weight:700;letter-spacing:-.01em;
+    padding-bottom:12px;border-bottom:1px solid var(--line);
+  }
+  h2 .hint{font-size:14px;font-weight:400;color:var(--muted);margin-left:8px;}
+
+  /* ── 卡片 ── */
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:22px 24px 20px;margin:18px 0;
+  }
+  .card .head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:6px;}
+  .card .num{
+    flex:0 0 auto;width:30px;height:30px;border-radius:9px;
+    background:var(--gold-soft);color:var(--gold);font-weight:700;font-size:15px;
+    display:flex;align-items:center;justify-content:center;margin-top:2px;
+  }
+  .card h3{font-size:18.5px;margin:0;font-weight:700;line-height:1.5;flex:1 1 auto;min-width:180px;}
+
+  .badge{
+    flex:0 0 auto;font-size:12.5px;font-weight:600;border-radius:999px;
+    padding:3px 12px;white-space:nowrap;margin-top:3px;
+  }
+  .badge.fix{background:var(--red-soft);color:var(--red);}
+  .badge.ask{background:var(--amber-soft);color:var(--amber);}
+  .badge.ok{background:var(--green-soft);color:var(--green);}
+  .badge.list{background:var(--gold-soft);color:var(--gold);}
+
+  .card p{margin:10px 0;}
+  .card p:last-child{margin-bottom:0;}
+  .lbl{font-weight:700;color:var(--ink);}
+  .card .kv{margin:12px 0 0;}
+  .card .kv .row{display:flex;gap:10px;margin:8px 0;}
+  .card .kv .k{
+    flex:0 0 76px;font-size:13.5px;font-weight:700;color:var(--gold);
+    padding-top:1px;
+  }
+  .card .kv .v{flex:1 1 auto;font-size:15.5px;color:var(--ink-soft);}
+
+  .note{
+    background:var(--gold-soft);border-radius:11px;padding:12px 15px;margin-top:14px;
+    font-size:14.5px;color:var(--ink-soft);
+  }
+  .note.warn{background:var(--amber-soft);}
+  .note.safe{background:var(--green-soft);}
+  .note .k{font-weight:700;}
+
+  .ask-box{
+    border:1px dashed var(--amber);background:var(--amber-soft);
+    border-radius:11px;padding:12px 15px;margin-top:14px;font-size:14.5px;
+  }
+  .ask-box .k{font-weight:700;color:var(--amber);}
+
+  ul.tight{margin:8px 0;padding-left:22px;}
+  ul.tight li{margin:5px 0;}
+  code{
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    background:var(--line-soft);border-radius:5px;padding:1px 6px;font-size:13.5px;
+  }
+
+  /* ── 表格 ── */
+  .tbl{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px;
+    background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;}
+  .tbl th,.tbl td{padding:11px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-soft);}
+  .tbl th{background:#202126;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.03em;}
+  .tbl tr:last-child td{border-bottom:none;}
+  .tbl td.idx{color:var(--gold);font-weight:700;width:34px;}
+  .tbl td.name{font-weight:600;color:var(--ink);white-space:nowrap;}
+
+  /* ── 批次 ── */
+  .batch{margin:18px 0;}
+  .batch .bt{font-size:16px;font-weight:700;margin-bottom:4px;}
+  .batch .bt .tag{
+    font-size:12px;font-weight:600;border-radius:999px;padding:2px 10px;margin-left:8px;
+    background:var(--gold-soft);color:var(--gold);vertical-align:2px;
+  }
+  .batch .bd{font-size:14px;color:var(--muted);margin-bottom:8px;}
+  ol.steps{margin:6px 0;padding-left:24px;}
+  ol.steps li{margin:7px 0;font-size:15.5px;}
+
+  /* ── 拍板 ── */
+  .decide{background:#141519;border:1px solid var(--gold);border-radius:18px;padding:28px 28px 22px;margin-top:22px;}
+  .decide h2{color:var(--ink);border-bottom:1px solid var(--line);margin-top:0;}
+  .decide ol{padding-left:22px;margin:14px 0 0;}
+  .decide li{margin:11px 0;font-size:15.5px;color:var(--ink-soft);}
+  .decide li b{color:var(--gold);font-weight:600;}
+
+  footer{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);
+    font-size:13px;color:var(--muted);text-align:center;}
+
+  @media(max-width:640px){
+    .wrap{padding:36px 16px 72px;}
+    h1{font-size:26px;}
+    .glance{grid-template-columns:1fr;gap:8px;}
+    .glance .g{display:flex;align-items:center;justify-content:flex-start;gap:14px;text-align:left;padding:12px 16px;}
+    .glance .n{font-size:24px;}
+    .card{padding:18px 16px;}
+    .card .kv .k{flex-basis:66px;}
+    .tbl{font-size:13px;}
+    .tbl th,.tbl td{padding:9px 10px;}
+    .tbl td.name{white-space:normal;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <span class="eyebrow">只出方案 · 未改代码</span>
+    <h1>NoteSyncX 新老版本差异
+      <span class="sub">大白话版 —— 哪里不一样、要不要改、怎么改</span>
+    </h1>
+    <p class="lede">老版本是标准答案。我们拿新版本逐条比对，用大白话告诉你每处差异是怎么回事。</p>
+
+    <div class="glance">
+      <div class="g"><div class="n red">3</div><div class="t">真该修</div></div>
+      <div class="g"><div class="n green">1</div><div class="t">其实没问题</div></div>
+      <div class="g"><div class="n gold">10</div><div class="t">长相不一样</div></div>
+    </div>
+  </header>
+
+  <h2>一、你这次提的 5 件事</h2>
+
+  <!-- 1 -->
+  <div class="card">
+    <div class="head">
+      <div class="num">1</div>
+      <h3>手机上看图片，变成了一条横线</h3>
+      <span class="badge fix">该修 · 改动最小</span>
+    </div>
+    <p><span class="lbl">说人话：</span>你在手机上打开带图片的笔记，图没了，只剩一条细线。</p>
+    <div class="kv">
+      <div class="row"><div class="k">为什么</div><div class="v">新版本给图片开了"懒加载"——先不加载，等滑到跟前再加载。可图还没加载时它没有尺寸，高度就塌成了 0，只剩边框那 1 像素，看着就是一条横线。电脑上图片大多在屏幕里、会立刻加载，所以不明显。</div></div>
+      <div class="row"><div class="k">怎么修</div><div class="v">把"懒加载"关掉（老版本也没开）。笔记里的图不多，没必要省这点流量。</div></div>
+    </div>
+    <div class="note safe"><span class="k">要你定：</span>不用，直接修就行。</div>
+  </div>
+
+  <!-- 2 -->
+  <div class="card">
+    <div class="head">
+      <div class="num">2</div>
+      <h3>每次刷新都弹抽卡，太频繁</h3>
+      <span class="badge ask">待你确认</span>
+    </div>
+    <p><span class="lbl">说人话：</span>你点底栏的刷新，经常蹦出一张抽奖卡，很烦。</p>
+    <div class="kv">
+      <div class="row"><div class="k">老版本</div><div class="v">老版本也是点刷新时抽卡，但它有两道"刹车"：①正在保存时，点了刷新也不抽卡、也不刷新；②屏幕上正有问候气泡或节日雨时，就让它先，不弹卡。新版本这两道刹车都没接上，所以弹得比老版本勤。</div></div>
+    </div>
+    <div class="ask-box"><span class="k">要你定：</span>你说的"每次刷新都弹"，是指<b>点底栏那个刷新按钮</b>，还是<b>手机重新加载页面</b>也弹？
+      <ul class="tight">
+        <li>如果是点刷新按钮 —— 那就是设计如此，我把两道刹车补上就行。</li>
+        <li>如果是重新加载也弹 —— 那就是 bug，得另外查。</li>
+      </ul>
+      另外：要不要干脆加个"冷却时间"（比如一小时只弹一次）？老版本没这个，属于我们自己加，你说了算。
+    </div>
+  </div>
+
+  <!-- 3 -->
+  <div class="card">
+    <div class="head">
+      <div class="num">3</div>
+      <h3>换机后，每篇收藏的笔记都要重新输口令</h3>
+      <span class="badge fix">该修</span>
+    </div>
+    <p><span class="lbl">说人话：</span>你扫码换到新手机，收藏的几篇笔记打开都要输口令；你想只输一次（因为口令都一样）。</p>
+    <div class="kv">
+      <div class="row"><div class="k">为什么</div><div class="v">换机恢复时，程序会拿"口令 + 每篇的盐"去试，试对了才免输。问题是这个口令默认是空的（从备份笔记恢复时拿不到），所以每篇都来问你。</div></div>
+      <div class="row"><div class="k">怎么修</div><div class="v">在恢复界面加一个"这批笔记共用的口令"输入框。输一次，程序拿它去逐篇验证，对的就全部免输。</div></div>
+    </div>
+    <div class="note"><span class="k">安全上：</span>口令不写进二维码、不存盘，用完就忘。验证不过的一律不写钥匙——宁可多问你一次，也不能给错钥匙。给错钥匙会让你看到空白编辑器，误以为笔记丢了，反而可能覆盖掉真内容。</div>
+    <div class="ask-box"><span class="k">要你定：</span>那个 <code>nsbak-xxxxxx</code> 备份笔记，你说在旧手机上没法重新生成——要不要加个"在新手机上重建备份笔记"的入口？</div>
+  </div>
+
+  <!-- 4 -->
+  <div class="card">
+    <div class="head">
+      <div class="num">4</div>
+      <h3>点"扫码换机"，闪过一个要输口令的窗口？</h3>
+      <span class="badge ok">查过了 · 没问题</span>
+    </div>
+    <p><span class="lbl">我做了什么：</span>用真浏览器，一帧一帧地录（每秒约 60 帧），在两种情况各测一遍：①刚输完口令进来看；②刷新页面后自动进来看。</p>
+    <div class="kv">
+      <div class="row"><div class="k">结果</div><div class="v">两次都是——面板从"没有"直接变成"稳定显示二维码"，中间<b>没有任何一帧</b>出现过口令输入框。代码里也写了：挂上面板的同一瞬间就把口令框藏了，浏览器根本来不及画。</div></div>
+      <div class="row"><div class="k">结论</div><div class="v">现在这个版本没有这个 bug。你之前看到的那一下，应该是更早的版本（那个问题当时已经修了）。</div></div>
+    </div>
+    <div class="ask-box"><span class="k">要你定：</span>我还想加一道"双保险"（把隐藏动作提到挂面板之前），纯属防以后有人改代码改出问题。不做也安全，要不要加？</div>
+  </div>
+
+  <!-- 5 -->
+  <div class="card">
+    <div class="head">
+      <div class="num">5</div>
+      <h3>对照老版本，把能看见的地方全查一遍</h3>
+      <span class="badge list">清单</span>
+    </div>
+    <p><span class="lbl">说人话：</span>我拿着我们记录的"老版本精确尺寸表"，把菜单、弹窗、折叠、顶栏、底栏、图标、打印、导出图挨个对了一遍。</p>
+    <div class="kv">
+      <div class="row"><div class="k">结果</div><div class="v">绝大多数都对得上。唯一确实不一样的是——历史版本里那行时间戳，我们<b>故意去掉了"不换行 + 省略号"</b>，所以窄屏上长标签会换行、行高会变。这是我们主动改的，不是弄坏了。</div></div>
+    </div>
+    <div class="ask-box"><span class="k">要你定：</span>这行时间戳，保留现在的样子，还是改回老版本"不换行、超出省略"？</div>
+    <div class="note"><span class="k">另外两点：</span>底栏那 30 句固定提示语，代码里没列成一张清单，建议补一张，免得以后内部报错信息漏到底栏去；还有几项（菜单行高、弹窗宽度等）需要开真浏览器量一遍确认。</div>
+  </div>
+
+  <h2>二、之前攒下的 9 个问题 <span class="hint">—— 都是"长相不一样"</span></h2>
+
+  <table class="tbl">
+    <thead>
+      <tr><th>#</th><th>问题</th><th>一句话原因</th><th>怎么修</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="idx">1</td><td class="name">/pet 界面按钮乱</td><td>少了一句"竖着排"的布局设置</td><td>补上竖排 + 对齐老版本按钮样式</td></tr>
+      <tr><td class="idx">2</td><td class="name">宠物不在别的彩蛋里客串</td><td>少了一座"桥"，让别的游戏叫宠物出场</td><td>照老版本补上这座桥</td></tr>
+      <tr><td class="idx">3</td><td class="name">/bitcoin 不一样</td><td>少了金块、石头、炸弹等几种道具</td><td>照老版本补齐道具和数值</td></tr>
+      <tr><td class="idx">4</td><td class="name">/satoshi 没有"聪"</td><td>单位被去掉了，还用了"币"</td><td>照老版本加回"聪"和 ₿</td></tr>
+      <tr><td class="idx">5</td><td class="name">关于页没列彩蛋</td><td>少了彩蛋清单区</td><td>补上（和彩蛋注册表同源）</td></tr>
+      <tr><td class="idx">6</td><td class="name">关于页左右没对齐</td><td>"检查更新"按钮少了个样式类</td><td>统一宽度对齐</td></tr>
+      <tr><td class="idx">7</td><td class="name">首页"别动，抓拍识别"按钮变样</td><td>新按钮缺主题样式覆盖</td><td>让它继承老按钮的样式</td></tr>
+      <tr><td class="idx">8</td><td class="name">备份笔记换机后每篇要口令</td><td>同本轮第 3 条</td><td>同第 3 条</td></tr>
+      <tr><td class="idx">9</td><td class="name">复古终端绿 / 打印机纸皮肤不一样</td><td>少了这两档的配色和纹路</td><td>照老版本补回</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note warn"><span class="k">提醒：</span>上面这些"原因"是从代码里读出来的初步判断，还没逐条真机复现。动手前，我会先给每条写一个"能证明问题确实存在"的测试，确认了再改。</div>
+
+  <h2>三、建议的修复顺序</h2>
+
+  <div class="batch">
+    <div class="bt">批次 A · 先修 <span class="tag">影响大、风险低</span></div>
+    <div class="bd">这四件先做，用户最容易感知。</div>
+    <ol class="steps">
+      <li>手机图片变横线</li>
+      <li>换机一次输入共用口令</li>
+      <li>抽卡减频（等你先确认场景）</li>
+      <li>扫码换机（已确认没 bug，双保险可选）</li>
+    </ol>
+  </div>
+
+  <div class="batch">
+    <div class="bt">批次 B · 长相一致 <span class="tag">UI 对齐</span></div>
+    <div class="bd">宠物布局、"聪"、bitcoin 道具、关于页对齐 + 彩蛋列表、首页按钮、复古皮肤、宠物客串。</div>
+  </div>
+
+  <div class="batch">
+    <div class="bt">批次 C · 低风险补强 <span class="tag">收尾</span></div>
+    <div class="bd">底栏 30 句白名单 + 测试；历史行时间戳（等你拍板）；顺手改掉一处过期注释。</div>
+  </div>
+
+  <div class="decide">
+    <h2>四、等你拍板</h2>
+    <ol>
+      <li><b>抽卡</b>：是点刷新弹，还是重载也弹？要不要加冷却时间？</li>
+      <li><b>历史行时间戳</b>：保留现状，还是改回"超出省略"？</li>
+      <li><b>nsbak 备份笔记</b>：要不要加"新手机重建备份笔记"入口？</li>
+      <li><b>扫码换机</b>：要不要加那道"双保险"？（不做也安全）</li>
+      <li><b>顺序</b>：按 A→B→C 分批，每批先写"证明问题存在"的测试再动手，行不行？</li>
+    </ol>
+  </div>
+
+  <footer>
+    本文档只出方案，没有改动任何代码。<br>
+    详细依据（逐行代码位置、实测数据）见同目录的《新老可见差异清单 + 整改方案》。
+  </footer>
+
+</div>
+</body>
+</html>
