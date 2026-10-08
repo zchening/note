@@ -62,6 +62,9 @@ import { chromium } from 'playwright';
 // 🔴 判据不许手写第二份实现：OTA 的解析逻辑直接从被测模块导入。
 //   LIVE-06 要判的是"真模块吃下真响应体后给出什么结论"，手写 JSON 检查只能证明"长得像"。
 import { parseLatest } from '../../src/update/ota.ts';
+// 🔴 清理删除必须带写入凭据（见 s03 finally）。凭据派生**直接从生产模块导入**，
+//   不手写第二份 —— 手写的话一旦服务端/客户端改了域分离串，这里会静默 403。
+import { deriveWriteKey } from '../../src/sync/write-key.ts';
 
 const BASE = process.env.BJ_LIVE_BASE || 'https://bj.xuyinji.com.cn';
 /** 真机上只动自己这一篇，名字带时间戳避免与用户数据撞 */
@@ -157,6 +160,15 @@ async function s03() {
   const pageErrors = [];
   page.on('pageerror', (e) => pageErrors.push(String(e)));
 
+  // 🔴🔴 清理删除要带的写入凭据，必须在 try 外声明。
+  //   本用例把笔记写上去时客户端带了 `x-note-key` ⇒ 服务端按 B1 语义**认领**了这篇
+  //   （guards.js `wkCheckNote`：首次带凭据写入即 claim）。凭据闸档位是 `full`，
+  //   已认领的笔记**无凭据一律 403** —— 所以清理的裸 DELETE 必然 403，
+  //   不是服务端坏了，是这条用例自己没带凭据。
+  //   症状代价：每跑一次线上验收就在生产 data/ 留一篇密文笔记（正是文件头"坑 3"要防的事）。
+  //   凭据值在 try 内派生（需要读到刚落库的信封 salt/iter），故变量声明在外、赋值在内。
+  let wk = null;
+
   try {
     // 🔴 等钩子必须用 `__NOTESYNC_PAGE__`，**不能**用 `__NOTESYNC_DOC__`。
     //   `__NOTESYNC_DOC__` / `__NOTESYNC_CANON__` 是在 mountEditor() 里挂的
@@ -220,6 +232,12 @@ async function s03() {
     assert.ok(typeof env.iv === 'string' && env.iv.length > 0, 'iv 应非空');
     assert.ok(typeof env.ct === 'string' && env.ct.length > 20, 'ct 应非空');
 
+    // 🔴 派生清理用的写入凭据：口径与客户端**同一函数同一入参**
+    //   （main.ts:3488 `deriveWriteKey(id, pass, { saltB64: env.kdf.salt, iter: env.kdf.iter })`）。
+    //   盐就用刚落库信封里的 kdf.salt —— 客户端建这篇时 dk.saltB64 就是它。
+    wk = await deriveWriteKey(NOTE, PASS, { saltB64: env.kdf.salt, iter: env.kdf.iter });
+    assert.ok(typeof wk === 'string' && wk.length >= 16, '写入凭据应派生成功（清理删除要用）');
+
     // 确实 POST 过（证明"服务端有这篇"不是别的原因）
     assert.ok(net.some((r) => r.method === 'POST'), '应真的 POST 过密文');
     // 🔴 写用 POST 不用 PUT：新服务端没有 PUT 路由，
@@ -264,7 +282,13 @@ async function s03() {
     //   而汇总仍报全绿 —— 每次验收都在生产目录留一篇密文笔记而没人知道。
     //   无论本用例成功、失败还是中途抛错，这次清理都一定会跑。
     try {
-      const del = await fetch(`${BASE}/api/note/${NOTE}`, { method: 'DELETE' });
+      // 🔴 必须带 `x-note-key`：这篇在写入时已被认领，凭据闸 full 档下无凭据删除必 403。
+      //   wk 在 try 内派生（读到信封后）；若用例在此之前就抛错、wk 仍为 null，
+      //   删除会 403 —— 那是"用例已失败"的下游噪音，不是新的失败。
+      const del = await fetch(`${BASE}/api/note/${NOTE}`, {
+        method: 'DELETE',
+        headers: wk ? { 'x-note-key': wk } : {},
+      });
       assert.ok(del.status === 200 || del.status === 204, '清理：删除应成功，实际 ' + del.status);
       const left = await (await fetch(`${BASE}/api/note/${NOTE}`)).text();
       assert.equal(left.trim(), '', '清理：删除后服务端应为空体，实际还剩 ' + left.length + 'B');
