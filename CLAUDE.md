@@ -64,10 +64,13 @@ APK 不在本机出，全部由 `.github/workflows/build-apk.yml` 完成。手�
 ## git
 
 ```bash
+# 开发机（zchen，D:/Users/zchen）：禁代理直连
 git -c http.proxy= -c https.proxy= push origin main
+# 腾讯云部署服务器（本机 C:/Users/Administrator）：必须走环境代理，不要加 -c http.proxy= 清空它
+git push origin main
 ```
 
-- 🔴 **git 必须禁代理直连**（`-c http.proxy= -c https.proxy=`）；`gh` CLI 才走 `HTTPS_PROXY`
+- 🔴 **git 代理按机器分**：开发机禁代理直连；**本部署服务器必须走 `HTTPS_PROXY` 环境代理**（直连 GitHub 会挂死，2026-10-08 已实证）——在此机上推送**不要**加 `-c http.proxy=` 去清空代理。`gh` CLI 两处都走 `HTTPS_PROXY`。
 - 🔴 **提交前先 `git status`**：临时探针（`_probe*` / `_diag*`）会被 `git add -A` 一起带上
 - 版本号唯一源是 `package.json` 的 `version`，改它必须同步改 `README.md` 版本历史表
 
