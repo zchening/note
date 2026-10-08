@@ -1118,19 +1118,61 @@ export function brickGame(getCtx: () => { body: string; favs: string[] }): GameD
 
 export function satoshiGame(): GameDef {
   const N = 4;
+  const WIN_AT = 134217728; // 2^27：过 1 亿聪的最近一档（老版注释：从出生值翻 11 次，难度=经典 2048）
   let cell = 60;
   let ox = 0;
   let oy = 0;
   let grid: number[] = [];
-  let score = 0;
+  let moves = 0;
+  let over = false;
+
+  const fmt = (v: number): string => v.toLocaleString('en-US');
+  const boardMax = (): number => Math.max(...grid);
+  const boardSum = (): number => grid.reduce((a, b) => a + (b ?? 0), 0);
+  const canMove = (): boolean => {
+    if (grid.some((v) => v === 0)) return true;
+    for (let r = 0; r < N; r++) {
+      for (let cIdx = 0; cIdx < N; cIdx++) {
+        const v = grid[r * N + cIdx];
+        if (v === undefined) continue;
+        if (cIdx < N - 1 && grid[r * N + cIdx + 1] === v) return true;
+        if (r < N - 1 && grid[(r + 1) * N + cIdx] === v) return true;
+      }
+    }
+    return false;
+  };
+  const hud = (g: GameCtx): void => {
+    g.setScore(fmt(boardSum()));
+    g.setLevel(fmt(boardMax()) + ' 聪');
+  };
+  const finish = (win: boolean, g: GameCtx): void => {
+    if (over) return;
+    over = true;
+    g.fx(win ? 'win' : 'die');
+    g.setScore(fmt(boardSum()));
+    g.end(
+      win ? '合成了 1 个币' : '无路可走',
+      win
+        ? [
+            ['本局得分', fmt(boardSum())],
+            ['步数', moves + ' 步'],
+            ['解锁', '/bitcoin 更深一层'],
+          ]
+        : [
+            ['本局得分', fmt(boardSum())],
+            ['最大格', fmt(boardMax()) + ' 聪'],
+            ['步数', moves + ' 步'],
+          ],
+    );
+  };
 
   const reset = (g: GameCtx): void => {
     grid = new Array(N * N).fill(0);
-    score = 0;
+    moves = 0;
+    over = false;
     spawn();
     spawn();
-    g.setScore('0');
-    g.setLevel('');
+    hud(g);
   };
 
   const spawn = (): void => {
@@ -1138,10 +1180,13 @@ export function satoshiGame(): GameDef {
     for (let i = 0; i < grid.length; i++) if (grid[i] === 0) free.push(i);
     if (free.length === 0) return;
     const p = free[Math.floor(Math.random() * free.length)] as number;
-    grid[p] = Math.random() < 0.9 ? 1 : 2;
+    // 老版 SPAWN=2^16(65,536 聪) / SPAWN2=2^17(131,072 聪)：从出生到 1 亿聪翻 11 次，
+    // 4×4 理论上限 17 次 → 难度精确等于经典 2048（老版 :11898 注释同款）
+    grid[p] = Math.random() < 0.9 ? 65536 : 131072;
   };
 
   const slide = (g: GameCtx, dir: 'U' | 'D' | 'L' | 'R'): void => {
+    if (over) return;
     // 收集每行/列。**按滑动方向定序**（向左就从左往右取，向右从右往左取），
     // 这样一次遍历就能同时完成"贴边"与"同值合并" —— 2048 的标准做法。
     const lines: number[][] = [];
@@ -1155,7 +1200,6 @@ export function satoshiGame(): GameDef {
       for (let i = 0; i < vals.length - 1; i++) {
         if (vals[i] === vals[i + 1]) {
           vals[i] = (vals[i] as number) * 2;
-          score += vals[i] as number;
           vals.splice(i + 1, 1);
           // 🔴 合并后必须 i-- ：不回头会把刚合出来的块在同一条线上再合一次
           //   （[2,2,2,2] 会被算成8+8=16 而不是正确的 4+4+8）
@@ -1169,10 +1213,14 @@ export function satoshiGame(): GameDef {
       });
     }
     if (moved) {
+      moves++;
       spawn();
       // 🔴 分数**在这里**就推给 HUD：若放到 frame 里每帧推，
       //   swipe 连划时 HUD 会滞后一拍，用户会觉得"没反应"。
-      g.setScore(score);
+      //   计分口径=老版：SC 显示全场聪数总和、LV 显示最大格。
+      hud(g);
+      if (boardMax() >= WIN_AT) finish(true, g);
+      else if (!canMove()) finish(false, g);
     }
   };
 
@@ -1210,7 +1258,7 @@ export function satoshiGame(): GameDef {
           c.fillStyle = v >= 4 ? p.accent : p.soft;
           rr(c, ox + cIdx * cell + 2, oy + r * cell + 2, cell - 4, cell - 4, 8);
           c.fill();
-          const label = v >= 1e8 ? `${Math.floor(v / 1e8)}币` : String(v);
+          const label = v >= 1e8 ? `${Math.floor(v / 1e8)}币` : fmt(v);
           txt(c, label, ox + (cIdx + 0.5) * cell, oy + (r + 0.5) * cell, Math.min(20, cell * 0.34), v >= 4 ? p.bg : p.fg);
         }
       }
@@ -1242,8 +1290,26 @@ export function bitcoinGame(): GameDef {
   let extending = false;
   let retracting = false;
   let score = 0;
+  let best = 0;
+  let miss = 0;
+  let left = 60; // 老版同款 60s 局时
+  let over = false;
   let gems: { x: number; y: number; r: number; val: number; got: boolean }[] = [];
   let held: { x: number; y: number; r: number; val: number } | null = null;
+
+  const fmt = (v: number): string => v.toLocaleString('en-US');
+  /** 老版 end(msg)（:12022）：结算三行 挖到/最重一钩/空钩；创世块算赢。 */
+  const finish = (msg: string, g: GameCtx): void => {
+    if (over) return;
+    over = true;
+    g.setScore(fmt(score));
+    g.fx(msg === '挖到创世块' ? 'win' : 'die');
+    g.end(msg, [
+      ['挖到', fmt(score) + ' 聪'],
+      ['最重一钩', (best > 0 ? fmt(best) : '0') + ' 聪'],
+      ['空钩', miss + ' 次'],
+    ]);
+  };
 
   const reset = (g: GameCtx): void => {
     pivotX = g.w() / 2;
@@ -1255,9 +1321,13 @@ export function bitcoinGame(): GameDef {
     extending = false;
     retracting = false;
     score = 0;
+    best = 0;
+    miss = 0;
+    left = 60;
+    over = false;
     held = null;
     gems = [];
-    // 越深越肥：y 越大 val 越高
+    // 越深越肥：y 越大 val 越高（聪计价，老版同口径）
     for (let i = 0; i < 16; i++) {
       const depth = Math.random();
       gems.push({
@@ -1268,8 +1338,8 @@ export function bitcoinGame(): GameDef {
         got: false,
       });
     }
-    g.setScore('0');
-    g.setLevel('');
+    g.setScore('0 聪');
+    g.setLevel('60s');
   };
 
   return {
@@ -1282,6 +1352,16 @@ export function bitcoinGame(): GameDef {
       void h;
     },
     frame: (dt, g) => {
+      if (over) return;
+      // 老版 60s 局时：到点结算「时间到」
+      left -= dt;
+      if (left <= 0) {
+        left = 0;
+        g.setLevel('0s');
+        finish('时间到', g);
+        return;
+      }
+      g.setLevel(Math.ceil(left) + 's');
       if (extending) {
         len += 460 * dt;
         const tipX = pivotX + Math.cos(ang) * len;
@@ -1300,8 +1380,6 @@ export function bitcoinGame(): GameDef {
       } else if (retracting) {
         len -= 380 * dt;
         if (held) {
-          const t = 1 - len / Math.max(1, len + 380 * dt);
-          void t;
           //钩子回收时把宝石往轴心拉
           held.x -= (held.x - pivotX) * 0.12;
           held.y -= (held.y - pivotY) * 0.12;
@@ -1311,9 +1389,10 @@ export function bitcoinGame(): GameDef {
           retracting = false;
           if (held) {
             score += held.val;
-            g.setScore(score);
+            best = Math.max(best, held.val);
+            g.setScore(fmt(score) + ' 聪');
             held = null;
-          }
+          } else miss++; // 空钩（老版同款计数）
         }
       } else {
         // 摆动
