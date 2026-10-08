@@ -20,6 +20,7 @@ import {
   PET_TRINKET,
   SHELF_SIZE,
   adoptArchiveCode,
+  adoptNs1Code,
   petArchiveCode,
   petArchiveLine,
   readPet,
@@ -2453,7 +2454,30 @@ export function petGame(): DomGameDef {
         swIn.classList.remove('bad');
       });
       swGo.addEventListener('click', () => {
-        const r = adoptArchiveCode(String(swIn.value || ''));
+        const v = String(swIn.value || '');
+        // 🔴 老护照（ns1:id=..;key=..）走云端认领（异步取回档案再落本机）；
+        //    ns2 本地护照照旧同步接管。两条路的反馈口径完全一致。
+        if (v.trim().startsWith('ns1:')) {
+          swGo.disabled = true;
+          void adoptNs1Code(v).then((r) => {
+            swGo.disabled = false;
+            if (!r.state) {
+              g.fx('burp');
+              syncMsg(true, COPY.petSwapBad);
+              return;
+            }
+            g.fx('up');
+            renderPanel(mount, g);
+            const msgN = mount.querySelector<HTMLElement>('.ns-swap-msg');
+            if (msgN) {
+              msgN.hidden = false;
+              msgN.className = 'ns-swap-msg';
+              msgN.textContent = COPY.petSwapOk;
+            }
+          });
+          return;
+        }
+        const r = adoptArchiveCode(v);
         if (!r.state) {
           g.fx('burp');
           syncMsg(true, r.err === 'empty' ? COPY.petSwapEmpty : COPY.petSwapBad);

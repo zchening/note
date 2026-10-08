@@ -675,3 +675,57 @@ export function adoptArchiveCode(raw: string): { state?: PetState; err?: PetCode
   return r;
 }
 
+/** 老项目护照 ns1:`id=XXX;key=YYY`（云端街机档案寻址 + 凭据，状态在服务端）。 */
+const NS1_RE = /^ns1:id=([A-Za-z0-9]{4,16});key=([A-Za-z0-9]{8,64});?$/;
+
+/**
+ * 认领老项目护照（ns1 → 本机 ns2）。
+ *
+ * 🔴 与 ns2 的本质差异：ns2 自带全部状态；ns1 只有 id+key，状态要拿钥匙去
+ *    GET /api/arcade/<id> 取回（钥匙错与不存在同形 404，老版防枚举口径）。
+ *    先 POST 建档一次（幂等，服务端已存在回同形 ok）——档案随旧库迁移后，
+ *    这一步只是给"迁移前就换了护照"的极端情况兜底。
+ *    认领来的是**醒着**的宠物（老项目 :11496 同款）；talked 无法从旧档恢复，从 0 起。
+ */
+export async function adoptNs1Code(raw: string): Promise<{ state?: PetState; err?: PetCodeError }> {
+  const m = NS1_RE.exec(raw.trim());
+  if (!m) return { err: 'format' };
+  const id = (m[1] ?? '').toUpperCase();
+  const key = m[2] ?? '';
+  if (!id || !key) return { err: 'format' };
+  try {
+    await fetch('/api/arcade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, key, updatedAt: Date.now() }),
+    });
+    const r = await fetch(`/api/arcade/${encodeURIComponent(id)}`, {
+      headers: { 'X-Arcade-Key': key },
+      cache: 'no-store',
+    });
+    if (!r.ok) return { err: 'shape' };
+    const o = (await r.json()) as Record<string, unknown>;
+    const stage = Number(o.stage);
+    if (!Number.isInteger(stage) || stage < 0 || stage > 3) return { err: 'shape' };
+    const now = Date.now();
+    const state: PetState = {
+      adopted: true,
+      stage,
+      ate: Number(o.ate) || 0,
+      days: Number(o.days) || 1,
+      shelf: Array.isArray(o.shelf)
+        ? (o.shelf as unknown[]).map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < 512)
+        : [],
+      born: Number(o.born) || now,
+      talked: Number(o.talked) || 0,
+      last: now,
+      asleep: false,
+      retiredAt: Number(o.retiredAt) || 0,
+    };
+    writePet(state);
+    return { state };
+  } catch {
+    return { err: 'shape' }; // 网络失败与档案丢失同形（不引入第四种错误口径）
+  }
+}
+

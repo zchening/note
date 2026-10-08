@@ -732,13 +732,120 @@ async function route(req, res) {
     });
   }
 
-  /* ---------- 小游戏记录（彩蛋层用） ---------- */
+  /* ---------- 小游戏记录（彩蛋层用） ----------
+   * 🔴 v2.1.0 移植老项目街机档案语义（server.js:727-773 逐条比对）：
+   *  - id 允许大写（老桌宠护照 ns1:id=39CLCAR9 是 8 位大写数字），id 取路径 [4] 段；
+   *  - GET/PUT 必须带 x-arcade-key 且 sha256 命中 keyHash，钥匙错与不存在同形 404（防枚举）；
+   *  - GET 回包剥掉 keyHash 与 id（连哈希都不出门）；
+   *  - PUT 合并（counters 取最大、shelf 并集排序），绝不整篇覆盖——跨设备互抹即此根因；
+   *  - POST 建档 {id,key}：服务端只留哈希；已存在回同形 {ok:true}（不泄露"该 id 已被占"）。
+   *  兼容：小写 id（本项目早期形状）继续走无鉴权存取；老护照迁移建档走大写 id 有鉴权。
+   */
   if (p.startsWith('/api/arcade')) {
-    const id = p === '/api/arcade' ? url.searchParams.get('id') || '' : p.slice('/api/arcade/'.length);
-    if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
+    // 建档（老版 POST /api/arcade {id,key}）：id 在**体**里，先于路径段校验处理
+    if (method === 'POST') {
+      let inc0;
+      try {
+        inc0 = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      } catch {
+        inc0 = {};
+      }
+      const kid0 = String((inc0 && inc0.id) || '').toUpperCase();
+      const kk0 = String((inc0 && inc0.key) || '');
+      const ARC_RE0 = /^[A-Z0-9]{4,16}$/;
+      if (!ARC_RE0.test(kid0) || kk0.length < 8 || kk0.length > 64) return sendJson(res, 400, { error: 'bad id/key' });
+      const createPath = path.join(ARCADE_DIR, `${kid0}.json`);
+      if (fs.existsSync(createPath)) return sendJson(res, 200, { ok: true });
+      const rec0 = { id: kid0, keyHash: guards.wkHash(kk0), counters: {}, shelf: [], updatedAt: Number(inc0.updatedAt) || Date.now(), born: Date.now() };
+      try {
+        await writeAtomic(createPath, JSON.stringify(rec0));
+        return sendJson(res, 200, { ok: true });
+      } catch {
+        return sendJson(res, 500, { error: 'write failed' });
+      }
+    }
+    const aid = (p === '/api/arcade' ? url.searchParams.get('id') || '' : p.slice('/api/arcade/'.length));
+    const upper = typeof aid === 'string' ? aid.toUpperCase() : '';
+    const ARC_ID_RE = /^[A-Z0-9]{4,16}$/;
+    const isUpperArc = ARC_ID_RE.test(upper);
+    if (!isUpperArc && !validId(aid)) return sendJson(res, 400, { error: 'bad id' });
+    const id2 = isUpperArc ? upper : aid;
+    const arcadePath = path.join(ARCADE_DIR, `${id2}.json`);
+    const arcadeExists = () => fs.existsSync(arcadePath);
+
+    if (isUpperArc && (method === 'GET' || method === 'PUT')) {
+      // 老版语义：凭据必带、哈希必中、同形 404
+      const k = req.headers['x-arcade-key'];
+      const kh = typeof k === 'string' && k.length >= 8 && k.length <= 64 ? guards.wkHash(k) : null;
+      let rec = null;
+      try {
+        rec = JSON.parse(await fsp.readFile(arcadePath, 'utf8'));
+      } catch {
+        rec = null;
+      }
+      if (!kh || !rec || rec.keyHash !== kh) return sendJson(res, 404, { error: 'not found' });
+      if (method === 'GET') {
+        const pub = { ...rec };
+        delete pub.keyHash;
+        delete pub.id;
+        return send(res, 200, JSON.stringify(pub));
+      }
+      // PUT：合并回档（counters 逐键取最大、shelf 并集排序上限 512）
+      let inc;
+      try {
+        inc = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'bad json' });
+      }
+      if (!inc || typeof inc !== 'object') return sendJson(res, 400, { error: 'bad body' });
+      const merged = { ...rec };
+      merged.counters = merged.counters || {};
+      const ic = inc.counters && typeof inc.counters === 'object' ? inc.counters : {};
+      for (const kk of Object.keys(ic).slice(0, 40)) {
+        const v = Number(ic[kk]);
+        if (!Number.isFinite(v)) continue;
+        const prev = Number(merged.counters[kk]);
+        if (!Number.isFinite(prev) || v > prev) merged.counters[kk] = Math.min(v, 1e12);
+      }
+      const shelfSet = new Set(
+        [...(merged.shelf || []), ...(inc.shelf || [])]
+          .map(Number)
+          .filter((n) => Number.isFinite(n) && n >= 0 && n < 512),
+      );
+      merged.shelf = [...shelfSet].sort((a, b) => a - b);
+      merged.updatedAt = Number(inc.updatedAt) || Date.now();
+      try {
+        await writeAtomic(arcadePath, JSON.stringify(merged));
+        return sendJson(res, 200, { ok: true, updatedAt: merged.updatedAt || 0 });
+      } catch {
+        return sendJson(res, 500, { error: 'write failed' });
+      }
+    }
+
+    if (isUpperArc && method === 'POST') {
+      // 建档：客户端自带 id+key，服务端只留哈希（老版同款：已存在回同形 ok）
+      let inc;
+      try {
+        inc = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      } catch {
+        inc = {};
+      }
+      const kid = String((inc && inc.id) || '').toUpperCase();
+      const kk = String((inc && inc.key) || '');
+      if (!ARC_ID_RE.test(kid) || kk.length < 8 || kk.length > 64) return sendJson(res, 400, { error: 'bad id/key' });
+      if (arcadeExists()) return sendJson(res, 200, { ok: true });
+      const rec = { id: kid, keyHash: guards.wkHash(kk), counters: {}, shelf: [], updatedAt: Number(inc.updatedAt) || Date.now(), born: Date.now() };
+      try {
+        await writeAtomic(arcadePath, JSON.stringify(rec));
+        return sendJson(res, 200, { ok: true });
+      } catch {
+        return sendJson(res, 500, { error: 'write failed' });
+      }
+    }
+
     if (method === 'GET') {
       try {
-        return send(res, 200, await fsp.readFile(path.join(ARCADE_DIR, `${id}.json`), 'utf8'));
+        return send(res, 200, await fsp.readFile(arcadePath, 'utf8'));
       } catch {
         return send(res, 200, '');
       }
@@ -751,7 +858,7 @@ async function route(req, res) {
         return sendJson(res, 413, { error: 'too large' });
       }
       try {
-        await writeAtomic(path.join(ARCADE_DIR, `${id}.json`), body.toString('utf8'));
+        await writeAtomic(arcadePath, body.toString('utf8'));
         return sendJson(res, 200, { ok: true });
       } catch {
         return sendJson(res, 500, { error: 'write failed' });
