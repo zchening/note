@@ -239,8 +239,8 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
     score = 0;
     step = 0;
     acc = 0;
-    g.setScore('0');
-    g.setLevel('');
+    g.setScore('0 字');
+    g.setLevel('蛇身 3');
     // 蛇身贴上笔记名：越长的名字越占格
     for (const n of ns.slice(0, 6)) {
       for (let i = 0; i < Math.min(4, n.length); i++) {
@@ -260,8 +260,11 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
       }
     }
     if (free.length === 0) {
-      g.end(COPY.gameOver, [
-        [COPY.gameRowScore, String(score)],
+      // 满盘=通关（老版 place 同款：空了就判通关）
+      g.end('通关了', [
+        ['本局', score + ' 字'],
+        ['蛇身', body.length + ' 节'],
+        ['历史最佳', bestOf() + ' 字'],
       ]);
       return;
     }
@@ -276,6 +279,29 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
     if (queue.length === 0 && opp[dir] === d) return;
     if (queue.length < 2) queue.push(d);
   };
+
+  /** 历史最佳（老版 SH().best.snake 同语义，存本机 localStorage）。 */
+  const BEST_KEY = 'notesync_bj_best_snake';
+  function bestOf(): number {
+    try {
+      return Number(localStorage.getItem(BEST_KEY)) || 0;
+    } catch {
+      return 0;
+    }
+  }
+  function die(why: string, g: GameCtx): void {
+    const best = Math.max(bestOf(), score);
+    try {
+      localStorage.setItem(BEST_KEY, String(best));
+    } catch {
+      /* 装饰性数据，写不下就算了 */
+    }
+    g.end(why, [
+      ['本局', score + ' 字'],
+      ['蛇身', body.length + ' 节'],
+      ['历史最佳', best + ' 字'],
+    ]);
+  }
 
   return {
     id: 'snake',
@@ -301,25 +327,20 @@ export function snakeGame(getCtx: () => { body: string; favs: string[]; cur: str
         const ny = head.y + (dir === 'U' ? -1 : dir === 'D' ? 1 : 0);
         if (nx < 0 || ny < 0 || nx >= GRID || ny >= GRID) {
           g.fx('die');
-          g.end(COPY.gameOver, [
-            [COPY.gameRowScore, String(score)],
-            [COPY.gameRowExtra, String(step)],
-          ]);
+          die('撞墙了', g);
           return;
         }
         if (body.some((b) => b.x === nx && b.y === ny)) {
           g.fx('die');
-          g.end(COPY.gameOver, [
-            [COPY.gameRowScore, String(score)],
-            [COPY.gameRowExtra, String(step)],
-          ]);
+          die('咬到自己了', g);
           return;
         }
         body.unshift({ x: nx, y: ny });
         if (nx === food.x && ny === food.y) {
           score += food.pts;
           g.fx('eat');
-          g.setScore(score);
+          g.setScore(score + ' 字');
+          g.setLevel('蛇身 ' + body.length);
           const ns = names('snake', getCtx().body, getCtx().favs, SNAKE_FALLBACK);
           placeFood(g, ns);
         } else {
@@ -1157,7 +1178,7 @@ export function satoshiGame(): GameDef {
 
   return {
     id: 'satoshi',
-    tip: '方向键 / 划屏滑动 · 合到 1 亿聪算赢',
+    tip: '四向滑动 / 方向键 · 相同单位相加，一路合到 1 个币（1 亿聪）',
     start: reset,
     resize: (w, h) => {
       cell = Math.floor(Math.min(w, h) / (N + 1));
@@ -1253,7 +1274,7 @@ export function bitcoinGame(): GameDef {
 
   return {
     id: 'bitcoin',
-    tip: '点一下放钩子 · 越深越肥',
+    tip: '点屏幕 / 空格 = 放钩 · 越深越值钱，但拉回来更慢',
     start: reset,
     resize: (w, h) => {
       pivotX = w / 2;
