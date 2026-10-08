@@ -78,6 +78,9 @@ const browser = await launchBrowser();          // 从 harness.mjs 借，playwri
 
 - [ ] `package.json` 的 `version` 已 bump（唯一版本源，构建时注入）
 - [ ] `README.md` 版本历史表已加行（摘要 ≤80 汉字、表格单元格内无裸竖线）
+- [ ] 推 tag 前 **e2e 本地全绿**（CI 只跑单测闸不跑 e2e；先 build 再测，同轮跑过 build 该轮 e2e 作废）
+- [ ] 🔴 **APK + 网页两次动作都做了**：推 tag（CI 出 APK+OTA+Release）**且**跑了 `_bj_deploy3.py`（**CI 不碰网页**）。只推 tag ⇒ App 新版、网页停旧版（v2.0.1 实锤：App 2.0.1 / 网页 2.0.0）
+- [ ] 🔴 **versionCode 闸**：CI 用加权公式 `major*10000+minor*100+patch`（`build-apk.yml`），**禁改回去点拼接**——1.13.1→1131、2.0.0→**200** 倒退被 Android 拒覆盖安装（覆盖安装只判 versionCode，不判 versionName）
 - [ ] 部署后 `/healthz` 的 `version` 等于刚 bump 的值
 - [ ] 新增的静态资源在服务器上真的能取到（部署日志有逐个 `OK 上传`）
 
