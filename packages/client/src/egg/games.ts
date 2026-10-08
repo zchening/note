@@ -382,6 +382,11 @@ function rf(a: number, b: number): number {
   return a + Math.random() * (b - a);
 }
 
+/** 老项目同款 pick（index.html 多处使用）：随机取一项。 */
+function pick<T>(arr: readonly T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)] as T;
+}
+
 /**
  * 老项目 `clipTo`（:11581-11587，v9.2.0 修的长方形 bug）**逐字照抄**。
  *
@@ -1284,157 +1289,446 @@ export function bitcoinGame(): GameDef {
 
 /* ------------------------------------------------------------------ *
  * 6. /tank 坦克大战 —— 基地 = 你的笔记
+ *
+ * 🔴🔴 移植老项目 index.html:12096-12252（完整 Battle City 语义）逐条比对。
+ *   此前的自造实现是"走格撞砖"的另一个游戏（无敌人/无子弹/无开火/无基地守卫，
+ *   开局还显示「第 2 关」），审计实测定为半残。老版要点：
+ *   - 13×13 地形：砖(1)可拆、钢(2)挡弹不碎、河(3)挡车不挡弹、草(4)藏车、
+ *     基地(9)=你的笔记被炸即负；地形种子取自收藏/待办与篇名——
+ *     「每个人的第一关都是自己笔记长出来的」；
+ *   - 三关制：敌 5+level*2、三路出生、AI 半数朝你走、击毁 34% 掉道具
+ *     （★射速/盾/钟定身/铲子升钢）；命 3，被击回出生点；
+ *   - HUD：左「敌 N」、中「第 X / 3 关 · 命 Y」。
+ *   桌宠藏砖 garnish（mkPet/updatePet/petFig）列 TODO 不在本批。
  * ------------------------------------------------------------------ */
 
 export function tankGame(getCtx: () => { body: string; favs: string[]; cur: string }): GameDef {
   const N = 13;
-  let cell = 24;
-  let ox = 0;
-  let oy = 0;
-  let walls: boolean[][] = [];
-  let px = 0;
-  let py = 0;
-  let dir: 'U' | 'D' | 'L' | 'R' = 'U';
-  let step = 0;
-  let baseX = 6;
-  let baseY = 6;
-  let score = 0;
+  let u = 26;
+  /** 地形格：0 空 1 砖 2 钢 3 河 4 草 9 基地 */
+  let map: number[][] = [];
+  let me: { x: number; y: number; d: 'U' | 'D' | 'L' | 'R'; cd: number } | null = null;
+  let foes: Array<{ x: number; y: number; d: 'U' | 'D' | 'L' | 'R'; cd: number; hp: number }> = [];
+  interface Bullet { x: number; y: number; vx: number; vy: number; own: number }
+  let bullets: Bullet[] = [];
+  interface Item { x: number; y: number; k: 'star' | 'shield' | 'clock' | 'shovel' }
+  let items: Item[] = [];
   let level = 1;
-  let baseLabel = '';
+  let left = 0;
+  let killT = 0;
+  let base: { x: number; y: number; alive: boolean } = { x: 6, y: 12, alive: true };
+  let lives = 3;
+  let shield = 0;
+  let freeze = 0;
+  let fireCd = 0.32;
 
-  const buildWalls = (): void => {
-    walls = [];
-    for (let r = 0; r < N; r++) {
-      const row: boolean[] = [];
-      for (let c = 0; c < N; c++) row[c] = false;
-      walls[r] = row;
-    }
-    // 砖块
-    for (let r = 1; r < N; r += 2) {
-      for (let c = 1; c < N; c += 2) {
-        const row = walls[r];
-        // 🔴 逐行收窄而不是整段 `walls[r][c] = true`：
-        //   noUncheckedIndexedAccess 下那是 boolean | undefined。
-        //   反过来说，**用 ?? false 硬写会掩盖越界** —— 越界本该是不该发生的bug，
-        //   静默当空地会让"关卡布局错了"表现为"撞了个空"。
-        if (row) row[c] = true;
-      }
-    }
+  const DIRV: Record<'U' | 'D' | 'L' | 'R', [number, number]> = {
+    L: [-1, 0], R: [1, 0], U: [0, -1], D: [0, 1],
   };
 
-  const reset = (g: GameCtx): void => {
-    buildWalls();
-    px = 6;
-    py = 11;
-    baseX = 6;
-    baseY = 0;
-    dir = 'U';
-    step = 0;
-    score = 0;
+  function cellFree(x: number, y: number): boolean {
+    return x >= 0 && y >= 0 && x < N && y < N && (!map[y]?.[x] || map[y]?.[x] === 4);
+  }
+  function occupied(x: number, y: number): boolean {
+    return (me !== null && me.x === x && me.y === y) || foes.some((f) => f.x === x && f.y === y);
+  }
+  function put(x: number, y: number, v: number): void {
+    if (x >= 0 && y >= 0 && x < N && y < N) {
+      const row = map[y];
+      if (row) row[x] = v;
+    }
+  }
+  function buildMap(): void {
+    // 地形种子取自收藏/待办字数：每个人的第一关都是自己笔记长出来的（老版 buildMap 同款 LCG）
+    const src = names('obs', getCtx().body, getCtx().favs, ['读书笔记', '便签纸', '发票', '愿望', '健身']).join('|') + (getCtx().cur || '');
+    let h = 0;
+    for (let i = 0; i < src.length; i++) h = (h * 31 + src.charCodeAt(i)) >>> 0;
+    map = [];
+    for (let yy = 0; yy < N; yy++) {
+      const row: number[] = [];
+      for (let xx = 0; xx < N; xx++) row[xx] = 0;
+      map[yy] = row;
+    }
+    for (let k = 0; k < N * 2; k++) {
+      h = (h * 1103515245 + 12345) >>> 0;
+      put(h % N, 1 + ((h >> 4) % (N - 4)), 1);
+    }
+    for (let s = 0; s < 5; s++) {
+      h = (h * 1103515245 + 12345) >>> 0;
+      put(h % N, 1 + ((h >> 6) % (N - 4)), 2);
+    }
+    // 河(3)挡车不挡弹、草(4)藏车（画在坦克之后）——两句话的代价换十倍策略，值（老版原话）
+    for (let r = 0; r < 4; r++) {
+      h = (h * 1103515245 + 12345) >>> 0;
+      const rx = 1 + (h % (N - 3));
+      const ry = 3 + ((h >> 8) % 6);
+      put(rx, ry, 3);
+      put(rx + 1, ry, 3);
+    }
+    for (let gg = 0; gg < 6; gg++) {
+      h = (h * 1103515245 + 12345) >>> 0;
+      put(h % N, 2 + ((h >> 10) % (N - 5)), 4);
+    }
+    // 基地掩体（老版同款六块）+ 基地
+    const cover: Array<[number, number]> = [[5, 10], [7, 10], [4, 11], [8, 11], [5, 11], [7, 11]];
+    for (const [cx2, cy2] of cover) put(cx2, cy2, 1);
+    put(6, 12, 9);
+    put(6, 11, 0);
+  }
+  function spawnFoe(): void {
+    if (foes.length >= 4 || left <= 0) return;
+    const sx = pick([0, 6, 12]);
+    if (occupied(sx, 0)) return;
+    foes.push({ x: sx, y: 0, d: pick(['D', 'L', 'R'] as const), cd: rf(0.6, 1.8), hp: 1 });
+    left--;
+  }
+  function move(o: { x: number; y: number; d: 'U' | 'D' | 'L' | 'R' }, d: 'U' | 'D' | 'L' | 'R'): boolean {
+    const v = DIRV[d];
+    o.d = d;
+    const nx = o.x + v[0];
+    const ny = o.y + v[1];
+    if (!cellFree(nx, ny) || occupied(nx, ny)) return false;
+    o.x = nx;
+    o.y = ny;
+    return true;
+  }
+  function shoot(o: { x: number; y: number; d: 'U' | 'D' | 'L' | 'R' }, g: GameCtx): void {
+    if (bullets.filter((b) => (o === me ? b.own === 1 : b.own === 0)).length > 1) return;
+    const v = DIRV[o.d];
+    bullets.push({ x: o.x + 0.5, y: o.y + 0.5, vx: v[0] * 7, vy: v[1] * 7, own: o === me ? 1 : 0 });
+    g.fx('shot');
+  }
+  function finish(msg: string, win: boolean, g: GameCtx): void {
+    g.setScore(win ? String(level * 100) : '0');
+    g.fx(win ? 'win' : 'die');
+    g.end(msg, [
+      ['关卡', '第 ' + level + ' / 3 关'],
+      ['剩余敌军', String(left + foes.length)],
+      ['生命', String(lives)],
+    ]);
+  }
+  function reset(g: GameCtx): void {
     level = 1;
-    baseLabel = getCtx().cur || '记事本';
-    g.setScore('0');
-    g.setLevel(`第 ${level} 关`);
-  };
-
-  const bump = (nx: number, ny: number): boolean => {
-    if (nx < 0 || ny < 0 || nx >= N || ny >= N) return true;
-    return walls[ny]?.[nx] === true;
-  };
+    lives = 3;
+    buildMap();
+    me = { x: 6, y: 9, d: 'U', cd: 0.3 };
+    bullets = [];
+    items = [];
+    shield = 0;
+    freeze = 0;
+    fireCd = 0.32;
+    left = 5 + level * 2;
+    killT = 0;
+    foes = [];
+    spawnFoe();
+    base = { x: 6, y: 12, alive: true };
+    g.setScore('敌 ' + (left + foes.length));
+    g.setLevel('第 ' + level + ' / 3 关 · 命 ' + lives);
+  }
 
   return {
     id: 'tank',
-    // 🔴🔴 tip 文案逐字对齐老项目（index.html:12149）：
-    //   此前 bj 写的是「四向划屏 / 方向键 · 撞开砖墙，守住你的笔记」——
-    //   **少了"怎么开火"**。用户报障「tank 也和之前不一样」指的就是这个：
-    //   玩法提示里没有射击操作，玩家不知道空格/右半屏能开火，于是以为游戏坏了。
-    //   提示文案是契约（用户按它学操作），不能自己改写。
+    // 🔴🔴 tip 文案逐字对齐老项目（index.html:12149）：少了"怎么开火"用户就以为游戏坏了
     tip: '划屏改向 / 方向键移动 · 点右半屏或空格开火 · 别让记事本被炸',
-    start: reset,
+    start: (g) => reset(g),
     resize: (w, h) => {
-      cell = Math.floor(Math.min(w, h) / (N + 0.5));
-      ox = (w - cell * N) / 2;
-      oy = (h - cell * N) / 2;
+      u = Math.max(10, Math.floor(Math.min(w, h) / N));
+    },
+    swipe: (d, g) => {
+      if (me) move(me, d);
+      void g;
+    },
+    down: (x, _y, g) => {
+      if (x > g.w() / 2 && me && me.cd <= 0) {
+        shoot(me, g);
+        me.cd = 0.32;
+      }
+    },
+    tap: (g) => {
+      if (me && me.cd <= 0) {
+        shoot(me, g);
+        me.cd = 0.32;
+      }
+    },
+    key: (down, e, g) => {
+      if (!down || !me) return;
+      const m: Record<string, 'U' | 'D' | 'L' | 'R'> = {
+        ArrowLeft: 'L', ArrowRight: 'R', ArrowUp: 'U', ArrowDown: 'D',
+      };
+      const d = m[e.key];
+      if (d) {
+        e.preventDefault();
+        move(me, d);
+      }
+      if (e.code === 'Space' && me.cd <= 0) {
+        e.preventDefault();
+        shoot(me, g); // 长按靠 keydown 自动重复 + cd 门控连射（老版原话）
+        me.cd = fireCd;
+      }
     },
     frame: (dt, g) => {
-      step += dt * 4;
-      if (step >= 1) {
-        step = 0;
-        const dx = dir === 'L' ? -1 : dir === 'R' ? 1 : 0;
-        const dy = dir === 'U' ? -1 : dir === 'D' ? 1 : 0;
-        const nx = px + dx;
-        const ny = py + dy;
-        if (bump(nx, ny)) {
-          // 撞墙：砖墙可撞掉，其余算碰壁
-          if (walls[ny]?.[nx] === true) {
-            walls[ny][nx] = false;
-            score += 1;
-            g.setScore(score);
-            g.fx('brk');
+      if (!me) return;
+      const M = me; // 闭包内收窄：me 是可变模块量，TS 不跨闭包保窄化；本帧内 reset 不会跑，别名安全
+      M.cd -= dt;
+      killT += dt;
+      if (killT > 1.4) {
+        killT = 0;
+        spawnFoe();
+      }
+      if (freeze > 0) freeze -= dt;
+      // 道具吃下即生效：★射速 / 盾 / 时钟定身 / 铲子把基地四周砖升钢（老版同款）
+      items = items.filter((it) => {
+        if (it.x !== M.x || it.y !== M.y) return true;
+        if (it.k === 'star') fireCd = Math.max(0.14, fireCd * 0.6);
+        else if (it.k === 'shield') shield = 1;
+        else if (it.k === 'clock') freeze = 3;
+        else if (it.k === 'shovel') {
+          const steel: Array<[number, number]> = [[5, 11], [6, 11], [7, 11], [4, 12], [8, 12]];
+          for (const [qx, qy] of steel) {
+            const row = map[qy];
+            if (row && row[qx] === 1) row[qx] = 2;
           }
-          return;
         }
-        px = nx;
-        py = ny;
-        // 吃到基地外的金豆= 过关
-        if (py <= baseY + 1 && px >= baseX - 1 && px <= baseX + 1) {
-          level += 1;
-          score += 10;
-          g.setScore(score);
-          g.fx('up');
-          g.setLevel(`第 ${level} 关`);
-          buildWalls();
-          px = 6;
-          py = 11;
-        }
-        if (px === baseX && py === baseY) {
-          g.fx('die');
-          g.end(COPY.gameOver, [
-            [COPY.gameRowScore, String(score)],
-            [COPY.gameRowExtra, `第 ${level} 关`],
-          ]);
+        g.fx('pow');
+        return false;
+      });
+      for (const f of foes) {
+        if (freeze > 0) continue;
+        f.cd -= dt;
+        if (f.cd <= 0 && me) {
+          f.cd = rf(0.5, 1.4);
+          if (Math.random() < 0.45) {
+            const dx = M.x - f.x;
+            const dy = M.y - f.y;
+            f.d = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'R' : 'L') : (dy > 0 ? 'D' : 'U');
+          } else f.d = pick(['L', 'R', 'U', 'D'] as const);
+          move(f, f.d);
+          if (Math.random() < 0.3 && bullets.filter((b) => !b.own).length < 4) shoot(f, g);
         }
       }
+      for (const b of bullets) {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+      }
+      bullets = bullets.filter((b) => {
+        if (b.x < 0 || b.y < 0 || b.x > N || b.y > N) return false;
+        const cx = Math.floor(b.x);
+        const cy = Math.floor(b.y);
+        const m2 = map[cy]?.[cx];
+        if (m2 === 1) {
+          const row = map[cy];
+          if (row) row[cx] = 0;
+          g.fx('hit');
+          return false;
+        }
+        if (m2 === 2) {
+          g.fx('hit');
+          return false;
+        } // 钢墙挡弹不碎
+        if (m2 === 3 || m2 === 4) return true; // 河与草不拦弹——子弹照飞（原作语义）
+        if (m2 === 9) {
+          base.alive = false;
+          g.fx('boom');
+          finish('你的笔记被擦了', false, g);
+          return false;
+        }
+        if (b.own && me) {
+          for (let i = 0; i < foes.length; i++) {
+            const f = foes[i];
+            if (f && f.x === cx && f.y === cy) {
+              foes.splice(i, 1);
+              if (Math.random() < 0.34) items.push({ x: cx, y: cy, k: pick(['star', 'shield', 'clock', 'shovel'] as const) });
+              g.fx('boom');
+              return false;
+            }
+          }
+        } else if (M.x === cx && M.y === cy) {
+          if (shield) {
+            shield = 0;
+            g.fx('hit');
+            return false;
+          }
+          lives--;
+          g.fx('boom');
+          if (lives <= 0) {
+            finish('坦克被打爆了', false, g);
+            return false;
+          }
+          M.x = 6;
+          M.y = 9;
+          return false;
+        }
+        return true;
+      });
+      if (!foes.length && left <= 0) {
+        if (level >= 3) {
+          finish('三关全通', true, g);
+          return;
+        }
+        level++;
+        left = 5 + level * 2;
+        buildMap();
+        foes = [];
+        spawnFoe();
+        g.fx('confirm');
+      }
+      g.setScore('敌 ' + (left + foes.length));
+      g.setLevel('第 ' + level + ' / 3 关 · 命 ' + lives);
     },
     draw: (g) => {
       const cv = document.getElementById('nsCv') as HTMLCanvasElement | null;
       const c = cv?.getContext('2d');
       if (!c) return;
-      const p = pal(g);
-      c.clearRect(0, 0, g.w(), g.h());
-      // 砖
-      for (let r = 0; r < N; r++) {
-        for (let cIdx = 0; cIdx < N; cIdx++) {
-          if (!walls[r]?.[cIdx]) continue;
-          c.fillStyle = p.soft;
-          c.fillRect(ox + cIdx * cell, oy + r * cell, cell - 1, cell - 1);
+      const P = pal(g);
+      const W = g.w();
+      const H = g.h();
+      const ox = (W - N * u) / 2;
+      const oy = (H - N * u) / 2;
+      c.clearRect(0, 0, W, H);
+      // 网格（弱化）
+      c.strokeStyle = P.line;
+      c.lineWidth = 1;
+      c.globalAlpha = 0.5;
+      for (let i = 1; i < N; i++) {
+        c.beginPath();
+        c.moveTo(ox, oy + i * u + 0.5);
+        c.lineTo(ox + N * u, oy + i * u + 0.5);
+        c.stroke();
+        c.beginPath();
+        c.moveTo(ox + i * u + 0.5, oy);
+        c.lineTo(ox + i * u + 0.5, oy + N * u);
+        c.stroke();
+      }
+      c.globalAlpha = 1;
+      // 地形（老版同款形态语言：砖=实底圆角、钢=虚线框、河=三道波纹、基地=品牌标）
+      c.lineWidth = 1.7;
+      c.lineJoin = 'round';
+      for (let yy = 0; yy < N; yy++) {
+        for (let xx = 0; xx < N; xx++) {
+          const v = map[yy]?.[xx] ?? 0;
+          if (!v) continue;
+          const bx = ox + xx * u;
+          const by = oy + yy * u;
+          if (v === 1) {
+            c.strokeStyle = P.fg;
+            c.fillStyle = P.boxBg;
+            rr(c, bx + 2, by + 2, u - 4, u - 4, 4);
+            c.fill();
+            c.stroke();
+          }
+          if (v === 2) {
+            c.strokeStyle = P.fg;
+            c.setLineDash([2.6, 2.4]);
+            rr(c, bx + 2, by + 2, u - 4, u - 4, 3);
+            c.stroke();
+            c.setLineDash([]);
+          }
+          if (v === 3) {
+            c.strokeStyle = P.accent;
+            c.globalAlpha = 0.75;
+            c.lineWidth = 1.4;
+            c.beginPath();
+            c.moveTo(bx + 3, by + u * 0.38);
+            c.lineTo(bx + u - 3, by + u * 0.38);
+            c.moveTo(bx + 3, by + u * 0.58);
+            c.lineTo(bx + u - 3, by + u * 0.58);
+            c.moveTo(bx + 3, by + u * 0.78);
+            c.lineTo(bx + u - 3, by + u * 0.78);
+            c.stroke();
+            c.globalAlpha = 1;
+            c.lineWidth = 1.7;
+          }
+          if (v === 9) {
+            // 基地 = 你的笔记：品牌「N」标（老版 nsBrandMark 的近似形）
+            c.strokeStyle = P.accent;
+            rr(c, bx + 3, by + 3, u - 6, u - 6, 4);
+            c.stroke();
+            c.fillStyle = P.accent;
+            c.font = 'bold ' + Math.round(u * 0.42) + 'px ui-monospace,Consolas,monospace';
+            c.textAlign = 'center';
+            c.textBaseline = 'middle';
+            c.fillText('N', bx + u / 2, by + u / 2 + 1);
+            c.textAlign = 'start';
+            c.textBaseline = 'alphabetic';
+          }
         }
       }
-      // 基地（你的笔记）
-      c.fillStyle = p.accent;
-      rr(c, ox + baseX * cell + 2, oy + baseY * cell + 2, cell - 4, cell - 4, 4);
-      c.fill();
-      txt(c, baseLabel.slice(0, 4), ox + (baseX + 0.5) * cell, oy + (baseY + 0.5) * cell, 10, p.bg);
-      // 坦克
-      c.fillStyle = p.fg;
-      rr(c, ox + px * cell + 2, oy + py * cell + 2, cell - 4, cell - 4, 4);
-      c.fill();
-      c.fillStyle = p.accent;
-      c.beginPath();
-      c.arc(ox + (px + 0.5) * cell, oy + (py + 0.5) * cell, cell * 0.16, 0, Math.PI * 2);
-      c.fill();
-    },
-    swipe: (d) => {
-      dir = d;
-    },
-    key: (down, e) => {
-      if (!down) return;
-      const m: Record<string, 'U' | 'D' | 'L' | 'R'> = {
-        ArrowUp: 'U', ArrowDown: 'D', ArrowLeft: 'L', ArrowRight: 'R',
-        w: 'U', s: 'D', a: 'L', d: 'R', W: 'U', S: 'D', A: 'L', D: 'R',
+      // 坦克（车体 + 炮塔 + 朝向炮管；我方带 accent 点）
+      const tank = (o: { x: number; y: number; d: 'U' | 'D' | 'L' | 'R' }, foe: boolean): void => {
+        const tx = ox + o.x * u;
+        const ty = oy + o.y * u;
+        c.lineWidth = 1.7;
+        c.strokeStyle = P.fg;
+        c.lineJoin = 'round';
+        rr(c, tx + 3, ty + u * 0.5, u - 6, u * 0.32, 3);
+        c.stroke();
+        rr(c, tx + u * 0.3, ty + u * 0.28, u * 0.4, u * 0.3, 3);
+        c.stroke();
+        const v = DIRV[o.d];
+        c.beginPath();
+        c.moveTo(tx + u / 2, ty + u / 2);
+        c.lineTo(tx + u / 2 + v[0] * u * 0.48, ty + u / 2 + v[1] * u * 0.48);
+        c.stroke();
+        if (!foe) {
+          c.fillStyle = P.accent;
+          c.beginPath();
+          c.arc(tx + u * 0.44, ty + u * 0.42, 1.6, 0, 7);
+          c.fill();
+        }
       };
-      const d = m[e.key];
-      if (d) dir = d;
+      for (const f of foes) tank(f, true);
+      if (me) tank(me, false);
+      // 道具金形：★ / 盾 / 钟 / 铲
+      for (const it of items) {
+        const ix = ox + it.x * u;
+        const iy = oy + it.y * u;
+        c.strokeStyle = P.accent;
+        c.lineWidth = 1.7;
+        c.beginPath();
+        if (it.k === 'star') {
+          const pts: Array<[number, number]> = [
+            [0.5, 0.2], [0.66, 0.46], [0.92, 0.5], [0.7, 0.68], [0.77, 0.94],
+            [0.5, 0.79], [0.23, 0.94], [0.3, 0.68], [0.08, 0.5], [0.34, 0.46],
+          ];
+          pts.forEach((p, i) => {
+            if (i) c.lineTo(ix + u * p[0], iy + u * p[1]);
+            else c.moveTo(ix + u * p[0], iy + u * p[1]);
+          });
+          c.closePath();
+        } else if (it.k === 'shield') {
+          rr(c, ix + u * 0.26, iy + u * 0.22, u * 0.48, u * 0.56, u * 0.12);
+        } else if (it.k === 'clock') {
+          c.arc(ix + u * 0.5, iy + u * 0.52, u * 0.28, 0, 7);
+        } else {
+          rr(c, ix + u * 0.24, iy + u * 0.26, u * 0.52, u * 0.48, 2);
+        }
+        c.stroke();
+      }
+      // 草画在车之后 = 藏车（老版原话）
+      for (let gy = 0; gy < N; gy++) {
+        for (let gx = 0; gx < N; gx++) {
+          if ((map[gy]?.[gx] ?? 0) !== 4) continue;
+          const qx = ox + gx * u;
+          const qy = oy + gy * u;
+          c.strokeStyle = P.muted;
+          c.globalAlpha = 0.55;
+          c.lineWidth = 1.4;
+          c.beginPath();
+          for (let k2 = 0; k2 < 3; k2++) {
+            c.moveTo(qx + 4 + k2 * 7, qy + u - 4);
+            c.lineTo(qx + 7 + k2 * 7, qy + 5);
+          }
+          c.stroke();
+          c.globalAlpha = 1;
+        }
+      }
+      // 子弹（我方 accent / 敌方 fg）
+      for (const b of bullets) {
+        c.fillStyle = b.own ? P.accent : P.fg;
+        c.beginPath();
+        c.arc(ox + b.x * u, oy + b.y * u, 2.6, 0, 7);
+        c.fill();
+      }
     },
   };
 }

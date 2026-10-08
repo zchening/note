@@ -53,7 +53,12 @@ export type FxName =
   | 'ign'
   | 'horn'
   | 'crack'
-  | 'win';
+  | 'win'
+  // 老项目同款音效名（坦克大战）：hit=弹被挡、boom=爆炸、pow=吃道具、confirm=过关联播
+  | 'hit'
+  | 'boom'
+  | 'pow'
+  | 'confirm';
 
 export interface GameDef {
   id: string;

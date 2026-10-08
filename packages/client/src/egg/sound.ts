@@ -88,6 +88,11 @@ const FX: Record<FxName, { semi: number; vol: number; seq?: number[] }> = {
   horn: { semi: 2, vol: 0.2 },
   crack: { semi: -2, vol: 0.14 },
   win: { semi: 12, vol: 0.2, seq: [0, 4, 9] },
+  // 老项目同款音效名（坦克大战）：hit=弹被挡、boom=爆炸、pow=吃道具、confirm=过关联播
+  hit: { semi: 0, vol: 0.1 },
+  boom: { semi: -9, vol: 0.26, seq: [0, -4, -9] },
+  pow: { semi: 5, vol: 0.18 },
+  confirm: { semi: 4, vol: 0.16, seq: [0, 4] },
 };
 
 export function buildSound(): Sound {
