@@ -81,6 +81,14 @@ export function fmtLate(at: string | number, now: number = Date.now()): string {
  * 🔴 为什么用"贴住光标"而不是"光标在中间"：用户点一下时间串想加提醒，
  *   光标可能落在任一字符之间。要求严格包含会经常失灵，用户会觉得"有时能加有时不能"。
  *
+ * 🔴🔴 多个候选时取**起点最靠前**的那个（更靠前的通常覆盖更长的整段），
+ *   与老项目 `matchTimeAt`（index.html:6299 `all.find(r => offset >= r.index && ...)`）
+ *   —— 那是在**按 index 升序**的数组上取第一个，等价于"起点最前"。
+ *   此前 bj 取的是**最短**的那个，当两个匹配都覆盖光标时会选错：
+ *   用户报障第 4 条「'周日19点' 有时显示成'添加今天19点'」——
+ *   「周日19点」起点在前、更长，却因"最短优先"被裸「19点」抢走。
+ *   起点相同时再取更长的（更具体）。
+ *
  * 🔴 老项目 v5.39 铁律：**已过期的时间串不浮 chip**（零打扰）。
  *   过期判定用 time-parse 给的 `expired` 字段（内含 30 秒容差），
  *   这里**不自己重算** —— 两处各算一次必然漂移，漂移的表现是"明明过期还能点添加"。
@@ -96,8 +104,10 @@ export function matchAtCaret(
     // 含前后沿：正好点在首字之前、或刚输完末字，都算命中
     if (offset < m.index || offset > m.index + m.length) continue;
     if (m.expired) continue;
-    // 多个候选时取最短的那个（更贴合用户点的那个具体的串）
-    if (!best || m.length < best.length) best = m;
+    // 起点最靠前优先；起点相同取更长者（更具体）
+    if (!best || m.index < best.index || (m.index === best.index && m.length > best.length)) {
+      best = m;
+    }
   }
   return best;
 }
@@ -105,13 +115,19 @@ export function matchAtCaret(
 /**
  * 给一段文本里的某个时间串算出 chip 要显示的「事项」。
  * 与 reconcile.itemOf 同源同串，避免两处切法不同。
+ *
+ * 🔴 chip 的 text 来自 `caretInfoIn`（**块级**，天然不含 '\n'），所以这里通常切不到换行；
+ *   但本函数与 `reconcile.itemOf` 共用"截到本行 + 20 字 + '…'"的口径，
+ *   两处必须逐字一致 —— 否则会出现"卡片事项 ≠ chip 事项 ≠ 提醒列表事项"。
  */
 export function itemForChip(text: string, m: TimeMatch, now: number = Date.now()): string {
   const all = collectTimeMatches(text, now);
   const next = all.find((x) => x.index > m.index);
-  const end = next ? next.index : text.length;
+  const nl = text.indexOf('\n', m.index + m.length);
+  let end = next ? next.index : text.length;
+  if (nl !== -1 && nl < end) end = nl;
   let s = text.slice(m.index + m.length, end);
   s = s.replace(/^[　\s:：、，,。.\-—]+/, '').trim();
   if (s !== '' && /^[^\p{L}\p{N}]+$/u.test(s)) return '';
-  return s;
+  return s.length > 20 ? s.slice(0, 20) + '…' : s;
 }

@@ -45,6 +45,7 @@ import {
 } from './local-cache.ts';
 import { dropPassVault, readPassVault, savePassVault } from './pass-vault.ts';
 import { deriveWriteKey } from './write-key.ts';
+import { fetchTextWithTimeout, FETCH_TIMEOUT_GET_MS, type TimedResponse } from './client.ts';
 
 export { clearCache, readCache, writeCache, cacheKeyOf };
 export type { CachedEnvelope };
@@ -100,19 +101,24 @@ async function fetchRemote(
   noteId: string,
   f: typeof fetch,
 ): Promise<{ kind: 'empty' } | { kind: 'env'; env: Envelope } | { kind: 'offline' } | { kind: 'broken' }> {
-  let res: Response;
+  let res: TimedResponse;
   try {
-    res = await f(`/api/note/${encodeURIComponent(noteId)}`, {
-      headers: { accept: 'application/json' },
-      cache: 'no-store',
-    });
+    // 🔴 8s 超时（老项目 `withTimeout(apiGet(), 8000)`，index.html:3488/3603）。
+    //   少了它，半死 socket 下解锁这一枪会**无限挂**：用户连笔记都打不开
+    //   （比"同步卡住"更早、更致命）。与 sync/client.ts 的轮询超时同源同一个坑。
+    res = await fetchTextWithTimeout(
+      `/api/note/${encodeURIComponent(noteId)}`,
+      { headers: { accept: 'application/json' }, cache: 'no-store' },
+      FETCH_TIMEOUT_GET_MS,
+      f,
+    );
   } catch {
     // 🔴 网络层失败。**不能**当成"笔记为空"—— 那会把用户已有正文清空。
     return { kind: 'offline' };
   }
   if (res.status === 429) return { kind: 'offline' };
   if (!res.ok) return { kind: 'offline' };
-  const text = await res.text();
+  const text = res.text;
   if (text.trim() === '') return { kind: 'empty' };
   try {
     const o = JSON.parse(text) as Partial<Envelope>;

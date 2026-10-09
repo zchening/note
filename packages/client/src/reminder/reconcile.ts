@@ -32,10 +32,25 @@ export function makeRemId(at: number, seed: string): string {
   return `r${at.toString(36)}${(h >>> 0).toString(36)}`;
 }
 
-/** 从一段纯文本里取"事项"：时间串之后到下一个时间串之前的文字。 */
+/**
+ * 从一段纯文本里取"事项"：**时间串所在那一行**里、时间串之后到下一个时间串之前的文字。
+ *
+ * 🔴🔴 必须按行截断（用户报障第 2 条「添加提醒时把事项下面一行或者几行的文字都加到事项里」）。
+ *   本函数吃的是 `flatten(doc)` 拼出来的**全文**（块间以 '\n' 相连），
+ *   而老项目 `itemAfterMatch`（index.html:6041）的 text 来自
+ *   `caretInfoInEditor()` —— **只含当前块**，所以天然不跨行。
+ *   少了这条换行截断，`end` 会一路切到 `text.length`（或下一个时间串），
+ *   把下面所有行一起当事项 ⇒ 提醒列表/卡片里出现多行文案。
+ *
+ * 🔴 截断到 20 字 + '…'：与老项目 `itemAfterMatch`（:6045
+ *   `s.length > 20 ? s.slice(0,20) + '…' : s`）同口径。chip 显示与真源 `Reminder.text`
+ *   用**同一份**切法，两处不同源就会出现"卡片事项 ≠ 正文事项"。
+ */
 export function itemOf(text: string, m: TimeMatch, all: readonly TimeMatch[]): string {
   const next = all.find((x) => x.index > m.index);
-  const end = next ? next.index : text.length;
+  const nl = text.indexOf('\n', m.index + m.length);
+  let end = next ? next.index : text.length;
+  if (nl !== -1 && nl < end) end = nl; // 本行行尾优先
   let s = text.slice(m.index + m.length, end);
   // 事项区以全角空格分隔（面板回写格式「YYYY-M-D H:MM　事项」），
   // 也允许普通空格/冒号/顿号 —— 但**只吃前导分隔符**，不砍中间的正文。
@@ -45,7 +60,7 @@ export function itemOf(text: string, m: TimeMatch, all: readonly TimeMatch[]): s
   //   判据用"全是标点"而不是列举符号 —— 列举永远漏，且漏一个就复现。
   //   🔴 只在**整段都**是符号时丢弃：正文里"（改线上）"这种带字的是合法事项，不能误杀。
   if (s !== '' && /^[^\p{L}\p{N}]+$/u.test(s)) return '';
-  return s;
+  return s.length > 20 ? s.slice(0, 20) + '…' : s;
 }
 
 /** 整篇文档的纯文本 + 每个块在全文里的偏移。 */
@@ -200,22 +215,42 @@ function markAll(
     //   判据用「起点在本块 且 终点也在本块」，而不是只看起点。
     const blockEnd = off + own.length;
     const inBlock = all.filter((m) => m.index >= off && m.index < blockEnd && m.index + m.length <= blockEnd);
-    if (Array.isArray(b.spans) && inBlock.length > 0) {
+    // 🔴🔴 **即使 inBlock 为空也必须重铺**（`Array.isArray(b.spans)` 单独成立即可）。
+    //   病态（用户报障第 5 条的真实形状）：用户在时间串上删掉一个数字 ⇒ 该块**再无时间串**
+    //   ⇒ inBlock 为空 ⇒ 旧实现整块跳过 ⇒ span 上旧的 `rem` **原样残留**，
+    //   而那条提醒已被判死、从 reminders 里移除 ⇒ 末尾 `normalize(out)` 里
+    //   validateDoc 找不到该 id ⇒ 抛 `E_SPAN_REM_MISSING`。
+    //   抛点（main.ts 的 update 监听）**没有 try/catch** ⇒ 整个监听器中断，
+    //   提醒不删、schedule() 不跑，页面报错 —— 即"第 5 条没修好"。
+    //   （R30 判据：真实形状的 span 带旧 rem，对账后 rem 必须消失。）
+    if (Array.isArray(b.spans)) {
       b.spans = markSpans(
         b.spans,
         inBlock.map((m) => {
           const ent = byAt.get(m.at);
-          let end = m.index - off + m.length;
+          const relStart = m.index - off;
+          let end = relStart + m.length;
           // 🔴 老项目 v6.3（remMatchesFor，index.html:3779-3785）逐字口径：
           //   已过期 → 删除线覆盖「时间串 + 分隔符 + 事项（≤20 字）」**整段**，
           //   不只是时间串；未来 → 只包时间串。done 段与事项同进退，
           //   用户编辑事项文本后下次对账重算（markAll 每次全量重算，天然幂等）。
           if (ent?.done) {
+            // 🔴🔴 删除线**不得越过本行下一个时间串 / 换行**（与 itemOf 的截断口径一致）。
+            //   越过就会与下一个时间串的 cut **重叠**，而旧 markSpans 对重叠 cut 不做处理
+            //   （仍按 c.start..c.end 切片）⇒ 重叠处正文被**再输出一遍** ⇒ 正文复制。
+            //   而 reconcileReminders 每次编辑器 update 都跑（main.ts）⇒ **每敲一个字膨胀一次**，
+            //   并随推送同步到服务器。最坏的一类静默数据损坏（R29 判据钉它）。
+            const next = inBlock.find((x) => x.index > m.index);
+            let cap = own.length;
+            if (next) cap = Math.min(cap, next.index - off);
+            const nl = own.indexOf('\n', relStart + m.length);
+            if (nl !== -1) cap = Math.min(cap, nl);
             const tail = own.slice(end);
             const lead = (tail.match(/^[·\s\u3000]+/) || [''])[0].length;
             if (lead < tail.length) end += lead + Math.min(20, tail.length - lead);
+            end = Math.min(end, cap);
           }
-          return { start: m.index - off, end: Math.min(end, own.length), rem: ent?.id };
+          return { start: relStart, end: Math.min(end, own.length), rem: ent?.id };
         }),
       );
     }
@@ -224,7 +259,18 @@ function markAll(
   }
 }
 
-/** 把 cuts 位置切开并挂 rem。返回新数组（不改原数组）。 */
+/** 把 cuts 位置切开并挂 rem。返回新数组（不改原数组）。
+ *
+ * 🔴🔴 两条承重纪律（都有判据钉）：
+ *   1. **未覆盖处一律不带 rem**。本函数是 rem 标记的**唯一**写入点，所以"没被 cut 盖住"
+ *      就等于"不该有下划线" ⇒ 必须显式摘掉旧 `rem`。漏了这条的后果是"残留 rem 指向
+ *      已判死的提醒 ⇒ normalize 抛 E_SPAN_REM_MISSING"（用户报障第 5 条的真实形状）。
+ *      ⚠️ `{...s}` 会把 `s.rem` 一起复制过去 —— 未覆盖段必须走 `stripRem()`，不能裸展开。
+ *   2. **重叠 cut 不得回退复制**。cut 由 markAll 算出，正常情况下互不重叠；
+ *      但"过期删除线 + 同行下一个时间串"这类形状一旦让 cut 重叠，
+ *      旧实现仍按 `text.slice(c.start, c.end)` 切片 ⇒ 重叠段被输出两遍 ⇒ 正文膨胀。
+ *      这里对每个 cut 取 `max(start, 已输出位置)`，完全被吃掉的 cut 直接跳过。
+ */
 function markSpans(
   spans: readonly Span[],
   cuts: ReadonlyArray<{ start: number; end: number; rem: string | undefined }>,
@@ -237,46 +283,40 @@ function markSpans(
       // 空 span 若是纯标记锚点，无处可挂 —— 直接丢（导出时 isEmptySpan 也会丢）
       continue;
     }
-    // 本 span 内的切点（绝对 → 相对）
+    // 本 span 内的切点（绝对 → 相对），按起点升序
     const mine = cuts
       .map((c) => ({
         start: Math.max(0, c.start - pos),
         end: Math.min(text.length, c.end - pos),
         rem: c.rem,
       }))
-      .filter((c) => c.end > c.start);
+      .filter((c) => c.end > c.start)
+      .sort((a, b) => a.start - b.start);
     if (mine.length === 0) {
-      out.push({ ...s });
-      pos += text.length;
-      continue;
-    }
-    // 🔴 覆盖不全（本 span 有部分没被任何切点盖住）→ 保持原样不挂标记。
-    //   把整段都挂上会让"会议 3月1日10:00 开始"整句都变下划线。
-    const covered = mine.reduce((acc, c) => acc + (c.end - c.start), 0);
-    if (covered < text.length) {
-      // 只在切点范围内挂，其余原样
-      let p = 0;
-      for (const c of mine.sort((a, b) => a.start - b.start)) {
-        if (c.start > p) out.push({ ...s, t: text.slice(p, c.start) });
-        if (c.rem) out.push({ ...s, t: text.slice(c.start, c.end), rem: c.rem });
-        else out.push({ ...s, t: text.slice(c.start, c.end) });
-        p = c.end;
-      }
-      if (p < text.length) out.push({ ...s, t: text.slice(p) });
+      // 本 span 不落在任何提醒上 ⇒ 摘掉可能残留的 rem
+      out.push(stripRem(s));
       pos += text.length;
       continue;
     }
     let p = 0;
-    for (const c of mine.sort((a, b) => a.start - b.start)) {
-      if (c.start > p) out.push({ ...s, t: text.slice(p, c.start) });
-      if (c.rem) out.push({ ...s, t: text.slice(c.start, c.end), rem: c.rem });
-      else out.push({ ...s, t: text.slice(c.start, c.end) });
+    for (const c of mine) {
+      if (c.end <= p) continue; // 已被前一个 cut 完整覆盖 ⇒ 跳过（不回退复制）
+      const cs = Math.max(c.start, p);
+      if (cs > p) out.push({ ...stripRem(s), t: text.slice(p, cs) });
+      if (c.rem) out.push({ ...s, t: text.slice(cs, c.end), rem: c.rem });
+      else out.push({ ...stripRem(s), t: text.slice(cs, c.end) });
       p = c.end;
     }
-    if (p < text.length) out.push({ ...s, t: text.slice(p) });
+    if (p < text.length) out.push({ ...stripRem(s), t: text.slice(p) });
     pos += text.length;
   }
   return out;
+}
+
+/** 复制一个 span 并摘掉 `rem`（未覆盖段专用，见 markSpans 纪律 1）。 */
+function stripRem(s: Span): Span {
+  const { rem: _dropped, ...rest } = s;
+  return rest as Span;
 }
 
 /**

@@ -670,13 +670,16 @@ test('BAK-NOTE-27 🔴 v3 信封缺失/多余/坏形状：少则补 null、多�
   }
 });
 
-test('BAK-NOTE-28 🔴 版本闸：v3 收、v4(未知) 拒；v3 可含 null 信封', () => {
+test('BAK-NOTE-28 🔴 版本闸：v3/v4 收、未知版本拒；v3 可含 null 信封', () => {
   // v3 正常收
   const v3 = encodeBakText(['alpha'], 1, null, [ENV_A]);
   assert.ok(decodeBakText(v3), 'v3 必须收');
-  // v4 拒（未知版本）
+  // v4 收（2026-10-09 起 v4 = 材料自带各篇口令，是**合法**版本，不再当"未知"）
   const v4 = rawManifest({ v: 4, ts: 1, f: ['alpha'], m: [], e: [ENV_A] });
-  assert.equal(decodeBakText(v4), null, '未知版本 v4 必须整份拒收');
+  assert.ok(decodeBakText(v4), 'v4 必须收（材料带各篇口令的版本）');
+  // v5 拒（未知版本）—— 版本闸只认 1..4，往后加版本必须同步改这一行
+  const v5 = rawManifest({ v: 5, ts: 1, f: ['alpha'], m: [], e: [ENV_A] });
+  assert.equal(decodeBakText(v5), null, '未知版本 v5 必须整份拒收');
   // v3 但 e 部分 null（混合态：有的篇没正文）
   const mixed = encodeBakText(['alpha', 'bravo'], 1, null, [ENV_A, null]);
   const bm = decodeBakText(mixed);

@@ -34,7 +34,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createImeGate, TYPE_ACTIVE_MS } from '../src/sync/ime-gate.ts';
-import { SyncClient, POLL_INTERVAL_MS } from '../src/sync/client.ts';
+import { SyncClient, POLL_INTERVAL_MS, fetchTextWithTimeout } from '../src/sync/client.ts';
 import { canonicalize, deriveKey, emptyDoc, encryptString } from '@bj/shared-schema';
 import { readFileSync } from 'node:fs';
 
@@ -282,7 +282,10 @@ test('SYNC-PUSH-01 🔴 conflict 态下用户编辑仍能推上去（不静默�
 
 test('SYNC-PUSH-02 🔴 conflict 态不再静默吞推送：必须走 resolve 或报错，不能零感知', async () => {
   const fs = await import('node:fs/promises');
-  const src = await fs.readFile(new URL('../src/sync/client.ts', import.meta.url), 'utf8');
+  // 🔴 去注释再匹配：noteEdit 的注释里就写着 'conflict'，留着注释则删掉真守卫也照样命中 ⇒ 恒绿。
+  const src = (await fs.readFile(new URL('../src/sync/client.ts', import.meta.url), 'utf8'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
   const seg = src.slice(src.indexOf('noteEdit(): void'), src.indexOf('noteEdit(): void') + 1200);
 
   // 🔴 承重：noteEdit 里必须显式处理 conflict 态。
@@ -298,7 +301,12 @@ test('SYNC-PUSH-02 🔴 conflict 态不再静默吞推送：必须走 resolve �
 
 test('SYNC-POLL-01 有 2 秒轮询，且 conflict/推送中不重拉', async () => {
   const fs = await import('node:fs/promises');
-  const src = await fs.readFile(new URL('../src/sync/client.ts', import.meta.url), 'utf8');
+  // 🔴🔴 必须**去注释**再匹配：pull 函数体里的注释就写着 'conflict' / 'pushing' / 'syncing'
+  //   （讲"为什么要有这些守卫"），留着注释的话，把真正的守卫删掉、正则照样命中 ⇒ **恒绿**
+  //   （本项目栽过的那类坑：断言"某段代码存在/不存在"，输入必须去注释后的代码）。
+  const src = (await fs.readFile(new URL('../src/sync/client.ts', import.meta.url), 'utf8'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
 
   assert.match(src, /POLL_INTERVAL_MS\s*=\s*2_?000/, '必须有 2 秒轮询基线（老项目 POLL_INTERVAL=2000）');
 
@@ -492,5 +500,482 @@ test('SYNC-POLL-04 从状态机事件发起的那次拉必须放行（不许被�
     c.stop();
     globalThis.fetch = saved;
     globalThis.EventSource = savedES;
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * SYNC-QUIET：用户报障第 7 条 —— idle 态的例行轮询必须静默
+ *
+ *   症状：没做任何编辑，底栏在「已同步」和「保存中」之间每 2 秒抖一次。
+ *   根因：轮询回调**无条件** `send('remote-arrived')` ⇒ idle→syncing（底栏「连接中…」），
+ *         拉完又回 idle ⇒ 内容一字未变却每 2 秒抖一次。
+ *   老项目不抖（唯一权威）：`poll()` 拉成功后无条件 `setStatus(true,'已同步')`，
+ *         轮询**从不产生中间态**（index.html:9933-9937）。
+ *   ⇒ 修法：idle 态走 `quietPoll()`，**先比内容再决定要不要进状态机**。
+ *
+ *   判据纪律：状态抖动是"状态序列"上的性质，**必须记录完整快照序列**再断言
+ *   "中间没有 syncing"，只断言最终态（idle）会让抖动实现照样全绿。
+ * ------------------------------------------------------------------ */
+
+/** 带快照序列采集的 harness（不用替身 push/pull，真跑网络通道 = fetch） */
+function quietHarness(over = {}) {
+  const snaps = [];
+  const errors = [];
+  let doc = over.doc ?? BASE;
+  const deps = {
+    noteId: over.noteId ?? 'quiet-probe',
+    key: over.key ?? null,
+    dk: over.dk ?? null,
+    getDoc: () => doc,
+    setDoc: (d) => { doc = d; },
+    onSnapshot: (s) => snaps.push(s.state),
+    onError: (m) => errors.push(m),
+    isOnline: over.isOnline ?? (() => true),
+  };
+  return { snaps, errors, deps, getDoc: () => doc };
+}
+
+test('SYNC-QUIET-01 🔴 idle 例行轮询、远端与本机一致 ⇒ 状态序列里**不许出现 syncing**', async () => {
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  const gets = [];
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    gets.push(m);
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    assert.equal(c.getState(), 'idle', '前置：远端==本机，start 后应落到 idle');
+    const getsAfterStart = gets.filter((m) => m === 'GET').length;
+
+    // 🔴🔴 承重点：清空快照序列，只观察「静默轮询」这一段。
+    //   若实现是"先 send('remote-arrived') 再拉"，这里必然录到 'syncing'。
+    h.snaps.length = 0;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+
+    assert.ok(
+      gets.filter((m) => m === 'GET').length > getsAfterStart,
+      '前置：轮询必须真的打了网络（否则这条判据什么都没测到）',
+    );
+    assert.deepEqual(
+      h.snaps,
+      [],
+      `🔴 内容没变时轮询不许动状态机（底栏抖动根因）：实测状态序列 ${JSON.stringify(h.snaps)}`,
+    );
+    assert.equal(c.getState(), 'idle', '内容没变，必须一直停在 idle（老项目『已同步』恒定）');
+    assert.deepEqual(h.errors, [], '内容没变不该有任何用户可见提示');
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-02 🔴 idle 例行轮询、远端**确实变了** ⇒ 必须采纳，不许静默吞掉真变化', async () => {
+  const DK = await deriveKey('pw');
+  const envSame = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const envNew = await encryptString(canonicalize(REMOTE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let n = 0;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    n += 1;
+    const env = n === 1 ? envSame : envNew; // 第一次拉 = 本机内容；之后远端改成 REMOTE
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    assert.equal(c.getState(), 'idle', '前置：初始应 idle');
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+
+    const texts = (h.getDoc().blocks ?? []).map((b) => (b.spans ?? []).map((s) => s.t).join(''));
+    assert.ok(
+      texts.includes('远端也改过'),
+      `🔴 静默轮询把真变化一起吞了：远端改动没进本机（${JSON.stringify(texts)}）`,
+    );
+    assert.equal(c.getState(), 'idle', '采纳远端后应收口到 idle');
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-03 🔴 idle 例行轮询遇网络失败 ⇒ 切 offline，且**不许先闪 syncing**', async () => {
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let fail = false;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    if (fail) throw new Error('network down');
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    assert.equal(c.getState(), 'idle', '前置：初始应 idle');
+
+    fail = true;
+    h.snaps.length = 0;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+
+    // 断网必须让用户看见（老项目 poll catch 会 setStatus(false,…)）
+    assert.equal(c.getState(), 'offline', `断网轮询必须落到 offline，实际 ${c.getState()}`);
+    // 🔴 反向（与 QUITE-01 同一条纪律）：不许走 idle→syncing→offline 两条边，
+    //   那会在底栏先闪一下「连接中…」——正是用户报障第 7 条要消除的抖动。
+    assert.ok(
+      !h.snaps.includes('syncing'),
+      `🔴 断网轮询不许先闪 syncing：实测序列 ${JSON.stringify(h.snaps)}`,
+    );
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-04 🔴 接线：轮询回调在 idle 态必须走 quietPoll，不许无条件 send(remote-arrived)', async () => {
+  const src = fs_read(new URL('../src/sync/client.ts', import.meta.url))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+  const at = src.indexOf('private startPoll(');
+  const end = src.indexOf('private async quietPoll(');
+  assert.ok(at >= 0 && end > at, '应能定位 startPoll 函数体');
+  const seg = src.slice(at, end);
+  assert.match(seg, /this\.state === 'idle'/, 'startPoll 必须对 idle 态单独分支（否则每 2 秒 send(remote-arrived) 抖底栏）');
+  assert.match(seg, /quietPoll\(\)/, 'idle 分支必须走静默轮询');
+  // 反向闸：idle 分支之后才允许无条件 send —— 用「quietPoll 出现在 send 之前」钉住顺序
+  assert.ok(
+    seg.indexOf('quietPoll()') < seg.indexOf("send('remote-arrived')"),
+    '🔴 idle 分支必须在 send(remote-arrived) 之前 return，否则 idle 照样抖',
+  );
+});
+
+test('SYNC-QUIET-05 🔴🔴 offline 态例行轮询连续失败 ⇒ 不许每 2 秒闪 syncing（对抗审 MAJOR-1）', async () => {
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let fail = false;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    if (fail) throw new Error('network down');
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    fail = true;
+    // 先落 offline
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'offline', `前置：断网必须已落 offline，实际 ${c.getState()}`);
+
+    // 🔴🔴 承重点：清空序列，再观察**两个**轮询周期。
+    //   此前 offline 落到 `send('remote-arrived')`（offline→syncing）再拉失败回 offline，
+    //   ⇒ 每 2 秒闪一次 syncing。老项目 poll catch 只 setStatus(false,…)，从不产生中间态。
+    h.snaps.length = 0;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS * 2 + 400));
+    assert.ok(
+      !h.snaps.includes('syncing'),
+      `🔴 offline 态轮询不许闪 syncing：实测状态序列 ${JSON.stringify(h.snaps)}`,
+    );
+    assert.equal(c.getState(), 'offline', '持续失败必须一直停在 offline');
+    assert.deepEqual(h.errors, [], 'offline 抖动不该产生用户可见错误');
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-06 🔴🔴 offline 态轮询拉成功且无改动 ⇒ 回 idle（网络恢复），不许永久停离线', async () => {
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let fail = false;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    if (fail) throw new Error('network down');
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    fail = true;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'offline', '前置：断网应落 offline');
+
+    fail = false;
+    h.snaps.length = 0;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'idle', `网络恢复后轮询应回 idle（已同步），实际 ${c.getState()}`);
+    assert.ok(
+      !h.snaps.includes('syncing'),
+      `回 idle 不许经过 syncing（否则又闪『连接中…』）：${JSON.stringify(h.snaps)}`,
+    );
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-07 🔴 非 2xx：5xx 必须降级 offline（不许谎报已同步），429 静默退避', async () => {
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let status = 200;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    if (status !== 200) return { ok: false, status, text: async () => '', json: async () => ({}) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    assert.equal(c.getState(), 'idle', '前置：初始 idle');
+
+    // 429：静默退避，停在 idle（老项目把 429 排除在"同步中断"之外）
+    status = 429;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'idle', '429 必须静默退避，不惊扰底栏');
+
+    // 🔴 5xx：必须降级 offline —— 否则服务端持续 500 时底栏永久谎报『已同步』而内容不更新
+    status = 500;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'offline', `5xx 必须降级 offline，实际 ${c.getState()}`);
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-08 🔴🔴 idle 静默轮询遇解密失败 ⇒ 不许静默谎报『已同步』（对抗审 MAJOR 回归）', async () => {
+  // 形状：「他端改了口令」—— 远端信封本机 key 解不开。
+  // 改前 idle 轮询走 pull ⇒ 解密失败会 onError + offline；静默轮询若静默 return，
+  // 则底栏永久『已同步』而内容再也不更新（最坏的一类静默降级）。
+  const DK = await deriveKey('pw');
+  const DKother = await deriveKey('other-pw');
+  const envOk = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const envBad = await encryptString(canonicalize(BASE), DKother.key, 'note', DKother);
+  const saved = globalThis.fetch;
+  let useBad = false;
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    const env = useBad ? envBad : envOk;
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    // 🔴 反向（前置）：正常信封时不许报错、不许降级
+    assert.equal(c.getState(), 'idle', '前置：正常信封 ⇒ idle');
+    assert.deepEqual(h.errors, [], '前置：正常时无任何用户可见错误');
+
+    useBad = true; // 远端变成本机解不开的信封
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'offline', `解密失败必须降级 offline，实际 ${c.getState()}`);
+    assert.ok(
+      h.errors.some((m) => /解密|口令/.test(m)),
+      `解密失败必须给出用户可见错误（不许静默），实际 ${JSON.stringify(h.errors)}`,
+    );
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-QUIET-09 🔴🔴 offline 态轮询遇 200+空体 ⇒ 必须回 idle（服务器可达），不许永久停离线', async () => {
+  // 🔴 病根（对抗审 MINOR）：pullInner 对 200+空体发 `pulled`→idle，
+  //   而 quietPoll 曾在此**静默 return** ⇒ offline 态下服务端可达却返回空体时，
+  //   `offline --pulled--> idle` 那条边永远走不到 ⇒ 底栏永久停在『离线中』。
+  //   这条判据钉住两条路径的**同口径**（同一 HTTP 结果 ⇒ 同一状态收场）。
+  const DK = await deriveKey('pw');
+  const env = await encryptString(canonicalize(BASE), DK.key, 'note', DK);
+  const saved = globalThis.fetch;
+  let mode = 'env'; // 'env' | 'fail' | 'empty'
+  globalThis.fetch = async (url, init) => {
+    const m = (init && init.method) || 'GET';
+    if (m !== 'GET') return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    if (mode === 'fail') throw new Error('network down');
+    if (mode === 'empty') return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(env), json: async () => env };
+  };
+
+  const h = quietHarness({ doc: BASE, key: DK.key, dk: DK });
+  const c = new SyncClient(h.deps);
+  try {
+    await c.start();
+    assert.equal(c.getState(), 'idle', '前置：远端==本机 ⇒ idle');
+
+    mode = 'fail';
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'offline', '前置：断网应落 offline');
+
+    // 服务器恢复可达，但这篇在服务端**确实没有**（200+空体）
+    mode = 'empty';
+    h.snaps.length = 0;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 400));
+    assert.equal(c.getState(), 'idle', `200+空体 = 服务器可达 ⇒ 必须回 idle，实际 ${c.getState()}`);
+    assert.ok(
+      !h.snaps.includes('syncing'),
+      `回 idle 不许经过 syncing（否则又闪『连接中…』）：${JSON.stringify(h.snaps)}`,
+    );
+  } finally {
+    c.stop();
+    globalThis.fetch = saved;
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * SYNC-TIMEOUT：半死 socket —— 对抗审 MAJOR
+ *
+ *   症状：TCP 连着但服务端不回包 ⇒ 裸 fetch 永不 resolve ⇒ quietPoll/pull 的
+ *         `finally { this.pulling = false }` 永不执行 ⇒ pulling 永久 true ⇒
+ *         startPoll/SSE/refresh/retryPull 四个入口全早退 ⇒ 同步静默死，
+ *         而底栏仍显示『已同步』。
+ *   老项目依据：`withTimeout(apiGet(), 12000)`（index.html:9934），注释即
+ *         「半死 socket 下 fetch 不再无限挂冻结状态条（『同步中断/连接中…』卡死根因）」。
+ * ------------------------------------------------------------------ */
+
+test('SYNC-TIMEOUT-01 🔴🔴 fetch 永不 resolve ⇒ fetchTextWithTimeout 必须超时 reject（否则 pulling 永久锁死）', async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => new Promise(() => {}); // 永不 settle（半死 socket）
+  try {
+    const t0 = Date.now();
+    await assert.rejects(() => fetchTextWithTimeout('/api/note/x', {}, 50), /timeout/);
+    assert.ok(Date.now() - t0 < 2_000, '必须在超时后立刻 settle，不许跟着 fetch 一起挂死');
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-TIMEOUT-02 反向：fetch 在超时内返回 ⇒ 原样透传，不误伤正常请求', async () => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => '{}' });
+  try {
+    const r = await fetchTextWithTimeout('/api/note/x', {}, 5_000);
+    assert.equal(r.status, 200, '正常 fetch 必须原样返回');
+    assert.equal(r.text, '{}', '返回的是已读好的纯文本（读体也在超时窗口内）');
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test('SYNC-TIMEOUT-03 🔴 接线：quietPoll 与 pullInner 两条 GET 必须走 fetchTextWithTimeout（不许裸 fetch）', () => {
+  // 🔴 去注释再匹配（注释里写着 fetch/fetchTextWithTimeout，留着会恒绿）
+  const src = fs_read(new URL('../src/sync/client.ts', import.meta.url))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+  // 反向（全文件）：不许还有裸 fetch 的 GET 拉取
+  assert.ok(!/await fetch\(`\/api\/note\//.test(src), '不许还有裸 fetch 的 GET 拉取路径（半死 socket 会挂死 pulling）');
+
+  // 正向：**逐方法体**断言，而不是数全文件里 `fetchTextWithTimeout(` 的个数。
+  //   🔴 对抗审 nit：早先写 `uses.length >= 2` 是**弱断言** —— claim/push 两个 POST
+  //      也走了同一封装，光数个数可被 POST 满足，而注释声称的"两条 GET 都覆盖"
+  //      根本没被钉住（quietPoll/pullInner 任一退回裸 fetch 也照样绿）。
+  //      切片到方法体，才能让"这两条 GET"名副其实。
+  const sliceMethod = (text, name) => {
+    const m = new RegExp(`private async ${name}\\(`).exec(text);
+    if (!m) return '';
+    const open = text.indexOf('{', m.index);
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return text.slice(m.index, i + 1);
+      }
+    }
+    return '';
+  };
+  for (const name of ['quietPoll', 'pullInner']) {
+    const body = sliceMethod(src, name);
+    assert.ok(body.length > 0, `必须能从 client.ts 切出 ${name} 的方法体`);
+    assert.ok(
+      /fetchTextWithTimeout\(\s*`\/api\/note\//.test(body),
+      `${name} 的远端 GET 必须走 fetchTextWithTimeout（不许裸 fetch）`,
+    );
+    assert.ok(!/await fetch\(/.test(body), `${name} 方法体内不许有裸 fetch 的拉取`);
+  }
+});
+
+test('SYNC-TIMEOUT-04 🔴 注入的 fetch 也走同一条超时（解锁/出码那两枪不许绕过）', async () => {
+  // 🔴 解锁（unlock.ts）与出码（main.ts 的 fetchBakNote）用的是**外部注入**的 fetch，
+  //   若只给 client.ts 的裸 fetch 加超时，半死 socket 只是从"同步卡住"挪到
+  //   "连笔记都打不开 / 出码永远转圈" —— 同一个坑没填上。
+  //   这条判据直接证明 fetchTextWithTimeout 的第 4 参（注入 f）同样受超时保护。
+  const never = () => new Promise(() => {});
+  const t0 = Date.now();
+  await assert.rejects(() => fetchTextWithTimeout('/api/note/x', {}, 50, never), /timeout/);
+  assert.ok(Date.now() - t0 < 2_000, '注入的 f 永不 settle 时，必须在超时后立刻 reject');
+
+  // 反向：注入的 f 在超时内返回 ⇒ 原样透传（不误伤正常请求）
+  const okF = async () => ({ ok: true, status: 200, text: async () => '{}' });
+  const r = await fetchTextWithTimeout('/api/note/x', {}, 5_000, okF);
+  assert.equal(r.status, 200, '注入的 f 正常返回时必须原样透传');
+});
+
+test('SYNC-TIMEOUT-05 🔴 接线：解锁与出码的 GET 也必须走超时（不许裸 f(...)）', () => {
+  // 🔴 去注释再匹配（注释里写着 fetchTextWithTimeout/f()，留着会恒绿）
+  const strip = (u) =>
+    fs_read(u).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+
+  const unlock = strip(new URL('../src/sync/unlock.ts', import.meta.url));
+  assert.ok(
+    /fetchTextWithTimeout\(\s*`\/api\/note\//.test(unlock),
+    'unlock.ts 的远端 GET 必须走 fetchTextWithTimeout',
+  );
+  // 反向：裸 f(`/api/note/…`) 只应剩 rekey 的 POST 一处
+  //   （老项目 apiPut 不套超时，逐字承接 —— 不是漏改）
+  const bareUnlock = unlock.match(/f\(`\/api\/note\//g) ?? [];
+  assert.equal(bareUnlock.length, 1, `unlock.ts 裸 f() 的 /api/note 只应剩 rekey 的 POST 一处，实际 ${bareUnlock.length}`);
+
+  const main = strip(new URL('../src/main.ts', import.meta.url));
+  assert.ok(
+    /fetchTextWithTimeout\(\s*`\/api\/note\//.test(main),
+    'main.ts 的 fetchBakNote GET 必须走 fetchTextWithTimeout',
+  );
+  // 反向：裸 f(`/api/note/…`) 只应剩 putBakNote 的 POST 一处
+  //   （老项目 apiPutTo 不套超时，逐字承接 —— 这里不是漏改，是有意保留）
+  const bare = main.match(/f\(`\/api\/note\//g) ?? [];
+  assert.equal(bare.length, 1, `main.ts 裸 f() 的 /api/note 调用只应剩 POST 一处，实际 ${bare.length}`);
+});
+
+test('SYNC-TIMEOUT-06 🔴🔴 响应头到了但读体挂死 ⇒ 仍在超时窗口内 reject（只填一半等于没填）', async () => {
+  // 🔴 对抗审 MINOR：老项目 `withTimeout(apiGet(), 8000)` 里 apiGet 是
+  //   `const r = await fetch(...); return await r.json();` —— **读体在窗口内**。
+  //   若封装只 race 到"拿到 Response"就解除超时，则"服务端发了响应头后卡住 body"
+  //   仍会挂死：unlock 永久转圈、quietPoll 的 pulling 永久 true。本判据钉死读体也在窗口内。
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: () => new Promise(() => {}) });
+  try {
+    const t0 = Date.now();
+    await assert.rejects(() => fetchTextWithTimeout('/api/note/x', {}, 50), /timeout/);
+    assert.ok(Date.now() - t0 < 2_000, '读体挂死也必须在超时后立刻 settle，否则 unlock/quietPoll 仍会永久挂');
+  } finally {
+    globalThis.fetch = saved;
   }
 });

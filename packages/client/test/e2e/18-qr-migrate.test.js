@@ -1329,13 +1329,22 @@ test('BAK-M 甲案换机备份（清单进云端备份笔记，码只装链接�
       // 警示必须含那个 <br> 断句（老项目 :823 逐字）
       assert.ok(card.warn.includes('这里只能读取，不能编辑'), '警示首句不对，实际=' + card.warn);
       assert.ok(card.warn.includes('回到旧设备上点「扫码换机」'), '警示次句不对，实际=' + card.warn);
-      // 🔴🔴 2026-10-09（用户报障第 8 条）：老项目那半句**逐字保留**，其后追加
-      //   「旧设备不在手边时可在下方本机重建」—— 因为本卡下方新加了重建按钮。
-      //   这条判据钉的就是"提示与本卡实际能力对得上"（说只能回旧设备 = 自相矛盾）。
+      // 🔴🔴 2026-10-09 v4（用户报障「备份笔记携带各篇自己的口令」）：恢复卡**去掉**了
+      //   口令框与「本机重建」按钮 —— 材料自带各篇口令 ⇒ 恢复零输入，且收藏变更会自动
+      //   刷新备份笔记（main.ts refreshBakNote）⇒ 不再需要重建入口。
+      //   警示文案因此**回到老项目 :823 原文**，那句「旧设备不在手边时可在下方本机重建」
+      //   随按钮一起退役（留着一句指向不存在的按钮 = 自相矛盾）。
       assert.ok(
-        card.warn.includes('旧设备不在手边时可在下方本机重建'),
-        '警示必须追加本机重建的去路（用户报障第 8 条），实际=' + card.warn,
+        !card.warn.includes('本机重建'),
+        '🔴 v4 已去掉本机重建按钮 ⇒ 警示里绝不许再提「本机重建」（实际=' + card.warn + '）',
       );
+      // 🔴 「不应该有」：口令框与重建按钮的 DOM 都必须不存在（v4 零输入恢复的承重断言）。
+      const gone = await dst.evaluate(() => ({
+        pass: document.getElementById('bakRestPass') !== null,
+        rebuild: document.getElementById('bakRestRebuild') !== null,
+      }));
+      assert.equal(gone.pass, false, 'v4 恢复卡不该有口令输入框（材料自带 p ⇒ 零输入）');
+      assert.equal(gone.rebuild, false, 'v4 恢复卡不该有本机重建按钮（收藏变更自动刷新备份笔记）');
       assert.equal(card.go, '恢复这 1 篇', '恢复键文案应为「恢复这 N 篇」，实际=' + card.go);
       assert.equal(card.cancel, '先看看', '次键文案应为「先看看」（老项目 :825 逐字）');
       // 恢复键是主键（不是 ghost-btn），次键才是 ghost-btn（老项目同款）

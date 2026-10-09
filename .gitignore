@@ -56,3 +56,6 @@ Thumbs.db
 
 # push_bj_apk.py 生成的本地元数据（真源在服务器 deploy/，不入库）
 tools/latest_app.json
+
+# html 分享工具产物（可再生成，不入库）
+.trae-html-share-packages/

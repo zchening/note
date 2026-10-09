@@ -166,17 +166,32 @@ test('F10 🔴 过期判定只认 time-parse 的 expired 字段，matchAtCaret �
   assert.equal(matchAtCaret('3月1日10:00', 0, NOW), null);
 });
 
-test('F11 matchAtCaret 多个时间串时取最短的那个（更贴合点的那个）', () => {
-  const text = '3月1日10:00 与 3月1日';
+test('F11 🔴 多个候选在相接处同时命中 ⇒ 取**起点最前**的（与老项目 all.find 同款）', () => {
+  // 🔴 用户报障第 4 条：「周日19点 …」有时被识别成「今天19点」。
+  //   老项目 matchTimeAt（index.html:6299）在**按 index 升序**的数组上
+  //   `find(offset >= r.index && …)` ⇒ 取第一个 ⇒ 起点最前（通常也最长、最具体）。
+  //   bj 旧实现取**最短**的 ⇒ 相接处会选到后面那个更短的串。
+  //
+  //   collectTimeMatches 返回**非重叠**匹配，所以只有"前一个的终点 == 后一个的起点"
+  //   时两个串才会同时覆盖同一偏移 —— 这就是唯一的"多候选"形状。
+  const text = '3月2日10:00明天10点';
   const all = collectTimeMatches(text, NOW);
-  const big = all.find((m) => m.length > 5);
-  assert.ok(big);
-  // 落在「3月1日」内部的偏移，若短的那个也覆盖它，应取短的
-  const short = all.find((m) => m.length < 5);
-  if (short) {
-    const r = matchAtCaret(text, short.index, NOW);
-    assert.equal(r.length, short.length, '取最短命中');
-  }
+  assert.equal(all.length, 2, '前置：两个时间串都要被解析出来');
+  const long = all[0]; // 3月2日10:00（len 9）
+  const short = all[1]; // 明天10点（len 5）
+  assert.equal(text.slice(long.index, long.index + long.length), '3月2日10:00');
+  assert.equal(text.slice(short.index, short.index + short.length), '明天10点');
+  assert.equal(short.index, long.index + long.length, '前置：两者在边界相接');
+  assert.equal(long.expired, false, '前置：长串不能是过期串（过期不浮 chip，会被跳过）');
+
+  // 边界偏移：两个串都覆盖它 ⇒ 必须取起点最前的长串
+  const r = matchAtCaret(text, short.index, NOW);
+  assert.equal(r.index, long.index, '相接处取起点最前的那个（更长、更具体）');
+  assert.equal(r.length, long.length);
+
+  // 🔴 反向：只被短串覆盖的偏移（不与长串重叠）⇒ 必须取短串，不许"永远取最前"
+  const r2 = matchAtCaret(text, short.index + 2, NOW);
+  assert.equal(r2.index, short.index, '只被短串覆盖时取短串');
 });
 
 test('F12 matchAtCaret 空串与无命中', () => {
@@ -205,4 +220,20 @@ test('F15 itemForChip 带字的小尾巴是合法事项（不能误杀）', () =
   const text = '3月1日10:00（改线上）';
   const m = collectTimeMatches(text, NOW)[0];
   assert.ok(itemForChip(text, m, NOW).includes('改线上'), '纯标点才丢，带字的要留');
+});
+
+test('F16 🔴 itemForChip 事项不跨行（用户报障第 2 条：加提醒吞掉下面几行）', () => {
+  // 旧实现 end 一路切到下一个时间串或 text.length ⇒ 把下面几行也当事项。
+  // 与 reconcile.itemOf 共用"截到本行行尾"的口径，两处必须逐字一致。
+  const text = '3月1日10:00 开会\n第二行内容\n第三行内容';
+  const m = collectTimeMatches(text, NOW)[0];
+  assert.equal(itemForChip(text, m, NOW), '开会', '必须只取时间串所在那一行');
+});
+
+test('F17 itemForChip 事项超 20 字截断加省略号（与老项目 itemAfterMatch :6045 同口径）', () => {
+  const text = '3月1日10:00 ' + '一二三四五六七八九十'.repeat(3); // 30 字
+  const m = collectTimeMatches(text, NOW)[0];
+  const it = itemForChip(text, m, NOW);
+  assert.equal(it, '一二三四五六七八九十一二三四五六七八九十…', '20 字 + 省略号');
+  assert.equal(it.length, 21);
 });

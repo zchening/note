@@ -437,3 +437,76 @@ test('U3 过期且正文找不到时间串 ⇒ 照旧判死（done 不豁免对�
   assert.equal(rec.removed.length, 1, '时间串没了照旧判死');
   assert.deepEqual(rec.doc.reminders ?? [], []);
 });
+
+/* ═════════════ W 系：用户报障第 2/5 条（事项截断 / 编辑时间自动删）════════════ */
+
+test('R27 🔴 itemOf 事项不跨行（用户报障第 2 条：把下面几行都当事项）', () => {
+  // itemOf 吃的是 flatten(doc) 拼的**全文**（块间 '\n'），必须按行截断 ——
+  // 否则 end 会切到 text.length（或下一个时间串），把下面所有行一起当事项。
+  const text = '3月2日09:00 开会\n第二行内容\n第三行内容';
+  const all = collectTimeMatches(text, NOW);
+  assert.equal(itemOf(text, all[0], all), '开会', '必须只取时间串所在那一行');
+  // 🔴 反向：同一行内、下一个时间串之前的正文要完整保留（不许切过头）
+  const two = '3月2日09:00 开会 10:00 述职';
+  const all2 = collectTimeMatches(two, NOW);
+  assert.ok(itemOf(two, all2[0], all2).includes('开会'), '同一行内的事项要保留');
+  assert.ok(!itemOf(two, all2[0], all2).includes('述职'), '不许吞掉下一个时间串之后的正文');
+});
+
+test('R28 🔴 编辑时间串（删一个数字）⇒ 提醒自动判死（用户报障第 5 条）', () => {
+  let doc = normalize(docOf('3月1日09:44 开会'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 9, 44).getTime(), '开会').doc);
+  assert.equal((doc.reminders ?? []).length, 1, '前置：提醒已加');
+  // 用户在「44」上删掉一个 4 ⇒ 正文里的时间串不再成立 ⇒ 提醒必须判死
+  const rec = reconcileReminders(editText(doc, '3月1日09:4 开会'), NOW);
+  assert.equal(rec.removed.length, 1, '时间串被编辑后提醒必须自动消失');
+  assert.deepEqual(rec.doc.reminders ?? [], []);
+  // 🔴 反向：没编辑时不许判死（判据必须能区分两种情形）
+  assert.equal(reconcileReminders(doc, NOW).removed.length, 0, '未编辑时不许误判死');
+});
+
+/* ═════════ R29/R30：reconcile.ts:238-242 / :218-225 两处承重守卫的单测 ═════════
+ * 🔴 这两条此前**只被注释引用、没有判据**（对抗审 MAJOR）：
+ *   reconcile.ts 的注释写着「R29 判据钉它」「R30 判据：…」，而测试只到 R28
+ *   ⇒ 两个承重守卫可静默回归。补上，且都要"能红"（旧实现下会失败）。
+ */
+
+test('R29 🔴 过期删除线与同行下一个时间串相邻 ⇒ 正文不许被复制（不膨胀）', () => {
+  // 形状：同一行两个时间串，都过期（NOW=10:00 ⇒ 09:00 与 10:00 均 at<=now ⇒ done）。
+  // 过期删除线会把「时间+分隔+事项≤20字」整段划上，于是第一条的 cut 会**越过**
+  // 第二个时间串 ⇒ 与第二条的 cut **重叠**。旧 markSpans 对重叠 cut 仍按
+  // slice(c.start,c.end) 切片 ⇒ 重叠段被输出两遍 ⇒ 正文膨胀（且每次 update 再涨一次）。
+  let doc = normalize(docOf('3月1日09:00 开会 3月1日10:00 述职'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 9, 0).getTime(), '开会').doc);
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 10, 0).getTime(), '述职').doc);
+  assert.equal((doc.reminders ?? []).length, 2, '前置：两条提醒都在');
+  const before = fullText(doc);
+  const rec = reconcileReminders(doc, NOW);
+  // 正向：正文一字不多、一字不少（复制 = 变长，丢字 = 变短，都算失败）
+  assert.equal(fullText(rec.doc), before, '对账不许改变正文文本');
+  // 反向：幂等 —— 再跑一次仍不变（旧实现每跑一次膨胀一次，第二次必然不等）
+  assert.equal(fullText(reconcileReminders(rec.doc, NOW).doc), before, '对账幂等，正文不膨胀');
+});
+
+test('R30 🔴 块内已无时间串但 span 残留旧 rem ⇒ 必须摘除（防 E_SPAN_REM_MISSING）', () => {
+  // 形状（用户报障第 5 条的真实形状）：先在 09:44 上加提醒并让对账标上 rem；
+  // 再模拟 contenteditable 原地改字（删掉一个数字）—— 文本变了，rem 字段原样留着。
+  // 此刻该块**再无时间串** ⇒ markAll 的 inBlock 为空 ⇒ 旧实现整块跳过 ⇒ rem 残留
+  // ⇒ 末尾 normalize(out) 里 validateDoc 找不到该 id ⇒ 抛 E_SPAN_REM_MISSING。
+  let doc = normalize(docOf('3月1日09:44 开会'));
+  doc = normalize(addReminder(doc, new Date(2027, 2, 1, 9, 44).getTime(), '开会').doc);
+  doc = reconcileReminders(doc, NOW).doc; // 这一步把 rem 标到 span 上
+  const remId = (doc.reminders ?? [])[0].id;
+  assert.ok(remTexts(doc).length > 0, '前置：span 上确实挂了 rem');
+  const edited = {
+    v: 1,
+    blocks: [{ t: 'p', spans: [{ t: '3月1日09:4 开会', rem: remId }] }],
+    reminders: doc.reminders,
+  };
+  // 🔴 旧实现会在这里抛 E_SPAN_REM_MISSING（残留 rem 指向已被判死的提醒）
+  const rec = reconcileReminders(edited, NOW);
+  assert.equal(remTexts(rec.doc).length, 0, '块内无时间串时残留的 rem 必须被摘掉');
+  assert.deepEqual(rec.doc.reminders ?? [], [], '提醒已判死');
+  // 🔴 反向：正文文字不许被这段摘除动作动到
+  assert.equal(fullText(rec.doc), '3月1日09:4 开会', '摘的是标记，不是文字');
+});

@@ -45,22 +45,13 @@ export interface BakRestoreCardDeps {
   /**
    * 点「恢复这 N 篇」。返回成功文案；失败时抛错或返回失败文案由调用方决定。
    * 🔴 面板**不持有**任何恢复逻辑 —— 与 migrate/panel.ts 的口令纪律同款：
-   *   面板只收用户输入、只渲染，副作用全在 deps 里。
+   *   面板只渲染、只回调，副作用全在 deps 里。
    *
-   * 🔴🔴 `passphrase` 是「口令（本批共用）」输入框里的内容，**可能是空串**
-   *   （用户没填）。空串的语义是"用扫码那条路已经带进来的口令"，
-   *   由调用方决定（见 main.ts showBakRestoreCard 的 `entered || initial`）。
-   *   面板自己不判空、不兜底 —— 它不认识 sessionPass，也不该认识。
+   * 🔴🔴 没有 `passphrase` 形参了（用户报障 v4）：清单里的材料自带**各篇自己的口令**
+   *   （`BakMaterial.p`），恢复端逐篇派生 + 自证即可，**零输入**。
+   *   面板不再收任何口令 ⇒ 口令也不进 DOM（此前那个"本批共用"输入框已删）。
    */
-  onGo: (passphrase: string) => Promise<string>;
-  /**
-   * 🔴🔴 点「在这台设备重建备份笔记」（用户报障第 8 条：旧设备不在手边，无法重新生成）。
-   *
-   * 不传 ⇒ 该按钮**根本不渲染**（恢复卡的默认形态仍与老项目一致）。
-   * 传了 ⇒ 在「恢复」下面多一枚 ghost 按钮。返回成功文案，失败抛错。
-   * `passphrase` 语义与 `onGo` 同款。
-   */
-  onRebuild?: (passphrase: string) => Promise<string>;
+  onGo: () => Promise<string>;
   /** 点「先看看」/关闭。只读态**不归还编辑器焦点**（老项目 :9238 的刻意不补）。 */
   onCancel: () => void;
   /** 时间戳格式化（老项目 fmtSyncTime）。注入避免本模块引时间层。 */
@@ -129,39 +120,20 @@ export function buildBakRestoreCard(deps: BakRestoreCardDeps): BakRestoreCard {
   // 老项目 :823 原文含 <br>，且它是**本模块自产的常量**（不是用户输入）⇒ innerHTML 安全
   warn.innerHTML = COPY.bakRestWarnHtml;
 
-  /* ── 口令（本批共用）输入 ──
-   * 🔴🔴 用户报障第 3/8 条：恢复端逐篇自证要一把口令，通常由扫码带进来，
-   *   但若用户给收藏夹各篇设了同一把别的口令，在这里填一次即可整批免输。
-   *   🔴 绝不预填：留空 = "用扫码带的那把"（口令不进 DOM 的既有纪律）。 */
-  const passWrap = document.createElement('div');
-  passWrap.id = 'bakRestPassWrap';
-  const pass = document.createElement('input');
-  pass.type = 'password';
-  pass.id = 'bakRestPass';
-  pass.placeholder = COPY.bakRestPassPh;
-  pass.autocomplete = 'off';
-  passWrap.appendChild(pass);
-
+  /* ── 按钮 ──
+   * 🔴🔴 v4 起**没有口令框**（材料自带各篇口令 ⇒ 恢复零输入），
+   *   也**没有重建按钮**（收藏变更会自动刷新备份笔记，见 main.ts refreshBakNote）。
+   *   形态回到老项目 :817-827 那一版：警示 + 「恢复」 + 「先看看」。 */
   const go = document.createElement('button');
   go.id = 'bakRestGo';
   go.textContent = COPY.bakRestGo(deps.ids.length);
-
-  // 🔴 重建按钮只在调用方给了 onRebuild 时渲染（默认形态仍与老项目一致）。
-  let rebuild: HTMLButtonElement | null = null;
-  if (deps.onRebuild) {
-    rebuild = document.createElement('button');
-    rebuild.id = 'bakRestRebuild';
-    rebuild.className = 'ghost-btn';
-    rebuild.textContent = COPY.bakRestRebuild;
-  }
 
   const cancel = document.createElement('button');
   cancel.id = 'bakRestCancel';
   cancel.className = 'ghost-btn';
   cancel.textContent = COPY.bakRestCancel;
 
-  box.append(title, summary, list, warn, passWrap, go);
-  if (rebuild) box.appendChild(rebuild);
+  box.append(title, summary, list, warn, go);
   box.append(cancel);
   mask.appendChild(box);
   document.body.appendChild(mask);
@@ -169,12 +141,6 @@ export function buildBakRestoreCard(deps: BakRestoreCardDeps): BakRestoreCard {
   const teardown = (): void => {
     document.removeEventListener('keydown', onKey, true);
     closeBakRestoreCard();
-    // 🔴 口令绝不残留在 DOM 里（同 panel.ts teardown 的 pass.value = ''）。
-    try {
-      pass.value = '';
-    } catch {
-      /* ignore */
-    }
     deps.onCancel();
   };
 
@@ -187,62 +153,24 @@ export function buildBakRestoreCard(deps: BakRestoreCardDeps): BakRestoreCard {
     go.disabled = true;
     // 🔴 老项目 :9242 逐字：按下去先变「正在恢复…」，别让用户以为没点上而连点
     go.textContent = COPY.bakRestWorking;
-    if (rebuild) rebuild.disabled = true;
     void (async () => {
       try {
-        const msg = await deps.onGo(pass.value);
+        const msg = await deps.onGo();
         // 成功文案由调用方给（老项目 :9270 那句带篇数与覆盖数，本项目 favRestoreTip 同款）
         list.textContent = msg;
         // 恢复完就地改成结果态：清单原文没必要留着（用户已经恢复完了）
         warn.textContent = '';
-        passWrap.remove();
         go.remove();
-        rebuild?.remove();
         cancel.textContent = COPY.migrateDoneClose;
       } catch {
         // 🔴 失败必须**留在能看见的态**，且 go 重新可点
         //   （失败文案由调用方用 showUploadNote 之类给到屏幕上）。
         go.disabled = false;
         go.textContent = COPY.bakRestGo(deps.ids.length);
-        if (rebuild) rebuild.disabled = false;
       }
     })();
   });
-
-  // 🔴🔴 「在这台设备重建备份笔记」（用户报障第 8 条）。
-  //   与「恢复」互斥：重建期间两枚按钮一起禁用，防止并发写同一篇备份笔记。
-  //   成功后就地报结果（重建不跳页 —— 用户的收藏夹没变，只是云端那篇刷新了）。
-  if (rebuild && deps.onRebuild) {
-    const doRebuild = deps.onRebuild;
-    rebuild.addEventListener('click', () => {
-      rebuild.disabled = true;
-      go.disabled = true;
-      const oldLabel = rebuild.textContent;
-      rebuild.textContent = COPY.bakRestRebuilding;
-      void (async () => {
-        try {
-          const msg = await doRebuild(pass.value);
-          list.textContent = msg;
-        } catch (e) {
-          // 🔴 失败如实说（网络/离线/口令不对各有其因），按钮恢复可点让用户重试。
-          list.textContent = e instanceof Error ? e.message : String(e);
-        } finally {
-          rebuild.disabled = false;
-          go.disabled = false;
-          rebuild.textContent = oldLabel;
-        }
-      })();
-    });
-  }
   cancel.addEventListener('click', teardown);
-
-  // 🔴 回车 = 点「恢复」（与 migrate/panel.ts 的 onEnter 同款纪律）。
-  pass.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      go.click();
-    }
-  });
 
   return { el: mask, close: teardown };
 }

@@ -46,6 +46,13 @@
  *     （前提：收藏夹里各篇用的是同一个口令，这正是老项目的模型）。
  *     材料的生产与验证在 bak-materials.ts，本模块只管**编解码与版本**。
  *
+ *   🔴🔴 **v4 补上"各篇口令不同"那半边**（用户报障「备份笔记携带各篇自己的口令」）：
+ *     v3 的自证只在"各篇口令 == 扫码那把"时成立；用户收藏夹里各篇口令不同 ⇒
+ *     仍逐篇弹口令框。v4 在材料里再带 `p`（该篇自己的口令，见 `BakMaterial.p`），
+ *     恢复端**零输入**逐篇派生 —— 与老项目"装 raw key"对用户是同一体验。
+ *     整份清单仍由备份笔记密钥加密后上云（零知识不变量不变），
+ *     拿到清单明文 == 拿到各篇口令，与老项目"拿到清单 == 拿到全部 raw key"同等级。
+ *
  * ── 二维码载荷为什么是**配对链接**而不是老项目的 `#k=` 密钥链接 ──────────────
  *   老项目 `#k=<base64(rawKey)>`：扫到即零输入解锁。
  *   bj 导不出 raw 字节 ⇒ 唯一能装进码的是**口令** ⇒ 载荷形态自然落到
@@ -234,6 +241,24 @@ export interface BakMaterial {
   s: string;
   /** 自证块：用该篇真密钥加密的定长常量明文。解不开 ⇒ 口令不匹配。 */
   c: string;
+  /**
+   * 🔴🔴 v4：该篇**自己的口令**（用户报障「备份笔记携带各篇自己的口令」）。
+   *
+   *   `s` + `p` 合起来就是"该篇的钥匙的可复原形式"（key = PBKDF2(p, s)），
+   *   所以恢复端**零输入**即可逐篇派生并自证 —— 无论各篇口令是否相同。
+   *   这正是老项目"清单装 raw key"（`out.push([id, k])`）在 bj 架构下的等价物：
+   *   bj 的 key 是 extractable:false 导不出，但 `p` + `s` 派生出的就是同一把。
+   *
+   * 🔴 安全口径（别误读成"向老项目看齐就变弱了"）：整份清单由**备份笔记的密钥**
+   *   加密后才上云 —— 服务器只见密文，零知识不变量**不因本字段改变**。
+   *   拿到备份笔记明文（= 拿到二维码里的备份口令）确实等于拿到各篇口令，
+   *   这与老项目"拿到清单 = 拿到全部 raw key"是**同一等级**，不是新的退化。
+   *   （v3 的 `c` 自证块仍在：`p` 缺失时照旧走"外部口令 + 自证"那条路。）
+   *
+   *   🔴 缺失（本机没读到该篇的口令保险箱）⇒ 那篇不豁免，照常要口令。
+   *     绝不"猜"、绝不拿别的篇的口令顶上。
+   */
+  p?: string;
 }
 
 /** 清单明文结构。键序固定，compact 序列化（同 fav-backup.ts 的口径）。
@@ -245,18 +270,29 @@ export interface BakMaterial {
  */
 interface BakManifest {
   /** 1 = v1（只有篇名，老版本）；2 = v2（篇名 + 每篇材料）；
-   *  3 = v3（篇名 + 材料 + **每篇的密文信封**，自包含收藏备份，见文件头）。 */
-  v: 1 | 2 | 3;
+   *  3 = v3（篇名 + 材料 + **每篇的密文信封**，自包含收藏备份，见文件头）；
+   *  4 = v4（在 v3 基础上，材料里再带**每篇自己的口令** `p` ⇒ 恢复零输入，
+   *      用户报障「备份笔记携带各篇自己的口令」）。 */
+  v: 1 | 2 | 3 | 4;
   ts: number;
   /** 篇名，保序去重。**只有篇名，永远没有密钥**（见文件头）。 */
   f: string[];
   /** 与 `f` 同下标的材料。v1 为空数组；缺料的那篇是 null。 */
   m: (BakMaterial | null)[];
-  /** 与 `f` 同下标的**密文信封**（v3 才有；缺内容的那篇是 null）。
+  /** 与 `f` 同下标的**密文信封**（v3/v4 才有；缺内容的那篇是 null）。
    * 🔴🔴 这是 v3 自包含收藏备份的核心：把每篇的加密正文**也**带进备份笔记，
    *   恢复端直接 re-push + 写缓存，无需服务器恰好有正文、也无需逐篇问口令。
    *   信封是非机密的密文，零知识属性不因此改变（见本文件头）。 */
   e: (Envelope | null)[];
+}
+
+/** 单篇材料 → 紧凑 JSON。`p` 只在 v4 且确实带了口令时出现。 */
+function materialJson(x: BakMaterial | null): string {
+  if (x === null) return 'null';
+  const base = '{"s":' + JSON.stringify(x.s) + ',"c":' + JSON.stringify(x.c);
+  return x.p !== undefined
+    ? base + ',"p":' + JSON.stringify(x.p) + '}'
+    : base + '}';
 }
 
 function manifestJson(m: BakManifest): string {
@@ -267,17 +303,15 @@ function manifestJson(m: BakManifest): string {
     //   多写一个 `"m":[]` 就让那条判据与历史清单的假设分叉。
     return '{"v":1,"ts":' + m.ts + ',"f":[' + f + ']}';
   }
-  const mm = m.m
-    .map((x) => (x === null ? 'null' : '{"s":' + JSON.stringify(x.s) + ',"c":' + JSON.stringify(x.c) + '}'))
-    .join(',');
+  const mm = m.m.map(materialJson).join(',');
   if (m.v === 2) {
     return '{"v":2,"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + ']}';
   }
-  // v3：在 v2 基础上再带 `e`（每篇密文信封，紧凑序列化）。
+  // v3 / v4：在 v2 基础上再带 `e`（每篇密文信封，紧凑序列化）。
   const ee = m.e
     .map((x) => (x === null ? 'null' : envJsonCompact(x)))
     .join(',');
-  return '{"v":3,"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + '],"e":[' + ee + ']}';
+  return '{"v":' + m.v + ',"ts":' + m.ts + ',"f":[' + f + '],"m":[' + mm + '],"e":[' + ee + ']}';
 }
 
 /** 信封 → 紧凑 JSON（键序由代码决定，与 fav-backup.ts 的 envJsonCompact 同款）。 */
@@ -335,7 +369,7 @@ export const PROOF_AAD = 'meta';
 /** 单篇材料的形状校验。**任何一项不满足返回 null**（= 那篇不豁免，走正常口令）。 */
 function parseMaterial(u: unknown): BakMaterial | null {
   if (typeof u !== 'object' || u === null) return null;
-  const o = u as { s?: unknown; c?: unknown };
+  const o = u as { s?: unknown; c?: unknown; p?: unknown };
   if (typeof o.s !== 'string' || o.s === '') return null;
   if (typeof o.c !== 'string' || o.c === '') return null;
   // 🔴 salt 的形状闸：base64 的 16 字节是 24 字符（含 ==）。
@@ -343,7 +377,11 @@ function parseMaterial(u: unknown): BakMaterial | null {
   //   crypto.ts:102 那边 `salt.length < 8` 会抛，而那报错会指向"口令不对"，
   //   与病因（清单里这一条是坏的）十万八千里。
   if (o.s.length < 8) return null;
-  return { s: o.s, c: o.c };
+  const mat: BakMaterial = { s: o.s, c: o.c };
+  // 🔴 v4 的 `p` 是**可选**：形状不对（非字符串/空串）就当没有 ⇒ 那篇退回"要口令"，
+  //   绝不把坏数据当口令喂给 deriveKey（那会抛，且报错指向"口令不对"，误导）。
+  if (typeof o.p === 'string' && o.p !== '') mat.p = o.p;
+  return mat;
 }
 
 /**
@@ -403,14 +441,30 @@ export function encodeBakText(
   }
   const anyMat = kept.some((x) => x !== null);
   const anyEnv = keptEnvs.some((x) => x !== null);
+  // 🔴 v4 = 材料里带了**至少一篇自己的口令**（恢复零输入，用户报障）。
+  //   只要有一篇带 `p` 就升 v4 —— 因为 `p` 只写在材料 JSON 里，
+  //   版本号必须让解码端知道"要按 v4 读"，否则 `parseMaterial` 会把它当 v2/v3 忽略。
+  const anyPass = kept.some((x) => x !== null && x.p !== undefined);
   const json = manifestJson({
-    v: anyEnv ? 3 : anyMat ? 2 : 1,
+    v: anyPass ? 4 : anyEnv ? 3 : anyMat ? 2 : 1,
     ts,
     f: out,
     m: anyMat || anyEnv ? kept : [],
     e: anyEnv ? keptEnvs : [],
   });
-  return BAK_TEXT_PREFIX + b64ToB64Url(btoa(json));
+  // 🔴🔴🔴 `btoa` 只吃 Latin-1：v4 起 `p` 是**用户口令原样**（可能是中文/emoji），
+  //   `JSON.stringify` 默认**不转义**非 ASCII ⇒ 直接 `btoa` 抛 InvalidCharacterError
+  //   ⇒ 整个出码失败（且症状是"备份功能坏了"，与口令内容毫无关联，极难自查）。
+  //   转成 `\uXXXX` 转义后 JSON 是纯 ASCII，`JSON.parse`（解码侧）会自动还原。
+  //   🔴 不能用 TextEncoder 走"UTF-8 字节 → btoa"那条路（pair-link.ts 是那样）：
+  //     那样解出来是**字节串**，还得再 UTF-8 解码；这里 JSON 本身要的是"能 parse 的
+  //     字符串"，转义才是正解（且对代理对/emoji 同样正确：逐 UTF-16 码元转义）。
+  return BAK_TEXT_PREFIX + b64ToB64Url(btoa(asciiJson(json)));
+}
+
+/** 把 JSON 串里的非 ASCII 全部转成 `\uXXXX`（btoa 只吃 Latin-1，见调用点注释）。 */
+function asciiJson(s: string): string {
+  return s.replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 }
 
 /**
@@ -448,9 +502,9 @@ export function decodeBakText(text: string): { ids: string[]; ts: number; mats: 
   }
   if (typeof o !== 'object' || o === null) return null;
   const m = o as Partial<BakManifest>;
-  // 🔴 版本闸：v1（老备份，只��篇名）与 v2（带材料）都收，其余拒收。
+  // 🔴 版本闸：v1（老备份，只有篇名）～ v4（带每篇口令）都收，其余拒收。
   //   注意这是**升版后唯一**的版本判断点 —— 降级/再升版都只改这一行。
-  if (m.v !== 1 && m.v !== 2 && m.v !== 3) return null;
+  if (m.v !== 1 && m.v !== 2 && m.v !== 3 && m.v !== 4) return null;
   if (!Array.isArray(m.f) || m.f.length === 0) return null;
   const out: string[] = [];
   const seen = new Set<string>();
@@ -467,11 +521,11 @@ export function decodeBakText(text: string): { ids: string[]; ts: number; mats: 
   if (out.length === 0) return null;
   // 🔴 材料多于篇数 ⇒ 整份拒收（清单被改过，或生成侧有 bug）。
   //   静默截到篇数会让"清单里多出来的那份材料"变成一份对不上的账。
-  const rawMats = (m.v === 2 || m.v === 3) && Array.isArray(m.m) ? m.m : [];
+  const rawMats = m.v >= 2 && Array.isArray(m.m) ? m.m : [];
   if (rawMats.length > out.length) return null;
-  // 🔴 v3 的信封允许多于篇数（多出来的忽略，不拒收整份 —— 信封丢了顶多是那篇没内容，
+  // 🔴 v3/v4 的信封允许多于篇数（多出来的忽略，不拒收整份 —— 信封丢了顶多是那篇没内容，
   //   比"因为一份坏数据把 99 篇好笔记一起卡住"轻）。
-  const rawEnvs = m.v === 3 && Array.isArray(m.e) ? m.e : [];
+  const rawEnvs = (m.v === 3 || m.v === 4) && Array.isArray(m.e) ? m.e : [];
   const mats: (BakMaterial | null)[] = [];
   const envs: (Envelope | null)[] = [];
   for (let i = 0; i < out.length; i++) {

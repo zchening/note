@@ -383,6 +383,30 @@ test('FSM-15 SyncDeps 同时提供两条通道，且 onInternalError 是可选�
   );
 });
 
+test('FSM-17 🔴 idle --network-fail--> offline：静默轮询断网要能落 offline，且不许先闪 syncing', () => {
+  // 用户报障第 7 条配套：idle 态例行轮询（client.ts quietPoll）断网时，
+  // 必须能把底栏切成「离线中」——老项目 poll 的 catch 就是 setStatus(false,…)。
+  assert.equal(canTransition('idle', 'network-fail'), true, 'idle 直连 offline 必须合法，否则断网只能走 idle→syncing→offline 两条边');
+  assert.equal(reduce('idle', 'network-fail'), 'offline', '静默轮询拉失败必须落 offline');
+  // 🔴 反向：补这条边**不许**顺手放开 idle 的推送类事件（离线/空闲时推送在语义上就是错的）
+  assert.equal(canTransition('idle', 'push'), false, 'idle 不许直接 push');
+  assert.equal(canTransition('idle', 'pushed'), false, 'idle 不许直接 pushed');
+  assert.equal(canTransition('idle', 'merge-clean'), false, 'idle 不许直接 merge-clean');
+});
+
+test('FSM-18 🔴 offline --pulled--> idle：静默轮询网络恢复要能回「已同步」，且不许永久停 offline', () => {
+  // 用户报障第 7 条配套（对抗审 MAJOR-1）：offline 态例行轮询拉成功且无改动 ⇒ 网络恢复，
+  // 必须能回 idle。没有这条边时 offline 只能靠 window 'online' 事件回 idle，
+  // 而"navigator.onLine 恒 true 但服务端不可达"（隧道/半死 socket）时浏览器不派发 'online'
+  // ⇒ 底栏永久停在『离线中』。
+  assert.equal(canTransition('offline', 'pulled'), true, 'offline 必须能回 idle，否则网络恢复后永久停离线');
+  assert.equal(reduce('offline', 'pulled'), 'idle', '拉成功且无改动 ⇒ 已同步');
+  // 🔴 反向：不许顺手放开 offline 的推送类事件（离线时推送在语义上就是错的）
+  assert.equal(canTransition('offline', 'push'), false, 'offline 不许直接 push');
+  assert.equal(canTransition('offline', 'pushed'), false, 'offline 不许直接 pushed');
+  assert.equal(canTransition('offline', 'merge-clean'), false, 'offline 不许直接 merge-clean');
+});
+
 test('FSM-16 🔴 采纳远端必须刷新本机离线缓存（S4：不刷 = 离线重开读到静默回滚的旧版）', async () => {
   // 场景：两次拉取之间本地没改（local == base）→ 走 client.ts 的"直接采纳"分支。
   // 🔴 该分支此前只 setDoc 不写缓存 ⇒ 缓存里还是第一次 pull 的旧信封，

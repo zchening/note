@@ -36,6 +36,7 @@ import assert from 'node:assert/strict';
 import {
   collectBakMaterials,
   makeBakMaterial,
+  materialPass,
   proveBakMaterial,
   proveBakMaterials,
 } from '../src/migrate/bak-materials.ts';
@@ -245,6 +246,197 @@ test('BAK-MAT-06 端到端：出码装材料 → 编码 → 解码 → 免输', 
   assert.deepEqual(r2.needPass, ids);
 });
 
+/* ── v4：材料自带各篇自己的口令（用户报障「备份笔记携带各篇自己的口令」）────── */
+
+const BAK_PREFIX = 'notesync-bak:1:';
+function manifestJson(text) {
+  return Buffer.from(
+    text.slice(BAK_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/'),
+    'base64',
+  ).toString('utf8');
+}
+
+test('BAK-MAT-08 makeBakMaterial 的 p 字段：有口令才写，空/缺省不写', async () => {
+  const dk = await deriveKey('口令甲');
+  // 「不应该有」：不传 / 空串 ⇒ 不得写 p（那篇恢复时照旧回落备份码口令 + 自证）
+  assert.equal((await makeBakMaterial(dk)).p, undefined, '不传口令不得写 p');
+  assert.equal((await makeBakMaterial(dk, '')).p, undefined, '空串不得写 p');
+  // 「应该有」：传了口令 ⇒ 原样写进 p
+  assert.equal((await makeBakMaterial(dk, '口令甲')).p, '口令甲', '传了口令必须写 p');
+});
+
+test('BAK-MAT-09 materialPass：材料自带 p 优先，没有才回落（出码/恢复共用）', () => {
+  assert.equal(materialPass({ s: 'x'.repeat(8), c: 'y', p: '甲' }, '乙'), '甲', '有 p 必须用 p');
+  assert.equal(materialPass({ s: 'x'.repeat(8), c: 'y' }, '乙'), '乙', '无 p 回落');
+  assert.equal(materialPass(null, '乙'), '乙', '没材料回落');
+  assert.equal(materialPass(undefined, '乙'), '乙', 'undefined 回落');
+  assert.equal(materialPass({ s: 'x'.repeat(8), c: 'y', p: '' }, '乙'), '乙', '空 p 视同没有');
+});
+
+test('BAK-MAT-10 🔴🔴 v4 端到端：各篇口令不同，材料自带 p ⇒ 恢复**零输入**全免输', async () => {
+  // 三篇各设各的口令（正是老项目"装 raw key"能覆盖、而 v3 覆盖不到的场景）
+  const ids = ['n1', 'n2', 'n3'];
+  const mats = [
+    await makeBakMaterial(await deriveKey('口令甲'), '口令甲'),
+    await makeBakMaterial(await deriveKey('口令乙'), '口令乙'),
+    await makeBakMaterial(await deriveKey('口令丙'), '口令丙'),
+  ];
+
+  // 编码升 v4 + p 往返保留
+  const text = encodeBakText(ids, 1, mats);
+  assert.ok(manifestJson(text).startsWith('{"v":4,'), '材料带 p 必须编 v4');
+  const back = decodeBakText(text);
+  assert.ok(back, 'v4 必须能解码');
+  assert.deepEqual(back.mats.map((m) => m && m.p), ['口令甲', '口令乙', '口令丙'], 'p 必须随材料往返');
+
+  // 恢复：fallback 口令**完全为空**（模拟"记忆解锁进来、sessionPass 为空"）
+  //   —— 材料自带 p ⇒ 三篇全部免输。这正是用户诉求的落点。
+  const put = [];
+  const r = await proveBakMaterials(back.ids, back.mats, '', async (id) => {
+    put.push(id);
+  });
+  assert.deepEqual(r.exempt, ids, '三篇不同口令也必须全部免输');
+  assert.deepEqual(r.needPass, [], '不该有需要口令的篇');
+  assert.deepEqual(put, ids, '报数必须与实际 put 一致');
+
+  // 🔴🔴 反向闸：把 p 全剥掉 ⇒ 同一批材料在空 fallback 下**全 needPass**。
+  //   这条证明"p 是承重的"，而不是"随便怎么都能免输"（恒绿陷阱）。
+  const stripped = back.mats.map((m) => ({ s: m.s, c: m.c }));
+  let n = 0;
+  const r2 = await proveBakMaterials(back.ids, stripped, '', async () => {
+    n++;
+  });
+  assert.equal(n, 0, '没有 p 且 fallback 为空 ⇒ 零 put');
+  assert.deepEqual(r2.needPass, ids, '没有 p 就必须逐篇要口令');
+});
+
+test('BAK-MAT-11 v4 升档闸：材料带 p ⇒ v4；无 p ⇒ 不得误升 v4', async () => {
+  const withP = encodeBakText(['a'], 1, [await makeBakMaterial(await deriveKey('x'), 'p')], null);
+  assert.ok(manifestJson(withP).startsWith('{"v":4,'), '有 p 编 v4');
+  const noP = encodeBakText(['a'], 1, [await makeBakMaterial(await deriveKey('x'))], null);
+  const j2 = manifestJson(noP);
+  assert.ok(j2.startsWith('{"v":2,'), '无 p 的材料仍是 v2，不得误升 v4');
+  assert.ok(!/,"p":/.test(j2), 'v2 不得写 p 字段');
+});
+
+test('BAK-MAT-12 collectBakMaterials 的 passFor 通路：读到就写进材料，抛错不连坐', async () => {
+  const ids = ['a', 'b'];
+  const deriveFor = async () => deriveKey('统一');
+  const mats = await collectBakMaterials(ids, deriveFor, (id) => {
+    if (id === 'a') return 'A的口令';
+    throw new Error('vault boom'); // 保险箱读失败
+  });
+  assert.equal(mats[0].p, 'A的口令', '读到的口令必须写进材料');
+  assert.ok(mats[0].s, '材料本身照常产出');
+  assert.equal(mats[1].p, undefined, 'passFor 抛错的篇不写 p（不连坐）');
+  assert.ok(mats[1].s, '抛错也不能让那篇整份没材料');
+});
+
+test('BAK-MAT-13 🔴 p 的形状闸：坏 p（非串/空）当没有，不喂进 deriveKey', async () => {
+  const dk = await deriveKey('口令甲');
+  const mat = await makeBakMaterial(dk, '口令甲');
+  // 与生产 encodeBakText 同款：非 ASCII 转 \uXXXX 再 btoa（否则 atob 侧是 Latin-1 乱码）
+  const wrap = (p) => {
+    const json = JSON.stringify({ v: 4, ts: 1, f: ['a'], m: [{ s: mat.s, c: mat.c, p }], e: [] })
+      .replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+    return (
+      BAK_PREFIX +
+      Buffer.from(json, 'latin1').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    );
+  };
+
+  for (const bad of [123, null, '', true, {}]) {
+    const back = decodeBakText(wrap(bad));
+    assert.ok(back, `坏 p=${JSON.stringify(bad)} 不该让整份作废`);
+    assert.equal(back.mats[0].p, undefined, `非字符串/空 p=${JSON.stringify(bad)} 必须被丢弃`);
+  }
+  // 反向闸：合法 p 必须保留（防止"上面几条把实现改成永远丢 p"）
+  assert.equal(decodeBakText(wrap('口令甲')).mats[0].p, '口令甲', '合法 p 必须保留');
+});
+
+test('BAK-MAT-14 🔴🔴 非 ASCII 口令不得让 encodeBakText 抛（btoa 只吃 Latin-1）', async () => {
+  // 回归：v4 起 `p` 是用户口令原样，JSON.stringify 默认不转义非 ASCII
+  // ⇒ 直接 btoa 抛 InvalidCharacterError ⇒ 出码整个失败（症状与口令内容无关，极难自查）。
+  for (const pass of ['口令甲🔑', 'pässwörd', '😀emoji', '中文口令']) {
+    const dk = await deriveKey(pass);
+    const text = encodeBakText(['a'], 1, [await makeBakMaterial(dk, pass)], null);
+    assert.ok(text, `口令 ${JSON.stringify(pass)} 必须能出码（不得抛）`);
+    const back = decodeBakText(text);
+    assert.ok(back, `口令 ${JSON.stringify(pass)} 必须能解码`);
+    assert.equal(back.mats[0].p, pass, `非 ASCII 口令必须逐字往返（${JSON.stringify(pass)}）`);
+    // 真自证通过：派生出的钥匙必须解得出自证块
+    assert.ok(await proveBakMaterials(back.ids, back.mats, '', async () => {}).then((r) => r.exempt.length === 1));
+  }
+});
+
+test('BAK-MAT-15 🔴🔴 回传 effPass：p 自证失败回落到备份码口令成功时，回传备份码口令（不是那个错的 p）', async () => {
+  // 病态场景（对抗审 MAJOR）：材料自带 p 与自证块不一致
+  //   （多设备 keystore 不同步 / 生成侧 bug）。真钥由「真口令」派生，但 p 写成了「假口令」。
+  const dk = await deriveKey('真口令');
+  const bad = await makeBakMaterial(dk, '假口令');
+
+  const seen = [];
+  const r = await proveBakMaterials(['a'], [bad], '真口令', async (id, _dk, effPass) => {
+    seen.push([id, effPass]);
+  });
+  assert.deepEqual(r.exempt, ['a'], '回落口令能自证 ⇒ 必须免输');
+  // 🔴 承重：回传的必须是**真正通过自证**的「真口令」，而不是材料里那个错的 p。
+  //   回传错的 p ⇒ 保险箱记错口令 + 凭据派生错 ⇒ 那篇改完存不进服务器（full 档 403）。
+  assert.deepEqual(seen, [['a', '真口令']], '回传的必须是实际自证成功的口令');
+
+  // 反向闸 1：p 正确时，回传的就是 p（防"上面改成永远回传 fallback"的假修）
+  const good = await makeBakMaterial(await deriveKey('甲口令'), '甲口令');
+  const seen2 = [];
+  await proveBakMaterials(['a'], [good], '备份码口令', async (id, _dk, effPass) => {
+    seen2.push([id, effPass]);
+  });
+  assert.deepEqual(seen2, [['a', '甲口令']], 'p 正确时必须回传 p');
+
+  // 反向闸 2：p 与回落口令**都**失败 ⇒ 零 put、零回传
+  let n = 0;
+  const r3 = await proveBakMaterials(['a'], [bad], '又一个错口令', async () => {
+    n++;
+  });
+  assert.equal(n, 0, '两次都失败必须零 put');
+  assert.deepEqual(r3.needPass, ['a']);
+});
+
+test('BAK-MAT-16 🔴🔴🔴 第二道自证：材料自证通过但钥匙打不开该篇信封 ⇒ 绝不写钥匙', async () => {
+  // 该篇真实信封：真钥由「真口令」派生
+  const realDk = await deriveKey('真口令');
+  const env = await encryptString('正文内容', realDk.key, 'note', realDk);
+  // 材料由**另一把错钥匙**自证（p 也写错口令）⇒ 材料自证会通过，但那把钥匙打不开 env。
+  //   正是"多设备 keystore 不同步"的形状：材料自洽，却指向一把打不开正文的钥匙。
+  const wrongDk = await deriveKey('假口令');
+  const mat = await makeBakMaterial(wrongDk, '假口令');
+
+  let n = 0;
+  const r = await proveBakMaterials(['n'], [mat], '假口令', async () => {
+    n++;
+  }, [env]);
+  // 「不应该有」：绝不许 putKey（写进去 = 空编辑器 + 零报错 = 静默数据丢失）
+  assert.equal(n, 0, '钥匙打不开该篇信封 ⇒ 一篇都不许 putKey');
+  assert.deepEqual(r.exempt, [], '不许谎报已免输');
+  assert.deepEqual(r.needPass, ['n'], '必须如实计入 needPass');
+
+  // 反向闸 1：真材料 + 真信封 ⇒ 通过（防"上面改成永远 needPass"的假修）
+  const goodMat = await makeBakMaterial(realDk, '真口令');
+  const put = [];
+  const r2 = await proveBakMaterials(['n'], [goodMat], '真口令', async (id) => {
+    put.push(id);
+  }, [env]);
+  assert.deepEqual(put, ['n'], '钥匙解得开信封 ⇒ 必须免输');
+  assert.deepEqual(r2.exempt, ['n']);
+
+  // 反向闸 2：不给 envs ⇒ 退回材料自证口径（错钥匙会被豁免）——
+  //   钉住"第二道自证确实由 envs 驱动"，而不是碰巧恒绿。
+  let n3 = 0;
+  await proveBakMaterials(['n'], [mat], '假口令', async () => {
+    n3++;
+  });
+  assert.equal(n3, 1, '不给信封时无可验 ⇒ 退回材料自证口径');
+});
+
 /* ── 接线层（main.ts 只做接线，所以这一层只能是源码扫描）─────────────────── */
 
 test('BAK-MAT-W1 接线：出码装材料、恢复才 putKey', async () => {
@@ -281,6 +473,9 @@ test('BAK-MAT-W1 接线：出码装材料、恢复才 putKey', async () => {
   // 🔴 反向闸：自证的**结果**必须真的驱动写钥匙，而不是算完丢掉。
   //   `proveBakMaterials(...)` 若不接回调，恢复端一篇都不会免输，
   //   而症状是"功能像是没实现"——本地全绿、真机报障，最难查的一种。
-  const callLine = seg.slice(iProve, iProve + 260);
-  assert.match(callLine, /onPutKey|async \(id/, 'proveBakMaterials 必须接上写钥匙的回调');
+  //   🔴 原判据 `/onPutKey|async \(id/` 是**近似恒真**的：`async \(id` 一个什么都不做的
+  //   空回调也命中（对抗审 MINOR 修）。改为断言调用段内**真的有 putKey**。
+  const callLine = seg.slice(iProve, iProve + 1000);
+  assert.match(callLine, /async \(id/, 'proveBakMaterials 必须接上写钥匙的回调');
+  assert.match(callLine, /putKey\(/, '回调体内必须真写钥匙，否则免输只是界面话术');
 });

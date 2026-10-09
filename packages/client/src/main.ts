@@ -46,7 +46,7 @@ import { $isFoldNode, $isReminderMarkNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
 import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
-import { SyncClient } from './sync/client.ts';
+import { SyncClient, fetchTextWithTimeout, FETCH_TIMEOUT_GET_MS, type TimedResponse } from './sync/client.ts';
 import {
   autoSnapshotThrottled,
   fetchHistoryDoc,
@@ -65,7 +65,7 @@ import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
 import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { blockFingerprintsOf, chooseRewritePath, planLocalMarkRewrite } from './reminder/local-mark.ts';
-import { reconcileReminders, dueReminders } from './reminder/reconcile.ts';
+import { reconcileReminders } from './reminder/reconcile.ts';
 import { ensureExactAlarmPermission } from './reminder/native-rem.ts';
 import { ReminderUI, lastNativeSyncOutcome } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
@@ -125,6 +125,7 @@ import {
   type BakMaterial,
 } from './migrate/bak-note.ts';
 import { collectBakMaterials, proveBakMaterials } from './migrate/bak-materials.ts';
+import { readPassVault, savePassVault } from './sync/pass-vault.ts';
 import { createImeGate, TYPE_ACTIVE_MS, type ImeGate } from './sync/ime-gate.ts';
 import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
@@ -1494,6 +1495,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       if (r.evicted !== null) {
         footFlash(COPY.favFull(FAVS_MAX), 5_000);
       }
+      // 🔴 收藏一变就刷新本机的换机备份笔记（v4，见 refreshBakNote 注释）。
+      //   fire-and-forget：刷新是副作用，不挡收藏、失败也不报错。
+      void refreshBakNote();
     },
     onOpenFav: (n) => {
       location.href = '/' + encodeURIComponent(n);
@@ -2154,24 +2158,18 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   editor = ed;
   goto('editor');
 
-  /* ---- 提醒：补弹 + 起调度 ---- */
-  // 🔴🔴 补弹（catch-up）：老项目 v6.3 起"过期静默，无补弹"指的是**不重复响**，
-  //   但下次打开时必须提示已过的提醒 —— 顶栏 title 原文就写着
-  //   「提醒（到点通知或下次打开提示）」，这后半句就是指这个。
-  //   所以这里补弹，但**只弹卡、不响铃**（不响铃才叫"提示"而不是"惊吓"）。
-  //   判据用 dueReminders（未完成 + at <= now），已完成的永远不补弹。
-  const missed = dueReminders(initial).filter((r) => !r.done);
-  if (missed.length > 0) {
-    // 🔴🔴 用户拍板（2026-10-08 二次修订）：补弹**只弹离现在最近的那一条**
-    //   （at 最大且 ≤ now 的那条＝"最近的欠账先还"），**绝不**带「还有 N 条」那一行。
-    //   用户的原始诉求是"只弹最近的一条，不要其他弹窗、不要'还有N条'"——
-    //   所以这里取 missed 里 at 最大的一条，过时弹卡只承载单条。
-    //   其余过期的留在提醒列表里，各自到点或下次打开再分别提示，不再堆叠进一张卡。
-    const nearest = missed.reduce((a, b) =>
-      Date.parse(b.at) > Date.parse(a.at) ? b : a,
-    );
-    window.setTimeout(() => reminderRef?.showCard([nearest]), 500);
-  }
+  /* ---- 提醒：起调度 ---- */
+  // 🔴🔴🔴 **没有补弹（catch-up）** —— 用户报障第 6 条「每次点刷新都弹一次过期提醒，太烦」。
+  //   根因就是这里曾有一句"挂载时补弹离现在最近的一条过期提醒"。
+  //
+  //   🔴 老项目**没有补弹**（唯一权威参照）：`showRemCard` 全仓只有一处调用点
+  //     `fireReminder`（index.html:7564，`isCatchup=false`）—— 卡片**只在到点当次弹**，
+  //     那个 `isCatchup` 形参从头到尾没被以 true 调过。页面加载时过期条目走
+  //     `markExpiredFired()`（:7047）补记 fired + 正文画删除线，**不弹任何卡**。
+  //   顶栏 title 那句「下次打开提示」指的是**原生系统通知**（关页期间到点由闹钟推送），
+  //   不是页内卡片。此前 bj 把它误读成"页内补弹"，是自造的偏离。
+  //
+  //   ⇒ 判据：mount 路径里**不得**出现 `showCard(`（源码断言）；到点弹卡只经 `fire()`。
   // 起调度。到点由 schedule() 自己算下一条并重排。
   // 🔴 schedule() 内含「同步提醒列表到原生闹钟层」，所以这一句同时覆盖了
   //   老项目 index.html:7050 `loadReminder` 里的 syncRemindersToNative() ——
@@ -3004,18 +3002,22 @@ function openScanner(): void {
 
 /** 拉备份笔记的远端信封。老项目 apiGetTo（:9028）同款。 */
 async function fetchBakNote(id: string, f: typeof fetch = fetch): Promise<{ salt: string | null; env: Envelope | null }> {
-  let res: Response;
+  let res: TimedResponse;
   try {
-    res = await f(`/api/note/${encodeURIComponent(id)}`, {
-      headers: { accept: 'application/json' },
-      cache: 'no-store',
-    });
+    // 🔴 8s 超时（老项目 `withTimeout(apiGetTo(id), 8000)`，index.html:9037）：
+    //   出码要逐篇拉信封，半死 socket 下每一枪都挂死 ⇒ 出码永远转圈。
+    res = await fetchTextWithTimeout(
+      `/api/note/${encodeURIComponent(id)}`,
+      { headers: { accept: 'application/json' }, cache: 'no-store' },
+      FETCH_TIMEOUT_GET_MS,
+      f,
+    );
   } catch {
     throw { msg: COPY.bakWriteOffline };
   }
   if (res.status === 429) throw { msg: COPY.bakWriteOffline };
   if (!res.ok) throw { msg: COPY.bakWriteFail };
-  const text = await res.text();
+  const text = res.text;
   if (text.trim() === '') return { salt: null, env: null };
   try {
     const o = JSON.parse(text) as Partial<Envelope>;
@@ -3170,7 +3172,13 @@ export async function makeBakBackup(
   //   （拿真钥匙加密一段定长常量），**不重新派生** ——
   //   600,000 次 PBKDF2 单次 62ms，100 篇重新派生就是 6 秒白等。
   //   本机没钥匙的那篇给 null（恢复后那篇照常要口令，不假装成功）。
-  const mats = await collectBakMaterials(entries, deriveKeyFor);
+  //
+  //   🔴🔴 v4：**顺带把每篇自己的口令读出来装进材料**（用户报障「备份笔记携带
+  //   各篇自己的口令」）。口令来自本机口令保险箱（用该篇密钥加密存着的，
+  //   见 sync/pass-vault.ts）⇒ 换机后**零输入**逐篇派生，与老项目"装 raw key"
+  //   对用户是同一种体验。读不到（保险箱没记 / 隐私模式）⇒ 那篇不写 `p`，
+  //   恢复时照旧回落"备份码口令 + 自证"，绝不猜、绝不拿别篇的口令顶上。
+  const mats = await collectBakMaterials(entries, deriveKeyFor, (id, dk) => readPassVault(id, dk.key));
 
   // 🔴🔴🔴 自包含收藏备份（用户报障：扫备份码后每篇都要输口令、且全是空的）：
   //   把每篇的**密文信封**（加密正文）也带进备份笔记。恢复端直接 re-push + 写缓存，
@@ -3245,6 +3253,11 @@ export async function makeBakBackup(
   //   写不进去不失败（下一句 writeBakSlot 内部已catch）—— 槽只是加速器。
   writeBakSlot(id, saltB64 ?? dk.saltB64);
   await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
+  // 🔴 备份笔记**自己的口令**也存进保险箱（用它的密钥加密）——
+  //   这样"收藏变更后自动刷新备份笔记"（refreshBakNote）在刷新页面、记忆解锁之后
+  //   仍拿得出口令，不必依赖 sessionPass（那是**当前这篇**的口令，未必是备份笔记那把）。
+  //   与其它保险箱条目同口径：没有密钥这团密文什么都不是，锁定即失效。
+  await savePassVault(id, passphrase, dk);
 
   return { ok: true, link: buildBakLink(location.origin, id, passphrase), bakId: id, count: entries.length, skipped };
 }
@@ -3252,6 +3265,71 @@ export async function makeBakBackup(
 /** 篇名形状闸：`nsbak-xxxxxx`。零成本，老项目 BAK_ID_RE 同款。 */
 export function isBakNoteId(noteId: string): boolean {
   return /^nsbak-[a-z0-9]{6}$/.test(noteId);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * 收藏变更 → 自动刷新备份笔记（v4）
+ *
+ * 🔴🔴 为什么必须自动刷新：v4 起恢复卡上**没有**「本机重建」按钮
+ *   （用户报障「备份笔记携带各篇自己的口令」⇒ 不必再靠重建换口令）。
+ *   老项目要更新备份得回旧设备点一次「扫码换机」重新出码 ——
+ *   而用户报障的正是"旧设备不在手边 / nsbak-xxxxxx 重建不出来"。
+ *   于是把「更新备份」从"用户动作"改成"收藏变更的副作用"：
+ *   本机有备份槽（说明这台设备出过码）时，收藏夹一变就把清单重写一遍。
+ *
+ * 🔴 三条前置（缺一条就**不刷**，绝不硬造一篇备份）：
+ *   ① 本机有备份槽（`readBakSlot`）—— 没有槽 = 这台设备从没出过码，
+ *      凭空建一篇 `nsbak-xxxxxx` 是往云端写一篇用户没要的笔记；
+ *   ② 槽那篇的**密钥在 key-store**（`resolveKey`）—— 没有密钥就拿不到它的盐；
+ *   ③ 槽那篇的**口令在保险箱**（`readPassVault`）—— 没有口令就派不出同一把钥，
+ *      硬刷会换盐 ⇒ 旧二维码失效（老项目闸 R1 记的正是这个形状）。
+ *   三条都是"本机记住了才刷"，与老项目"记忆过的设备才拿得出口令"等价。
+ *
+ * 🔴 失败一律**静默**（fire-and-forget）：这是收藏操作的一个副作用，
+ *   刷新失败（离线/隐私模式）不该让用户刚做的收藏动作弹个错。
+ *   下次用户主动出码时 makeBakBackup 会照常重建（盐取自服务端，同一把钥）。
+ * 🔴 `bakRefreshInFlight` 防重入：连点收藏会连发几次刷新，
+ *   并发写同一篇会让后到的旧清单盖掉先到的新清单。
+ * 🔴🔴 但防重入**不能是"丢弃式"**（对抗审 MINOR）：飞行中到达的那次收藏变更
+ *   若直接 `return` 丢掉，备份就停在**旧快照**，而用户刚做的收藏（他以为
+ *   已经进了备份）永远刷不进去。改成 **coalescing**：飞行中只记一笔
+ *   `bakRefreshQueued`，落地后再跑一轮 —— 保证"最后一次变更一定反映到备份"。
+ */
+let bakRefreshInFlight = false;
+/** 飞行中又来了新请求 ⇒ 落地后再跑一轮（不丢最后一次变更）。 */
+let bakRefreshQueued = false;
+async function refreshBakNote(): Promise<void> {
+  if (bakRefreshInFlight) {
+    bakRefreshQueued = true;
+    return;
+  }
+  const slot = readBakSlot();
+  if (!slot) return;
+  bakRefreshInFlight = true;
+  try {
+    do {
+      bakRefreshQueued = false;
+      await refreshBakNoteOnce(slot.id);
+    } while (bakRefreshQueued);
+  } finally {
+    bakRefreshInFlight = false;
+  }
+}
+
+/** 单轮刷新：读钥匙 + 读口令 + 采集 + 就地重建。任一步缺失即静默放弃这一轮。 */
+async function refreshBakNoteOnce(slotId: string): Promise<void> {
+  try {
+    const rec = await resolveKey(slotId);
+    if (!rec) return;
+    const pass = await readPassVault(slotId, rec.key);
+    if (!pass) return;
+    const ids = collectBakEntries(favBackupSourceIds(), slotId);
+    if (ids.length === 0) return;
+    // 🔴 idOverride = slot.id：**就地重建同一篇**（盐取自服务端 ⇒ 同一把钥 ⇒ 旧码照用）。
+    await makeBakBackup(ids, pass, Date.now(), fetch, slotId);
+  } catch {
+    /* 静默：刷新失败只是"备份暂时没跟上收藏"，不影响收藏本身 */
+  }
 }
 
 /**
@@ -3265,7 +3343,13 @@ export function isBakNoteId(noteId: string): boolean {
  *
  * @returns true = 这是备份笔记，已进恢复卡，调用方**不要**再挂编辑器
  */
-export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey, f: typeof fetch = fetch): boolean {
+export function presentBakDoc(
+  noteId: string,
+  doc: Doc,
+  dk: DerivedKey,
+  passphrase: string,
+  f: typeof fetch = fetch,
+): boolean {
   if (!isBakNoteId(noteId)) return false;
   const manifest = readBakManifest(doc);
   if (manifest === null) {
@@ -3274,6 +3358,15 @@ export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey, f: typeo
     showUploadNote('bad', COPY.bakRestBroken, COPY.uploadFailMs);
     return true;
   }
+  // 🔴🔴 老项目 enterBackupMode:9225 `writeBakSlot(noteId, note.salt)` 逐字承接：
+  //   打开备份笔记 ⇒ 把它记成**本机的换机备份**（"恢复/以后更新都靠它"）。
+  //   这同时是"收藏变更自动刷新备份笔记"（refreshBakNote）的接线：
+  //   槽在，refreshBakNote 才知道该刷哪一篇。
+  writeBakSlot(noteId, dk.saltB64);
+  // 🔴🔴 备份笔记**自己的口令**存进保险箱（用它的密钥加密）——
+  //   这样这台设备"记住了"它，refreshBakNote 在刷新页面/记忆解锁之后仍拿得出口令。
+  //   fire-and-forget：存不下（隐私模式）不影响打开恢复卡。
+  if (passphrase !== '') void savePassVault(noteId, passphrase, dk);
   // 🔴 三闸之①：清单**绝不进 contenteditable**。这里根本不挂编辑器，
   //   恢复卡是唯一呈现。老项目 enterBackupMode 还要先 contentEditable=false，
   //   bj 直接不挂 —— 那比"挂了再锁"少一整条漏锁的路径。
@@ -3282,7 +3375,9 @@ export function presentBakDoc(noteId: string, doc: Doc, dk: DerivedKey, f: typeo
   //   `dk` 是解开这篇备份笔记的那把钥匙（用来解密清单正文），
   //   而各篇的钥匙必须用**口令 + 各篇 salt** 重新派生再自证 ——
   //   备份笔记的钥匙与收藏夹里那些钥匙毫无关系，拿它去开收藏夹是错的。
-  showBakRestoreCard(noteId, manifest.ids, manifest.ts, manifest.mats, manifest.envs, f);
+  //   🔴 `passphrase` 作为**回落口令**传下去：v4 清单各篇自带 `p` 时用不上它，
+  //     但 v1/v2/v3 老备份没有 `p`，只能靠"解开备份笔记那把口令"（老项目的模型）。
+  showBakRestoreCard(noteId, manifest.ids, manifest.ts, manifest.mats, manifest.envs, passphrase, f);
   return true;
 }
 
@@ -3320,7 +3415,7 @@ export async function tryEnterBakMode(noteId: string, passphrase: string, f: typ
   }
 
   // 判定与呈现交给同一个函数 —— 扫码/手输/记忆三条路共用它（见 presentBakDoc 的注释）。
-  return presentBakDoc(noteId, doc, dk, f);
+  return presentBakDoc(noteId, doc, dk, passphrase, f);
 }
 
 /** 开只读恢复卡，并把「恢复这 N 篇」接到生产合并链路。 */
@@ -3330,17 +3425,22 @@ function showBakRestoreCard(
   ts: number,
   mats: readonly (BakMaterial | null)[],
   envs: readonly (Envelope | null)[],
+  fallbackPass: string,
   f: typeof fetch = fetch,
 ): void {
   buildBakRestoreCard({
     ids,
     ts,
-    // 🔴🔴 `entered` 是恢复卡上「口令（本批共用）」输入框的内容（可空串）。
-    //   此前形参被**丢掉**、恢复路径硬编码 sessionPass ⇒ 用户填了别的口令点「恢复」
-    //   也照样逐篇弹口令框（输入框形同虚设）。现在按 bak-restore-card 文件头约定的
-    //   `entered || sessionPass` 口径解析后透传给 applyBakRestore。
-    onGo: async (entered) => {
-      const pass = entered || sessionPass;
+    // 🔴🔴 v4 恢复**零输入**：清单里的材料自带各篇口令（`p`），恢复端逐篇派生 + 自证，
+    //   不再需要"本批共用口令"输入框。口令仍可能来自扫码那一下的 `sessionPass`
+    //   （v1/v2/v3 老备份没有 `p`，只能靠它）—— 所以这里仍把它当回落值传下去。
+    //   🔴 恢复卡上**没有**口令框了（用户报障：备份笔记携带各篇口令 ⇒ 不必再问）。
+    onGo: async () => {
+      // 🔴 回落口令 = **解开这篇备份笔记那把**（presentBakDoc 传下来的），
+      //   而不是 sessionPass —— 扫码进备份笔记时 sessionPass 还没被赋值
+      //   （handleScanRaw 在 tryEnterBakMode 之后才写它），靠 sessionPass 会让
+      //   老备份（无 `p`）全部 needPass。v4 清单各篇自带 `p` 时这个回落用不上。
+      const pass = fallbackPass;
       // 🔴🔴 先自证 + 写钥匙，**再**合并收藏夹。
       //   顺序不能反：自证要 100 篇次 PBKDF2（单次 62ms ⇒ 最坏 6 秒多），
       //   而恢复卡按钮已经先置灰成「正在恢复…」，用户看得见进度（老项目 :9242 同款）。
@@ -3353,33 +3453,6 @@ function showBakRestoreCard(
       //   用户看着"粘完没反应"（老项目闸 R2-P1-2 的事故形状）。
       location.href = '/' + encodeURIComponent(r.first as string);
       return r.message;
-    },
-    // 🔴🔴 「在这台设备重建备份笔记」（用户报障第 8 条：旧设备不在手边，无法重新生成）。
-    //
-    //   场景：用户换到新手机、扫码恢复后，手里那篇 `nsbak-xxxxxx` 还是旧的
-    //   （老格式 v1/v2 只带篇名，或正文已过时），而"回旧设备重新生成"根本做不到。
-    //   这里让他**就地重建同一篇**：清单用恢复卡上这份（= 备份里的原班篇名，
-    //   绝不换成新设备当前收藏夹 —— 那会在恢复前把备份覆盖成一份更短的名单），
-    //   材料/正文由这台设备现场采集（密钥在手就用，正文从服务器拉）。
-    //   🔴 盐仍取自服务端 ⇒ 口令不变时派生同一把钥匙 ⇒ 旧二维码照用
-    //     （填了别的口令则是换钥匙，见下方 reused 的判定与文案）。
-    onRebuild: async (entered) => {
-      // 口令来源与 onGo 同款：输入框优先，留空则用扫码带进来的 sessionPass。
-      const pass = entered || sessionPass;
-      if (!pass) {
-        // 🔴 没有口令就没法派生盐/写凭据 ⇒ 老实要一次（不假装成功）。
-        throw new Error(COPY.migrateNeedPass);
-      }
-      // 🔴🔴 「旧二维码照用」只在**口令没变**时成立：
-      //   盐取自服务端 ⇒ 同一口令派生同一把钥匙 ⇒ 备份笔记的密文形状不变，
-      //   扫码换机带进来的 `#p=` 口令仍能解开它。
-      //   但若用户在这里填了**另一把**口令，就是给这篇备份笔记换了钥匙 ——
-      //   旧码（编码的是旧口令）再也解不开，必须如实说，不能照喊"照用"。
-      const reused = !entered || entered === sessionPass;
-      const r = await makeBakBackup(ids, pass, Date.now(), f, noteId);
-      if (!r.ok) throw new Error(r.message);
-      // 🔴 结果只报"重建成功 + 篇数"，不跳页（收藏夹没变，只是云端那篇刷新了）。
-      return COPY.bakRestRebuilt(r.bakId, r.count, reused);
     },
     onCancel: () => {
       // 🔴 只读态**刻意不归还编辑器焦点**（老项目 :9238 原话「故刻意不补」）：
@@ -3425,11 +3498,25 @@ async function applyBakRestore(
 ): Promise<BakRestoreOutcome> {
   if (ids.length === 0) return { ok: false, message: COPY.migrateNothingRestored };
 
-  const pre = await proveBakMaterials(ids, mats, pass, async (id, dk) => {
+  // 篇名 → 这一篇**实际自证通过用的口令**（供后面 re-push 派生写入凭据复用）。
+  // 🔴🔴 必须用 proveBakMaterials 回传的 effPass，不许自己再调 materialPass 重算：
+  //   `p` 自证失败后回落到备份码口令并成功时，重算会拿到那个**没通过自证**的 `p`
+  //   ⇒ 保险箱记错口令、凭据派生错 ⇒ 那篇改完存不进服务器（full 档 403）（对抗审 MAJOR 修）。
+  const effPassById = new Map<string, string>();
+
+  const pre = await proveBakMaterials(ids, mats, pass, async (id, dk, effPass) => {
     // 🔴 `savedAt` 用固定 0：那不是"解锁时间"，是"这次恢复顺手记住的"，
     //   与 unlock.ts:191 的写入同口径（走的是同一条 key-store 通路）。
     await putKey({ id, key: dk.key, salt: dk.saltB64, iter: dk.iter, savedAt: Date.now() });
-  });
+    effPassById.set(id, effPass);
+    // 🔴🔴 把该篇口令也存进保险箱（用户报障 v4 的配套）：恢复后这台设备就"记住了"
+    //   这篇的口令 ⇒ 之后编辑保存能带 `x-note-key`（凭据闸 `full` 档才写得进服务器），
+    //   与老项目"记忆过的设备永远拿得出凭据"等价。
+    //   口令来源：v4 材料自带的 `p` 优先；`p` 自证失败回落到扫码口令并成功时用扫码口令。
+    if (effPass !== '') await savePassVault(id, effPass, dk);
+    // 🔴🔴 envs 传下去 ⇒ proveBakMaterials 会做**第二道自证**（钥匙必须真解得开该篇信封），
+    //   挡住"材料自证通过、但那把钥匙打不开该篇正文"的陈旧 keystore ⇒ 空编辑器（对抗审 BLOCKER）。
+  }, envs);
 
   // 🔴 hadBefore 必须在**写入前**取（老项目 :9262 v7.7.0「对抗审」）。
   //   写完再查就永远是 true ⇒ renewed 恒等于条数 ⇒
@@ -3483,9 +3570,12 @@ async function applyBakRestore(
       } else {
         try {
           // 每篇**自己的**凭据：口令 + 该篇信封里的 salt 派生（清单的材料不是备份笔记的钥匙，
-          // 与上面 proveBakMaterials 同一口径）。取不到凭据就不带——full 档服务端拒了
-          // 也走既有 catch 落缓存兜底，恢复不因此失败。
-          const wkI = pass ? await deriveWriteKey(id, pass, { saltB64: env.kdf.salt, iter: env.kdf.iter }) : null;
+          // 与上面 proveBakMaterials 同一口径）。🔴 口令取**自证通过那一篇实际用的 effPass**
+          // （proveBakMaterials 回传）—— 用错口令派生出的凭据在 full 档会被服务端拒，那篇就推不上服务器。
+          // 🔴 未免输的篇（needPass）这里取不到 ⇒ 无凭据 ⇒ putBakNote 不带 `x-note-key`：
+          //   那篇本来就没验证出口令，宁可不带凭据（可能 403），也不拿错口令去派生。
+          const effPass = effPassById.get(id) ?? '';
+          const wkI = effPass ? await deriveWriteKey(id, effPass, { saltB64: env.kdf.salt, iter: env.kdf.iter }) : null;
           await putBakNote(id, env, 0, f, wkI);
           envRestored++;
         } catch { /* 推送失败：下面仍把备份信封写进缓存兜底 */ }
@@ -3858,7 +3948,7 @@ function showPass(name: string): void {
       //   `nsbak-xxxxxx` 时，看到的必须是只读恢复卡而不是可编辑的清单。
       //   漏这条的症状：在旧设备上敲 URL 打开备份笔记 → 清单进 contenteditable
       //   → 用户改掉它 → 下次换机备份的就是被改过的清单（甲案三闸①被从后门打开）。
-      if (presentBakDoc(name, r.doc, r.dk)) return null;
+      if (presentBakDoc(name, r.doc, r.dk, pass)) return null;
       mountEditor(name, r.doc);
       // 🔴 解锁成功才弹 PWA 安装引导（老项目 index.html:3476 同位置）：
       //   落地页就弹 = 一进门先推安装广告，是最招人烦的那种。
@@ -4079,7 +4169,9 @@ function route(): void {
       // 🔴🔴 甲案分流（同 showPass 那条）：记忆解锁也要在挂编辑器之前判。
       //   这条路径**最容易被漏** —— 它不经过任何用户动作，
       //   只要在旧设备上刷新一下 `/nsbak-xxxxxx` 就会走到。
-      if (presentBakDoc(name, rec.doc, rec.dk)) return;
+      //   口令回落：保险箱里的（`rec.passphrase`）优先，没有才用直链 `#p=` 的
+      //   （与上面"记忆解锁优先、过期直链不许顶掉本机密钥"同一口径）。
+      if (presentBakDoc(name, rec.doc, rec.dk, rec.passphrase ?? pf.passphrase ?? '')) return;
       mountEditor(name, rec.doc);
       // 🔴 同上：记忆解锁也是"解锁成功"，同样该弹安装引导
       tryShowInstallBar();

@@ -126,6 +126,86 @@ export const POLL_INTERVAL_MS = 2_000;
 /** SSE 重连退避上限 */
 const SSE_BACKOFF_MAX_MS = 30_000;
 
+/**
+ * 🔴🔴 fetch 超时（老项目 `withTimeout(p, ms)`，index.html:2203；轮询用 12000，
+ *   见 index.html:9934 的注释「半死 socket 下 fetch 不再无限挂冻结状态条
+ *   （『同步中断/连接中…』卡死根因）」）。
+ *
+ * 🔴🔴🔴 不加会怎样（对抗审 MAJOR）：半死 socket（TCP 连着但服务端不回包）下
+ *   `fetch` **永不 resolve**，而 quietPoll/pull 的收尾是 `finally { this.pulling = false }`
+ *   —— 它永远执行不到 ⇒ `pulling` 永久为 true ⇒ startPoll/SSE/refresh/retryPull
+ *   四个入口**全部早退** ⇒ 同步静默死掉，而底栏仍显示『已同步』。
+ *   这是最坏的一类静默降级（不报错、结果是错的），老项目正是为它加的 12s 超时。
+ */
+const FETCH_TIMEOUT_MS = 12_000;
+
+/**
+ * 🔴 一次性 GET 的超时（老项目 8000ms：`withTimeout(apiGet(), 8000)`，
+ *   index.html:3488/3603 解锁首拉、:9037 `apiGetTo(id)` 逐篇拉）。
+ *
+ *   与轮询的 12000 分开是**逐字承接老项目**：轮询要容忍慢网（不能误判成断线，
+ *   否则底栏在弱网下反复闪「同步中断」），而一次性拉是用户**正在等**的那一下，
+ *   宁可早点报「连不上服务器」让他重试，也不要让半死 socket 把界面挂死。
+ */
+export const FETCH_TIMEOUT_GET_MS = 8_000;
+
+/**
+ * 带超时的 fetch —— **连读体一起**纳入超时窗口。
+ *
+ * 🔴 用 `Promise.race` 而不是只靠 `AbortController`：注入的 fetch 桩（单测）未必理会
+ *   `signal`，只 abort 的话判据会挂死。race 保证**无论 fetch 是否响应 abort**，
+ *   本 promise 都在超时后 settle（`abort()` 只是顺手让真浏览器尽早释放连接）。
+ *
+ * 🔴🔴 为什么**必须**把 `res.text()` 也放进超时窗口（对抗审 MINOR）：
+ *   老项目 `withTimeout(apiGet(), 8000)`（index.html:2203）里 apiGet 是
+ *   `const r = await fetch(...); return await r.json();` —— **读体在窗口内**。
+ *   若这里只 race 到"拿到 Response"就解除超时，则"服务端发了响应头后卡住 body"
+ *   仍会挂死：unlock 永久转圈、quietPoll 的 `pulling` 永久 true。那正是本封装要填的坑，
+ *   只填一半等于没填。
+ *
+ * 🔴 返回**已读好的纯文本**而不是 Response：调用方全部只需 `ok/status/text`
+ *   （全库无一处读 `res.headers`），返回 `{ok,status,text}` 让"读体也在窗口内"成为
+ *   类型上的必然，而不是靠每个调用方自觉。
+ * 🔴 `f` 可注入：解锁（sync/unlock.ts）与换机备份（main.ts 的 fetchBakNote）都用
+ *   外部注入的 fetch（便于单测/日后换通道），那两处也必须享受同一条超时 ——
+ *   否则"半死 socket 挂死"只是从同步挪到了解锁与出码，同一个坑没填上。
+ * 🔴 导出仅供判据（SYNC-TIMEOUT-*）直测：与 POLL_INTERVAL_MS 同理，
+ *   "测试里那个数字"与"实现里那个数字"必须同源。
+ */
+export interface TimedResponse {
+  ok: boolean;
+  status: number;
+  /** 已读完的响应体。空串 = 服务端返回了空体。 */
+  text: string;
+}
+
+export async function fetchTextWithTimeout(
+  url: string,
+  init?: RequestInit,
+  ms: number = FETCH_TIMEOUT_MS,
+  f: typeof fetch = fetch,
+): Promise<TimedResponse> {
+  const ctrl = typeof AbortController === 'undefined' ? undefined : new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctrl?.abort();
+      reject(new Error('fetch timeout'));
+    }, ms);
+  });
+  try {
+    return await Promise.race([
+      (async (): Promise<TimedResponse> => {
+        const r = await f(url, ctrl ? { ...init, signal: ctrl.signal } : init);
+        return { ok: r.ok, status: r.status, text: await r.text() };
+      })(),
+      timeout,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function isDocEmpty(d: Doc): boolean {
   return (d.blocks === undefined || d.blocks.length === 0) &&
          (d.reminders === undefined || d.reminders.length === 0);
@@ -340,6 +420,37 @@ export class SyncClient {
       //
       //   老项目同款：index.html:10047 的 `sseSource.onmessage = () => { poll(); }`
       //   走的是同一条路（先更新 lastRemoteNote 再进poll）。
+      //
+      // 🔴🔴🔴 用户报障第 7 条「没做任何编辑，底栏在『已同步』和『保存中』之间不停切换」：
+      //   **根因就是这一句在 idle 态也 `send('remote-arrived')`** ——
+      //   每 2 秒把 idle 推成 syncing（底栏变『连接中…』），拉完又回 idle（『已同步』），
+      //   于是底栏每 2 秒抖一次，而内容一个字没变。
+      //
+      //   🔴 老项目**不抖**（唯一权威参照）：它的 `poll()`（index.html:9933-9937）
+      //     在 fetch 成功后**无条件** `setStatus(true, '已同步')` ——
+      //     轮询本身**从不产生"同步中"这个中间态**，只有真正 PUT 时 `busy` 才让底栏变。
+      //     ⇒ 对应到 bj：**idle 态的例行轮询必须静默**，只有远端**确实变了**才进状态机。
+      //   （这是 bj 状态机相对老项目"多出来"的一段 —— 状态机是好事，但不能让它把
+      //     "后台例行拉一下"也画到用户眼前。）
+      // 🔴🔴🔴 **`if (this.pulling) return` 必须在任何 `send` 之前**（对抗审 D1）。
+      //   病态：静默轮询持着 `pulling` 在飞时，别的入口（SSE/手动刷新/online）先
+      //   `send('remote-arrived')` 把状态推成 syncing，随后 `pull()` 因 `pulling`
+      //   直接 return ⇒ **没人把状态收回 idle** ⇒ 底栏永久停在「连接中…」。
+      //   `quietPoll` 是新增的第二个 `pulling` 持有者，且它**不先 send** ——
+      //   所以"先 send 再被锁挡死"这条路径必须由调用方自己挡（见各调用点同款守卫）。
+      if (this.pulling) return;
+      // 🔴🔴 对抗审 MAJOR-1：`offline` 也必须走静默路径。此前只拦 `idle`，
+      //   offline 落到下面 `send('remote-arrived')`（offline→syncing，底栏变『连接中…』）
+      //   → pull 失败 → network-fail → offline ⇒ **每 2 秒闪一次『连接中…』**，
+      //   正是用户报障第 7 条那类抖动，只是搬到了 offline 态
+      //   （navigator.onLine 恒 true 但服务端不可达：隧道/代理/半死 socket，老项目承认是真实场景）。
+      //   老项目 poll 的 catch 只 `setStatus(false, ...)`，**从不产生中间态**。
+      if (this.state === 'idle' || this.state === 'offline') {
+        void this.quietPoll().catch((e: unknown) => {
+          this.reportInternal('静默轮询失败（已被降级，不影响其他功能）', e);
+        });
+        return;
+      }
       if (this.state === 'conflict' || this.state === 'pushing' || this.state === 'syncing') return;
       this.send('remote-arrived');
       this.pullFromTimer('syncing');
@@ -347,6 +458,118 @@ export class SyncClient {
     // 🔴 Node/单测环境下 setInterval 会吊住进程；真浏览器不需要 unref，
     //   但加上它在任何环境都无害（浏览器忽略这个方法）。
     (this.pollTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * 🔴🔴🔴 **静默轮询**（用户报障第 7 条）—— idle 态的例行拉取，**内容没变就不碰状态机**。
+   *
+   * 语义：拉一次远端，与**本机当前内容**逐字节比（`eq` = canonicalize+normalize+剥 rem 标记）。
+   *   - 相同 ⇒ 什么都不做，状态**停在 idle**（底栏一直『已同步』，与老项目一致）；
+   *   - 不同 ⇒ 才 `send('remote-arrived')` 进状态机，交给 `decryptAndMerge` 走正常合并/采纳。
+   *
+   * 🔴 为什么不直接复用 `pull()`：`pull()` 的第一步就是 `send('remote-arrived')`
+   *   （idle→syncing），那正是每 2 秒抖一次底栏的来源。静默轮询的意义就是**在进状态机之前**
+   *   先判"值不值得进"。
+   *
+   * 🔴 为什么网络失败**要**进状态机（不能静默吞）：断网必须让用户看见（老项目 poll 的
+   *   catch 会 `setStatus(false, ...)`）。但 idle 直连 offline 此前无这条边，故补了
+   *   `idle --network-fail--> offline`（见 fsm.ts）。与"内容没变不动状态"不冲突 ——
+   *   那条讲的是**成功且无变化**，这条讲的是**失败**，两种收场本就不同。
+   *
+   * 🔴 与 `pull()` 共用一个 `pulling` 重入锁：静默轮询在途时，SSE/手动刷新进来的拉
+   *   必须被挡，否则同一份远端被两条路径同时消费（老项目靠 `busy`/`inflightWrites` 同理）。
+   */
+  private async quietPoll(): Promise<void> {
+    if (this.pulling) return;
+    this.pulling = true;
+    try {
+      let res: TimedResponse;
+      try {
+        // 🔴 fetchTextWithTimeout（对抗审 MAJOR）：半死 socket 下裸 fetch 永不 resolve
+        //   ⇒ finally 不执行 ⇒ `pulling` 永久 true ⇒ 四个拉入口全早退（同步静默死）。
+        res = await fetchTextWithTimeout(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+        });
+      } catch {
+        this.failNetwork(); // idle/offline → offline（已在 offline 则静默）
+        return;
+      }
+      if (!res.ok) {
+        // 🔴 429（限流）静默退避：老项目明确把 429 排除在"同步中断"之外，下轮再试即可。
+        // 🔴🔴 对抗审 MAJOR-2：其余非 2xx（5xx/4xx）**必须**降级成 offline，不许静默停在 idle ——
+        //   否则服务端持续 500 / 凭据失效时，底栏永久谎报『已同步』而内容根本不更新
+        //   （文件头第 (1) 类静默降级）。老项目 fetchRetry 对 !ok 一律抛错 → poll catch
+        //   setStatus(false,'同步中断')，口径一致；且落 offline 后**不再反复切**（下轮 failNetwork 静默）。
+        if (res.status !== 429) this.failNetwork();
+        return;
+      }
+      const text = res.text;
+      // 200 + 空体 = 服务端确实没有这篇（新笔记），本机即唯一来源 ⇒ 无变化。
+      // 🔴🔴 但 HTTP 层成功 = 服务器**可达** ⇒ 若此前在 offline，必须回 idle
+      //   （与 pullInner 的 200+空体分支同口径）。少了这一句，底栏会**永久停在
+      //   『离线中』**：offline 态下服务端可达却返回空体时，本函数每轮都在此静默 return，
+      //   而 `offline --pulled--> idle` 那条边永远走不到（对抗审 MINOR）。
+      if (text.trim() === '') {
+        if (this.state === 'offline') this.send('pulled');
+        return;
+      }
+      let env: Envelope;
+      try {
+        env = JSON.parse(text) as Envelope;
+      } catch {
+        // 🔴🔴 对抗审 MAJOR：与显式路径（pullInner）**同口径**报错 + 降级，
+        //   绝不静默 return —— 静默 ⇒ 底栏永久谎报『已同步』而内容根本不更新。
+        //   老项目 decryptText/解析都在 poll 的 try 内，失败 → catch → setStatus(false,'同步中断')。
+        if (this.state !== 'offline') this.d.onError('云端数据无法解析');
+        this.failNetwork();
+        return;
+      }
+      let plain: string;
+      try {
+        plain = await decryptString(env, this.d.key, 'note');
+      } catch {
+        // 🔴🔴 对抗审 MAJOR（回归）：改前 idle 轮询走 pull ⇒ 解密失败会 onError + offline；
+        //   静默轮询若静默 return，则"他端改了口令"这类故障在本端**永不提示**
+        //   （底栏一直『已同步』，内容却再也不更新）。与 pullInner 同口径报 + 降级。
+        if (this.state !== 'offline') this.d.onError('口令不对，或数据无法解密');
+        this.failNetwork();
+        return;
+      }
+      let remoteDoc: Doc;
+      try {
+        remoteDoc = parseDoc(plain);
+      } catch {
+        if (this.state !== 'offline') this.d.onError('云端数据无法解析');
+        this.failNetwork();
+        return;
+      }
+      if (eq(remoteDoc, this.d.getDoc())) {
+        // 无变化：推进 base（可能与上一次成功同步的表示形态不同），**状态不动**。
+        this.base = remoteDoc;
+        // 🔴 从 offline 恢复：拉成功且本机无改动 ⇒ 服务器可达了，回 idle（『已同步』）。
+        //   不发的话底栏会一直停在『离线中』—— 老项目 poll 成功无条件 setStatus(true,'已同步')。
+        if (this.state === 'offline') this.send('pulled');
+        return;
+      }
+      // 真有变化 ⇒ 进状态机走正常路径（idle/offline --remote-arrived--> syncing）。
+      this.send('remote-arrived');
+      await this.decryptAndMerge(env);
+    } finally {
+      this.pulling = false;
+    }
+  }
+
+  /**
+   * 静默轮询的失败收场：降级到 offline —— **但已在 offline 时不再发事件**。
+   *
+   * 🔴 为什么必须防重复发：fsm 里**没有** `offline --network-fail-->` 这条边
+   *   （offline 已是降级态）。静默轮询每 2 秒跑一次，若每次都 send，
+   *   第一次之后每轮都抛 IllegalTransitionError（走 onInternalError 刷日志）。
+   */
+  private failNetwork(): void {
+    if (this.state === 'offline') return;
+    this.send('network-fail');
   }
 
   /**
@@ -439,6 +662,8 @@ export class SyncClient {
   }
 
   private async retryPull(): Promise<void> {
+    // 🔴 同 startPoll/SSE：先 send 再被锁挡死会卡状态（对抗审 D1）。
+    if (this.pulling) return;
     this.send('online');
     await this.pull(this.state);
   }
@@ -525,6 +750,11 @@ export class SyncClient {
 
   /** 手动刷新。 */
   async refresh(): Promise<void> {
+    // 🔴🔴 已有一次拉在飞（含静默轮询）⇒ **不 send**（对抗审 D1）：
+    //   `send('refresh')` 会把 idle 推成 syncing，而随后 `pull()` 因 `pulling`
+    //   直接 return ⇒ 状态卡在 syncing。此刻那次在飞的拉本就会取到最新远端，
+    //   跳过这一轮是安全的（用户看不到任何"点了没反应"的异常，底栏也不抖）。
+    if (this.pulling) return;
     this.send('refresh');
     // 🔴 同 resolveKeepRemote：refresh 的目标态通常也是 syncing，
     //   不传就会被守卫挡掉 ⇒ 用户点"手动刷新"完全没反应（而按钮点是有效动画）。
@@ -646,9 +876,11 @@ export class SyncClient {
       this.send('network-fail');
       return;
     }
-    let res: Response;
+    let res: TimedResponse;
     try {
-      res = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
+      // 🔴 fetchTextWithTimeout（对抗审 MAJOR）：同 quietPoll —— 半死 socket 下裸 fetch
+      //   永不 resolve ⇒ `pulling` 永久 true ⇒ 同步静默死。老项目 index.html:9934 同款 12s。
+      res = await fetchTextWithTimeout(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
         headers: { accept: 'application/json' },
         cache: 'no-store',
       });
@@ -668,7 +900,7 @@ export class SyncClient {
       return;
     }
 
-    const text = await res.text();
+    const text = res.text;
     if (text.trim() === '') {
       // 🔴 200 + 空体 = 服务端确实没有这篇笔记（新笔记），**不是错误**。
       //   因为前面已经确认了 HTTP 层成功，这里可以安全地当作"新笔记"。
@@ -781,6 +1013,28 @@ export class SyncClient {
 
     // 真的两边都改了 → 三方合并
     const res = mergeDocs(base, local, remoteDoc);
+    // 🔴🔴 合并结果与本机**实质一致** ⇒ 不回灌（避免 docToLexical 整篇重建带来的底栏抖动），
+    //   **但必须把本机这一版推上去**（用户报障第 7 条的另一半）。
+    //   病态：`setDoc(res.doc)` 会走 `docToLexical` 的 `root.clear()` + 整篇重建，
+    //   触发 update 监听 → `noteEdit()` → 状态 dirty → pushing ⇒ 底栏从『已同步』
+    //   抖成『保存中…』，**而内容一个字没变**（合并结果就是本机那一版）。
+    //   `eq` 已剥 rem 标记并做 canonicalize+normalize，所以"只是提醒下划线不同"
+    //   不会误判为差异（那类差异由本机 reconcile 自会重建）。
+    //
+    //   🔴🔴🔴 为什么**必须 push**（对抗审 D1，曾写成 `send('pulled')` 静默收敛）：
+    //     能走到这里 ⟺ `eq(remote,base)`/`eq(local,base)`/`eq(local,remoteDoc)` **全为假**
+    //     ⇒ 远端 R ≠ 本机 L。而 `res.doc == local` 恰恰是"**L 是 R 的超集**"这一常见形态
+    //     （mergeDocs 把 left 纯新增照单收下 ⇒ 本机多出的改动原样保留在结果里）。
+    //     此时远端**缺**本机那部分改动；若只 `send('pulled')` 不推，本机改动就停在本地，
+    //     底栏却显示『已同步』（谎报）。旧实现正是如此，属"静默丢推送"。
+    //     正确口径与文件末尾那条三方合并分支一致：不回灌，但要 `merge-clean` + push。
+    if (res.conflicts.length === 0 && eq(res.doc, local)) {
+      this.base = remoteDoc;
+      this.conflicts = [];
+      this.send('merge-clean');
+      await this.push();
+      return;
+    }
     this.conflicts = res.conflicts;
     this.d.setDoc(res.doc);
     this.base = remoteDoc;
@@ -809,7 +1063,7 @@ export class SyncClient {
     const wk = await getWriteKey(this.d.noteId, this.d.key, this.d.dk);
     if (!wk) return; // 没口令=没有凭据，不认领（也绝不能用别的凭据去认领）
     try {
-      const r = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}/claim`, {
+      const r = await fetchTextWithTimeout(`/api/note/${encodeURIComponent(this.d.noteId)}/claim`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-note-key': wk },
         body: '{}',
@@ -872,14 +1126,14 @@ export class SyncClient {
     } catch {
       /* 存不下不抛：继续推云端，本机这份丢了是降级不是失败 */
     }
-    let res: Response;
+    let res: TimedResponse;
     try {
       // 写入凭据（老项目 x-note-key 同款）：有就带上，没有就不带——
       // off/new-only 档照写成功，full 档由服务端拒（下面 403 分支给出可见错误）。
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       const wk = await getWriteKey(this.d.noteId, this.d.key, this.d.dk);
       if (wk) headers['x-note-key'] = wk;
-      res = await fetch(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
+      res = await fetchTextWithTimeout(`/api/note/${encodeURIComponent(this.d.noteId)}`, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
@@ -959,6 +1213,18 @@ export class SyncClient {
       //   而第二条意味着用户没拍板文档就被改了 —— 比报错更糟。
       //   注意 fsm.ts 里 conflict 态**故意没有** remote-arrived 边，两处是配套的。
       if (this.state === 'conflict') return;
+      // 🔴🔴🔴 `if (this.pulling) return` 与 startPoll 回调同款（对抗审 D1）：
+      //   静默轮询持锁在飞时不 send —— 否则 send 后 pull 被锁挡死 ⇒ 卡 syncing。
+      if (this.pulling) return;
+      // 🔴🔴🔴 idle 态走**静默轮询**（与定时器同款，对抗审 D2）：服务端每次写入都向
+      //   **含发送者自己**广播，本机 push 的回声也会到这里；若照旧 `send('remote-arrived')`
+      //   进状态机，空闲端仍会每来一次广播就闪一下「连接中…」。静默轮询先判"值不值得进"。
+      if (this.state === 'idle') {
+        void this.quietPoll().catch((e: unknown) => {
+          this.reportInternal('静默轮询失败（已被降级，不影响其他功能）', e);
+        });
+        return;
+      }
       this.send('remote-arrived');
       // 🔴🔴🔴 必须传 'syncing'，与 startPoll 回调同款 —— 这是探针 probe7 实锤的
       //   一个真 bug：`send('remote-arrived')` 刚把状态推进 `syncing`，

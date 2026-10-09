@@ -110,6 +110,12 @@ const EDGES: ReadonlySet<string> = new Set<string>([
   edge('idle', 'remote-arrived'),
   edge('idle', 'refresh'),
   edge('idle', 'edit'),
+  // 🔴🔴 idle --network-fail-->：**静默轮询**（client.ts quietPoll）在 idle 态拉失败时踩到。
+  //   老项目 poll 的 catch 把 fetch 失败归成"离线"（index.html:10026-10030）——
+  //   也就是说"已同步"态下一次失败轮询**必须**能把底栏切成"离线中"。
+  //   此前无此边 ⇒ 只能走 `idle --remote-arrived--> syncing --network-fail--> offline`
+  //   两条边，但那会先闪一下"连接中…"（正是用户报障第 7 条要消除的抖动）。
+  edge('idle', 'network-fail'),
 
   // syncing（正在拉）：拉回且本地无改动 → idle；合并后有改动 → 直接去推；
   // 冲突 → conflict；网络挂 → offline；拉的过程中用户又打字 → dirty
@@ -176,6 +182,13 @@ const EDGES: ReadonlySet<string> = new Set<string>([
   //   ⇒ 对应到 bj 就是这条边：去重拉一次。拉不成pull 自己会 network-fail 回offline
   //   （syncing --network-fail--> offline 是既有边），闭环。
   edge('offline', 'remote-arrived'),
+  // 🔴🔴 offline --pulled-->：静默轮询（client.ts quietPoll）在 offline 态拉成功、
+  //   且本机无改动 ⇒ 网络恢复、回『已同步』。老项目 poll 成功无条件
+  //   `setStatus(true,'已同步')`（index.html:9933-9937）。
+  //   不发这条边的话，offline 只能靠 window 'online' 事件或用户手动刷新回 idle ——
+  //   而"navigator.onLine 恒 true 但服务端不可达"（隧道/半死 socket）时浏览器
+  //   根本不派发 'online' ⇒ 底栏永久停在『离线中』。
+  edge('offline', 'pulled'),
 
   // conflict：只能由用户裁决或重拉解除，不许自己恢复
   //（自己恢复 = 用户根本不知道自己的内容被合并改过）
@@ -232,6 +245,7 @@ export function reduce(from: SyncState, ev: SyncEvent): SyncState {
     case 'idle':
       if (ev === 'remote-arrived' || ev === 'refresh') return 'syncing';
       if (ev === 'edit') return 'dirty';
+      if (ev === 'network-fail') return 'offline'; // 静默轮询拉失败（见 EDGES 该边注释）
       return 'locked'; // lock
 
     case 'syncing':
@@ -271,6 +285,7 @@ export function reduce(from: SyncState, ev: SyncEvent): SyncState {
     case 'offline':
       if (ev === 'edit') return 'offline'; // 继续攒本地改动，不尝试推送
       if (ev === 'lock') return 'locked';
+      if (ev === 'pulled') return 'idle'; // 静默轮询拉成功且无改动 ⇒ 网络恢复，回已同步
       return 'syncing'; // online / refresh / remote-arrived（老项目：收到推送就重拉）
 
     case 'conflict':

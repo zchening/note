@@ -857,7 +857,7 @@ test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 
   }
 });
 
-test('REM-20 🔴 补弹只弹离现在最近一条（无「还有 N 条」行，用户拍板 2026-10-08 修订）', async () => {
+test('REM-20 🔴 挂载时过期提醒**不弹卡**（用户报障第 6 条：刷新不再弹过期提醒）', async () => {
   // 🔴 唯一笔记名 + pageA/pageB **共用同一个名字**（pageB 要打开同一篇）
   const note = `rem20-${Date.now()}`;
   const pageA = await openEditor(h.browser(), h.baseUrl(), note, 'pw');
@@ -901,30 +901,45 @@ test('REM-20 🔴 补弹只弹离现在最近一条（无「还有 N 条」行�
   } finally {
     await pageA.close();
   }
-  // 🔴 pageB 的假钟设在 8 分钟后：打开时两条提醒都已过期 → 走 catch-up 补弹
+  // 🔴🔴 pageB 的假钟设在 8 分钟后：打开时两条提醒都已过期。
+  //   🔴🔴🔴 用户报障第 6 条（2026-10-09）：「过期的提醒，你不要再给我弹窗了。
+  //     我现在每次点击右下角刷新按钮，你就给我弹一次过期提醒，太烦人了。」
+  //   根因 = mount 路径里曾有一句"挂载时补弹离现在最近的一条过期提醒"。
+  //   老项目**没有补弹**：`showRemCard` 全仓只有一处调用点 `fireReminder`
+  //   （index.html:7564，`isCatchup=false`）—— 卡片只在到点当次弹；
+  //   页面加载时过期条目走 `markExpiredFired()` 补记 fired + 正文画删除线，**不弹卡**。
+  //   ⇒ 本条判据钉的就是"挂载后**不弹卡**，但正文照样画删除线、提醒照样留在真源"。
   const pageB = await openEditorAt(h.browser(), h.baseUrl(), note, 'pw', {
     iso: new Date(Date.now() + 8 * 60_000).toISOString(),
   });
   try {
-    // 补弹排在 mountEditor 后 500ms 的 setTimeout 里 —— 假钟静止，必须推一下
     await pageB.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 20_000 });
     await pageB.clock.fastForward(1_000);
-    await withTimeout(
-      pageB.waitForSelector('#remCard:not(.hidden)', { timeout: 8000 }),
-      9000, '等补弹卡出现',
+    // 🔴 「不应该有」：给足时间（旧补弹排在 mount 后 500ms 的 setTimeout），再确认卡**始终没出现**。
+    //   刻意用固定等待 + 读 DOM，而不是 waitForSelector（后者等的是"出现"，等不到"不出现"）。
+    await pageB.waitForTimeout(1_200);
+    const noCard = await pageB.evaluate(() => {
+      const el = document.getElementById('remCard');
+      return {
+        exists: el !== null,
+        hidden: el ? el.classList.contains('hidden') : true,
+        items: document.querySelectorAll('#remCard .ns-rem-item').length,
+      };
+    });
+    assert.ok(
+      noCard.exists === false || noCard.hidden === true,
+      `🔴 挂载时过期提醒绝不许弹卡（用户报障第 6 条），实际=${JSON.stringify(noCard)}`,
     );
-    // 🔴 先 dump 真源再断言：卡没弹时能直接看出是"服务器没数据"还是"补弹没跑"
+    // 🔴 「应该有」：提醒仍留在真源（不许因为"不弹卡"就顺手把过期提醒删掉）。
     const remsB = await pageB.evaluate(() => (window.__NOTESYNC_DOC__().reminders ?? []).map((r) => r.at));
-    const card = await pageB.evaluate(() => ({
-      items: document.querySelectorAll('#remCard .ns-rem-item').length,
-      first: document.querySelector('#remCard .ns-rem-when')?.textContent ?? '',
-      more: document.querySelector('#remCard .ns-rem-more')?.textContent ?? '',
-      late: document.querySelectorAll('#remCard .ns-rem-late').length,
+    assert.equal(remsB.length, 2, `过期提醒必须留在真源，实际=${JSON.stringify(remsB)}`);
+    // 🔴 「应该有」：正文里过期的时间串必须画**删除线**（`.rem-done`），且**不再**保留下划线。
+    const marks = await pageB.evaluate(() => ({
+      done: document.querySelectorAll('.ns-editor s.rem-done').length,
+      under: document.querySelectorAll('.ns-editor u.rem-mark').length,
     }));
-    assert.equal(card.items, 1, `补弹只弹最近一条，绝不整列表塞一张卡（真源=${JSON.stringify(remsB)}）`);
-    assert.ok(card.first.includes('第二'), `弹的必须是离现在最近的那条（at 最大、过期最晚），实际=${card.first}`);
-    assert.equal(card.more, '', `「还有 N 条」次要行已按用户要求移除，实际=${card.more}`);
-    assert.equal(card.late, 0, '「过期了X分钟」文案已退役');
+    assert.ok(marks.done >= 2, `过期提醒必须画删除线（s.rem-done），实际=${JSON.stringify(marks)}`);
+    assert.equal(marks.under, 0, `过期提醒不许再保留下划线（u.rem-mark），实际=${JSON.stringify(marks)}`);
   } finally {
     await pageB.close();
   }
