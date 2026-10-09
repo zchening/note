@@ -486,3 +486,147 @@ test('EGG-E13 🔴🔴 顶栏常驻螃蟹：领养后骑在 header 下沿且真�
     await page.close();
   }
 });
+
+/* ======================================================================
+ * 条件触发彩蛋：数字梗粒子 / notesync 烟花（用户报障「没有老版本那种动效」）
+ *
+ * 🔴🔴 判据钉的是**用户看得见的最终绘制**，不是"函数被调用了"：
+ *   本文件其他用例可以查 DOM，但粒子层是 canvas：它**没有任何返回值**，
+ *   画完还会被 `stop()` 把 `#nsFx` 整块摘掉（fx.ts:251-259），连 DOM 都不留。
+ *   所以这里**包裹 canvas 2D 上下文的原型方法**，记录真实画出去的东西 ——
+ *   那是唯一一条"用户实际看到了什么"的通道（fx.ts 的 loop 每帧都走它）。
+ *   🔴 绝不能改成"在源码里加个 window 计数器"：那是实现自报，
+ *   删掉 `parts.push` 只留计数也会照样绿（本项目判据纪律明令禁止）。
+ *
+ * 🔴 为什么"删掉重打"才是红判据：老项目每次成梗都放（nsDigitArmed 跳变上膛，
+ *   脱梗即重新上膛，index.html:5412/5445）；bj 把动效挂在了
+ *   `markDiscovered` 的**一次性**返回值上（layer.ts:233），于是只有**第二次**
+ *   才暴露 —— 只钉"第一次放没放"会假绿。
+ * ====================================================================== */
+
+test('EGG-E14 🔴🔴 数字梗粒子：敲 1314 放 🎆，删掉重打仍要再放（老项目逐字行为）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggNum14', PASS);
+  try {
+    const editable = await page.$('#editor-host[contenteditable="true"]');
+    assert.ok(editable, '编辑器未挂载');
+
+    // 插桩真实绘制通道：**同时**包 fillText（emoji 粒子）与 arc（金色点阵）。
+    // 🔴 只包一个会漏掉另一类效果 —— 金点走 arc+fill，压根不经过 fillText。
+    await page.evaluate(() => {
+      window.__fxLog = [];
+      const P = CanvasRenderingContext2D.prototype;
+      const oT = P.fillText;
+      const oA = P.arc;
+      P.fillText = function (t, ...r) {
+        try {
+          window.__fxLog.push({ k: 't', s: String(t) });
+        } catch {
+          /* 记录失败不许影响绘制本身 */
+        }
+        return oT.call(this, t, ...r);
+      };
+      P.arc = function (...r) {
+        try {
+          window.__fxLog.push({ k: 'd' });
+        } catch {
+          /* 同上 */
+        }
+        return oA.apply(this, r);
+      };
+    });
+
+    // 🔴🔴 探针锚点：**先证明插桩本身是通的**。
+    //   不做这一步，插桩坏了会表现成"没有粒子"—— 与"动效真的没放"长得一模一样，
+    //   于是修完之后会继续假红，把人引向鬼影。
+    const probe = await page.evaluate(() => {
+      const c = document.createElement('canvas');
+      const ctx = c.getContext('2d');
+      ctx.fillText('probe', 0, 0);
+      ctx.beginPath();
+      ctx.arc(1, 1, 1, 0, Math.PI * 2);
+      return window.__fxLog.length;
+    });
+    assert.ok(probe >= 2, `canvas 插桩没生效（探针只记到 ${probe} 条）—— 判据本身是坏的，别往下信它`);
+
+    const drain = () =>
+      page.evaluate(() => {
+        const l = window.__fxLog.slice();
+        window.__fxLog.length = 0;
+        return l;
+      });
+    // 🔴🔴 先等画布**出现**、再等它消失 —— 顺序反了就是假红：
+    //   只等"消失"的话，粒子还没放（画布从未存在）时那个条件**立刻为真**，
+    //   于是会在打字还没被 update listener 处理完时就读记录，读到空的。
+    //   这条是我在证红时实跑抓出来的判据自身竞态（画不出东西 ≠ 没画）。
+    const waitFxEnd = async () => {
+      await page
+        .waitForFunction(() => !!document.getElementById('nsFx'), null, { timeout: 4000 })
+        .catch(() => {});
+      await page.waitForFunction(() => !document.getElementById('nsFx'), null, { timeout: 8000 });
+    };
+    const emojiOf = (l) => l.filter((e) => e.k === 't').map((e) => e.s).join('');
+
+    await editable.click();
+    await drain();
+    await page.keyboard.type('1314');
+    await waitFxEnd();
+    const first = emojiOf(await drain());
+
+    // 同页删空重打 —— 老项目每次成梗都放，bj 被一次性门控 ⇒ 这条是红判据
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Delete');
+    await waitFxEnd();
+    await drain();
+    await page.keyboard.type('1314');
+    await waitFxEnd();
+    const second = emojiOf(await drain());
+
+    assert.match(first, /🎆/, `第一次敲 1314 应放出 🎆（老项目 1314→🎆，index.html:5363），实得 ${JSON.stringify(first)}`);
+    assert.match(
+      second,
+      /🎆/,
+      `删掉重打 1314 后应**再放一次** 🎆 —— 老项目脱梗即重新上膛，实得 ${JSON.stringify(second)}`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('EGG-E15 🔴 notesync 烟花：敲出 notesync 放金色点阵（arc 绘制，非 ✦/✨ 字符）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggFw15', PASS);
+  try {
+    const editable = await page.$('#editor-host[contenteditable="true"]');
+    assert.ok(editable, '编辑器未挂载');
+
+    await page.evaluate(() => {
+      window.__fxLog = [];
+      const P = CanvasRenderingContext2D.prototype;
+      const oA = P.arc;
+      P.arc = function (...r) {
+        try {
+          window.__fxLog.push({ k: 'd' });
+        } catch {
+          /* 同上 */
+        }
+        return oA.apply(this, r);
+      };
+    });
+
+    await editable.click();
+    await page.keyboard.type('notesync');
+    // 同上：先等画布出现再等它消失，否则会在粒子还没放时就读数
+    await page
+      .waitForFunction(() => !!document.getElementById('nsFx'), null, { timeout: 4000 })
+      .catch(() => {});
+    await page.waitForFunction(() => !document.getElementById('nsFx'), null, { timeout: 8000 });
+    const dots = await page.evaluate(() => window.__fxLog.filter((e) => e.k === 'd').length);
+
+    assert.ok(
+      dots > 0,
+      '敲出 notesync 应放出**金色点阵**（老项目 nsFirework 20 个点，index.html:5463）—— 实得 0 个 arc 绘制，' +
+        '说明放的还是 bj 自创的 ✦/✨ 字符粒子（老项目没有）',
+    );
+  } finally {
+    await page.close();
+  }
+});

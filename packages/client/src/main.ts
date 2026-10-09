@@ -1011,6 +1011,17 @@ function passForPair(): string | null {
 }
 
 /** 收藏态与链接打开方式是**本机偏好**（老项目：仅对本机生效），存 localStorage。 */
+/**
+ * 程序化重建（`docToLexical` / `replaceBlocksAt`）的 update 标记。
+ *
+ * 🔴🔴 为什么必须有这个 tag：Lexical 的 update listener 对**每一个 commit 都会触发**
+ *   （含纯选区变化这种 no-op），而下面四条路径都是**程序化**写回 ——
+ *   初始装载、远端回灌、提醒到点整篇重建。老项目这些路径压根没有 input 事件，
+ *   所以绝不能让它们放彩蛋动效；少了这个 tag，症状就是
+ *   "打开一篇本来就有 1314 的笔记，一进去就炸一次"。
+ */
+const EGG_NOFX_TAG = 'notesync-nofx';
+
 const prefKey = (k: string): string => `notesync_bj_pref_${k}`;
 function readPref(k: string, dflt: string): string {
   try {
@@ -1902,7 +1913,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         () => {
           docToLexical(latestDoc);
         },
-        { discrete: true },
+        { discrete: true, tag: EGG_NOFX_TAG },
       );
     },
   });
@@ -1914,7 +1925,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
   // 🔴 必须在 docToLexical 之前挂监听：initial 那一次 update 也要留下快照，
   //   否则首次 commit 之前 latestDoc 停在空文档，e2e 读到的是"从未提交过"的假象。
-  ed.registerUpdateListener(({ editorState }: { editorState: EditorState }) => {
+  /** 上一次扫描时的正文文本 —— 彩蛋「文本真变」那道闸的基准。 */
+  let lastEggText = '';
+  ed.registerUpdateListener(({ editorState, tags }: { editorState: EditorState; tags?: Set<string> }) => {
     // 🔴 state.read() 回调外节点句柄失效 —— 整段导出必须在回调内部完成
     const before = latestDoc;
     // 🔴🔴🔴 导出基准的 reminders 必须来自 **latestDoc**（可能是刚被 setDoc 写进去的新值），
@@ -2057,7 +2070,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
           const snapshot = latestDoc;
           ed.update(() => {
             docToLexical(snapshot);
-          }, { discrete: true });
+          }, { discrete: true, tag: EGG_NOFX_TAG });
         } else if (path === 'local') {
           const snapshot = latestDoc;
           const idx = plan.rebuild;
@@ -2067,7 +2080,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             //   replaceBlocksAt 越界会抛（不静默跳过），异常会冒到
             //   update listener 外 —— 由 ed 自己的错误处理兜住，不会静默失败。
             replaceBlocksAt(snapshot, idx);
-          }, { discrete: true });
+          }, { discrete: true, tag: EGG_NOFX_TAG });
         }
       }
     }
@@ -2075,10 +2088,20 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     // 对账报出的增删要通知 UI：新增的排进调度，删掉的从调度里消失
     if (rec.added.length > 0 || rec.removed.length > 0) reminderRef?.schedule();
 
-    // 🔴 彩蛋条件触发（数字梗 / notesync 烟花）。
-    //   判据跑在**已提交的真源文本**上，不是按键事件上 ——
-    //   按键时输入法还在组字，拿到的是半截文本，会漏判也会误判。
-    if (eggLayer) scanEggTriggers(eggLayer, latestDocText());
+    // 🔴🔴 彩蛋条件触发（数字梗 / notesync 烟花）—— **三道闸，缺一不可**：
+    //   1. `tags`：程序化重建（初始装载 / 远端回灌 / 提醒到点）不放动效 ——
+    //      老项目这些路径根本没有 input 事件；少了它，"打开一篇本来就有 1314
+    //      的笔记"一进去就炸一次。
+    //   2. 文本真变：**纯选区变化（只是点一下光标）也会进 update listener**，
+    //      少了它，"把光标点到已有的 1314 后面"会误爆。
+    //   3. 组字中：拼音尾巴是数字会误判（老项目 index.html:5417 同款守卫）。
+    //   🔴 基准仍是**已提交的真源**，不是按键事件 —— 按键时输入法在组字，拿到的是半截文本。
+    const eggText = latestDocText();
+    const eggTextChanged = eggText !== lastEggText;
+    lastEggText = eggText;
+    if (eggLayer && eggTextChanged && !(tags && tags.has(EGG_NOFX_TAG)) && !ed.isComposing()) {
+      scanEggTriggers(eggLayer);
+    }
 
     // 🔴 只有内容真变了才推。
     //   少了这个判断：docToLexical 的首次 update、以及 merge 把远端内容写回来时，
@@ -2087,7 +2110,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (canonicalize(latestDoc) !== canonicalize(before)) syncRef?.noteEdit();
   });
 
-  ed.update(() => docToLexical(initial), { discrete: true });
+  ed.update(() => docToLexical(initial), { discrete: true, tag: EGG_NOFX_TAG });
 
   // 🔴🔴 首屏跑一轮链接识别（老项目 index.html:3471 `if (note.ct) linkifyEditor()`）。
   //

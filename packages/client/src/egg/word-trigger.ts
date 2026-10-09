@@ -106,7 +106,11 @@ function blockOf(node: Node | null, root: HTMLElement): HTMLElement {
  *
  * @param caretRectOut 出参：光标所在矩形，供浮层锚定（老项目 `_askCaretRect` :10962）
  */
-function caretCtx(
+/**
+ * 导出给条件触发（数字梗 / notesync 烟花）复用 —— 那边的判定面同样是光标上下文。
+ * 🔴 不另写第二套取法：两套实现迟早漂，而漂移零报错。
+ */
+export function caretCtx(
   root: HTMLElement,
   caretRectOut: { rect: DOMRect | null },
 ): CaretCtx | null {

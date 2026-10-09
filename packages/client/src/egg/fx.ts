@@ -35,6 +35,10 @@ interface P {
   size: number;
   rot: number;
   vr: number;
+  /** true = 金色圆点（老项目 `ns-fw`）：走 `arc` 不走 `fillText`，且**不受重力**。 */
+  dot?: boolean;
+  /** 秒。老项目每个点的 `animationDelay`（0–0.12s 随机）：先停在原地，到点才开始飞。 */
+  delay?: number;
 }
 
 /**
@@ -215,29 +219,50 @@ function loop(): void {
     return;
   }
   ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  // ⚠️ canvas 的 fillStyle / font **都不吃 var()**：CSS 变量在 canvas 2d 上下文里不解析，
+  //   写 var() 会被当成非法值串，赋值被**静默丢弃**（零报错）—— 于是画出的是上一次的颜色
+  //   与默认字体。所以这里必须解析成具体值。这是全项目**唯一**允许在 canvas 里出现色值的
+  //   例外，其余一律走 GameCtx.css()。
+  // 🔴 每帧取一次（原来是每个粒子取一次）：同一帧内读到的值本就相同，
+  //   而 getComputedStyle 是这里最贵的一项，26 个粒子逐帧调用纯属白给。
+  const accent = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#8a6a2f';
   let alive = 0;
   for (const p of parts) {
-    p.life -= 1 / 60;
-    if (p.life <= 0) continue;
+    if ((p.delay ?? 0) > 0) {
+      // 老项目每个点的 `animationDelay`：先停在原地（**仍然画出来**），到点才开始飞
+      p.delay = (p.delay ?? 0) - 1 / 60;
+    } else {
+      p.life -= 1 / 60;
+      if (p.life <= 0) continue;
+      p.x += p.vx;
+      p.y += p.vy;
+      // 🔴 重力只作用于字符粒子：金点是**匀速飞向固定终点**（老项目 ns-fw 的关键帧），
+      //    吃了重力会整体往下掉一大截，看着像"往下洒"而不是"炸开"。
+      if (!p.dot) p.vy += 0.12;
+      p.rot += p.vr;
+    }
     alive++;
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += 0.12; // 重力
-    p.rot += p.vr;
     ctx.save();
     ctx.translate(p.x, p.y);
-    ctx.rotate(p.rot);
     ctx.globalAlpha = Math.max(0, Math.min(1, p.life / p.max));
-    ctx.font = `${p.size}px var(--mono, ui-monospace)`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // ⚠️ canvas fillStyle **不吃 var(--accent)**：CSS 变量在 canvas 2d 上下文里不解析，
-    //   写var() 会被当成非法颜色串，fillText 就画出上一次的颜色（或直接不画，零报错）。
-    //   所以这里必须解析成具体值。这是全项目**唯一**允许在 canvas 里出现色值的例外，
-    //   其余一律走 GameCtx.css()（那也是走 getPropertyValue，只是不落字面量）。
-    ctx.fillStyle =
-      getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#8a6a2f';
-    ctx.fillText(p.ch, 0, 0);
+    ctx.fillStyle = accent;
+    if (p.dot) {
+      // 金色圆点（老项目 nsFirework 的 `.ns-fw i`）
+      ctx.beginPath();
+      ctx.arc(0, 0, Math.max(0.5, p.size / 2), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.rotate(p.rot);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // 🔴🔴 这里此前写的是 `${p.size}px var(--mono, ui-monospace)` —— 同上面的坑，
+      //   ctx.font 不解析 var()，整串非法 ⇒ 赋值静默丢弃 ⇒ 每个粒子都按默认
+      //   10px sans-serif 画，`p.size`（15–25）**完全失效**。必须写字面量字体栈；
+      //   emoji 字体放后面兜回落（🔴 勿把 "Segoe UI Symbol" 排在 "Segoe UI Emoji" 前，
+      //   那会拿到单色字形）。
+      ctx.font = `${p.size}px ui-monospace, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+      ctx.fillText(p.ch, 0, 0);
+    }
     ctx.restore();
   }
   if (alive === 0) {
@@ -264,6 +289,10 @@ export function burst(x: number, y: number, ch: string, count = 12): void {
   const cv = ensureCanvas();
   if (!cv) return;
   if (raf === 0) window.addEventListener('resize', fit, { passive: true });
+  // 🔴🔴 按**字素**取字符，不是按 UTF-16 码元：
+  //   🔥💕🎆😂 都是 astral 字符（`ch.length === 2`，一个代理对）。按码元取会拆出
+  //   半截代理项，fillText 画出来是方框或空白 —— 这正是"动效看着像没生效"的一半原因。
+  const glyphs = Array.from(ch);
   for (let i = 0; i < count; i++) {
     const a = (Math.PI * 2 * i) / count + Math.random() * 0.6;
     const sp = 2 + Math.random() * 4;
@@ -274,19 +303,58 @@ export function burst(x: number, y: number, ch: string, count = 12): void {
       vy: Math.sin(a) * sp - 2,
       life: 0.8 + Math.random() * 0.6,
       max: 1.4,
-      ch: ch[i % ch.length] ?? ch[0] ?? '✦',
+      ch: glyphs[i % glyphs.length] ?? glyphs[0] ?? '✦',
       size: 15 + Math.random() * 10,
       rot: Math.random() * Math.PI,
       vr: (Math.random() - 0.5) * 0.25,
+      dot: false,
+      delay: 0,
     });
   }
   if (raf === 0) raf = requestAnimationFrame(loop);
 }
 
-/** 从编辑器上方正中放一朵烟花（notesync 梗）。 */
+/**
+ * 老项目 `nsFirework`（index.html:5463-5483）：20 个金色圆点呈放射状飞向**固定终点**。
+ *
+ * 🔴🔴 参数逐字对齐老项目：20 个点、角度抖动 ±0.15、半径 `44 + 56·rand`、
+ *   终点 `sin(a)·r − 16`（整体上偏 16px）、尺寸 3–8px、时长 1.2s、随机延迟 0–0.12s、
+ *   颜色吃 `--accent`（金）。
+ *   🔴 此前 bj 是 `burst('✦')` + 160ms 后再 `burst('✨')` —— 那是 **bj 自创**的火花，
+ *   老项目没有这一步，按"老项目没有的就去掉"的口径移除。
+ */
+export function spark(x: number, y: number, count = 20): void {
+  const cv = ensureCanvas();
+  if (!cv) return;
+  if (raf === 0) window.addEventListener('resize', fit, { passive: true });
+  const life = 1.2; // 老项目 nsFwOut 1.2s
+  const frames = life * 60;
+  for (let i = 0; i < count; i++) {
+    const a = (Math.PI * 2 * i) / count + (Math.random() * 0.3 - 0.15);
+    const r = 44 + Math.random() * 56;
+    parts.push({
+      x,
+      y,
+      vx: (Math.cos(a) * r) / frames,
+      vy: (Math.sin(a) * r - 16) / frames,
+      // 🔴 `life` 必须**等于** `max`：loop 用 `life / max` 算透明度，
+      //   沿用 burst 的 `0.8~1.4 / max 1.4` 会让点一出生就是半透明、且提前在终点前消失。
+      life,
+      max: life,
+      ch: '',
+      size: 3 + Math.random() * 5,
+      rot: 0,
+      vr: 0,
+      dot: true,
+      delay: Math.random() * 0.12,
+    });
+  }
+  if (raf === 0) raf = requestAnimationFrame(loop);
+}
+
+/** notesync 梗的烟花 —— 老项目就是这 20 个金点，没有别的。 */
 export function firework(x: number, y: number): void {
-  burst(x, y, '✦', 26);
-  window.setTimeout(() => burst(x, y, '✨', 14), 160);
+  spark(x, y);
 }
 
 /**

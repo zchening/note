@@ -17,7 +17,8 @@ import { COPY } from '../ui/copy.ts';
 import { doorOf, eggById, markDiscovered, type EggStore } from './registry.ts';
 import { buildCodex, type Codex } from './codex.ts';
 import { buildShell, type AnyGame, type Shell } from './shell.ts';
-import { bindEggWordTrigger, type EggWordBinding } from './word-trigger.ts';
+import { bindEggWordTrigger, caretCtx, type EggWordBinding } from './word-trigger.ts';
+import { buildGagLatch, fwFire, gagFire, GAG_TAIL_WINDOW } from './gag.ts';
 import { buildSound, type Sound } from './sound.ts';
 import { adoptPet, mountPet } from './pet.ts';
 import { burst, clearFx, firework, isFestival, rain, showBadge } from './fx.ts';
@@ -80,6 +81,17 @@ export interface EggLayer {
   /** 绑定条件触发（正文数字梗/ notesync、节日雨/徽章）。 */
   bindTriggers: () => void;
   /**
+   * 条件触发的扫描入口 —— main.ts 在编辑器 update 回调里调它。
+   *
+   * 🔴🔴 为什么必须是**本返回对象上的一个方法**，而不是往外部传进来的 hooks 上挂
+   *   `__scanEggs`：调用方 `scanEggTriggers` 收到的是**这个返回对象**，
+   *   而那个 hooks（`buildEggLayer` 的第三个参数）是 main.ts 的一**临时字面量**、
+   *   外面根本不持有引用 ⇒ 扫描函数永远取不到 ⇒
+   *   "数字梗 / notesync 烟花一次都没放过"，而且**零报错**（catch 全吞了）。
+   *   这是本次"没有老版本那种动效"最靠前的那个根因。
+   */
+  scanEggs: () => void;
+  /**
    * 绑定正文彩蛋词表触发（敲 `/dragon` 弹确认层）。
    *
    * 🔴 为什么要**单独**一个入口而不是塞进 `bindTriggers`：
@@ -116,6 +128,8 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
   const sound = buildSound();
   /** 词表触发绑定句柄。`bindWordTrigger` 可被重复调，故存起来以便先解绑。 */
   let wordBinding: EggWordBinding | undefined;
+  /** 条件触发的扫描函数。`bindTriggers()` 里赋值，经 `scanEggs` 暴露给 main.ts。 */
+  let eggScan: (() => void) | undefined;
   const shell = buildShell(sound, {
     onClosed: () => h.onGameClosed?.(),
   });
@@ -223,31 +237,50 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
   }
 
   function bindTriggers(): void {
-    // 条件触发 1/2：正文里的数字梗与 notesync。
-    // 判据放在**词表纯函数**里（见 registry.numGagsIn / hasFireworkWord），
-    // 这里只负责撒粒子与标记。
-    let lastFw = 0;
-    const scan = (text: string): void => {
-      if (text === '') return;
-      // 数字梗
-      if (markDiscovered(store, 'num', text.length > 0 && /(?<![\d.])(666|520|1314|888|6666)(?![\d.])/.test(text))) {
-        // 🔴 id 是 `#editor-host`（见 ui/shell.ts）。写错成 nsEditor 时
-        //   getElementByRect 恒为 null，粒子会撒到窗口正中而不是编辑器上方，
-        //   而getBoundingClientRect 的 null 分支是静默的 —— 不报错，只是位置不对。
-        const ed = document.getElementById('editor-host');
-        const r = ed?.getBoundingClientRect();
-        burst(r ? r.left + r.width / 2 : window.innerWidth / 2, r ? Math.max(56, r.bottom - 120) : 120, '🔥', 14);
-      }
-      // notesync 烟花（600ms 节流：一次输入可能命中多次判定）
-      const now = performance.now();
-      if (now - lastFw > 600 && /notesync/i.test(text)) {
-        lastFw = now;
-        if (markDiscovered(store, 'fw', true)) {
-          firework(window.innerWidth / 2, window.innerHeight / 2);
+    /**
+     * 条件触发 1/2：正文里的数字梗与 notesync。
+     *
+     * 🔴🔴 判定面是**光标前缀**（老项目 `nsCaretPrefix` + `nsDigitHit` / `nsFwHit`），
+     *   不是"整篇包含"：整篇包含会让"打开一篇本来就有 1314 的笔记"也爆一次，
+     *   而老项目只在**打字**时才判定（它挂在 document 的 input 事件上）。
+     *   判定逻辑本身在纯函数层 `gag.ts`（node 里可单测），这里只负责撒粒子与记账。
+     *
+     * 🔴🔴 动效由**跳变闩锁**驱动（每次成梗都放）；`markDiscovered` 只负责图鉴记账、
+     *   **不再门控视觉** —— 那道门控正是"第一次之后再也没见过动效"的根因。
+     *   （老项目里 nsBurst/nsFirework 与 nsEggUnlock 本就是两件互不相干的事。）
+     */
+    const numLatch = buildGagLatch();
+    const fwLatch = buildGagLatch();
+    const scan = (): void => {
+      try {
+        const root = document.getElementById('editor-host');
+        if (!root) return;
+        const out: { rect: DOMRect | null } = { rect: null };
+        const ctx = caretCtx(root, out);
+        // 拿不到光标（无选区 / 光标不在编辑器内）：不爆，也不动闩锁
+        if (!ctx) return;
+        // 🔴 还框选着：老项目铁律，绝不打扰（caretCtx 用哨兵 \u0000SEL 表达）
+        if (ctx.pre === '\u0000SEL') return;
+        const tail = ctx.pre.slice(-GAG_TAIL_WINDOW);
+        const emo = gagFire(numLatch, tail);
+        if (emo) {
+          markDiscovered(store, 'num', true); // 只记账，不门控
+          const r = out.rect;
+          // 老项目 :5448-5451：从光标处冒；拿不到光标矩形才退回编辑器上方
+          burst(r ? r.left : window.innerWidth / 2, r ? Math.max(56, r.bottom - 6) : 120, emo, 5);
         }
+        if (fwFire(fwLatch, tail)) {
+          markDiscovered(store, 'fw', true);
+          const r = out.rect;
+          firework(r ? r.left : window.innerWidth / 2, r ? Math.max(56, r.bottom - 6) : 120);
+        }
+      } catch {
+        /* 氛围层：不许它把编辑流程带崩（老项目整段 try/catch 同款） */
       }
     };
-    (h as unknown as { __scanEggs?: (t: string) => void }).__scanEggs = scan;
+    // 🔴 挂到本层闭包里、经返回对象的 `scanEggs` 暴露 —— **不再**挂到外部传进来的
+    //   hooks 对象 `h` 上：那个对象调用方拿不到，挂上去等于没挂（见 EggLayer.scanEggs 注释）。
+    eggScan = scan;
 
     // 条件触发 3/4：节日雨 + 节日/深夜徽章（启动时判一次）。
     const now = new Date();
@@ -262,6 +295,9 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
     doorOfPath: () => doorOf(location.pathname.replace(/^\/+|\/+$/g, '')),
     openCodex,
     bindTriggers,
+    scanEggs: () => {
+      eggScan?.();
+    },
     bindWordTrigger: (root: HTMLElement) => {
       // 🔴 幂等：main.ts 的挂载路径与热重载都可能调第二次，重复绑定会让
       //   一次击键弹两层确认层（用户看到两个「进入」按钮）。
@@ -286,10 +322,15 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
   };
 }
 
-/** 让main.ts 在 update 回调里能扫正文触发条件。 */
-export function scanEggTriggers(layerHost: unknown, text: string): void {
-  const scan = (layerHost as { __scanEggs?: (t: string) => void } | null)?.__scanEggs;
-  if (scan) scan(text);
+/**
+ * 让 main.ts 在 update 回调里触发条件彩蛋（数字梗 / notesync 烟花）。
+ *
+ * 🔴 不再接收"整篇正文"：判定面改成光标前缀（见上面 `scan` 的注释），
+ *   由 `scan` 自己从编辑器取，避免调用方与判定面对不上。
+ */
+export function scanEggTriggers(layerHost: unknown): void {
+  const scan = (layerHost as { scanEggs?: () => void } | null)?.scanEggs;
+  if (scan) scan();
 }
 
 export { eggById };
