@@ -35,10 +35,88 @@ interface P {
   size: number;
   rot: number;
   vr: number;
-  /** true = 金色圆点（老项目 `ns-fw`）：走 `arc` 不走 `fillText`，且**不受重力**。 */
-  dot?: boolean;
-  /** 秒。老项目每个点的 `animationDelay`（0–0.12s 随机）：先停在原地，到点才开始飞。 */
-  delay?: number;
+}
+
+/**
+ * 🔴🔴 数字梗与烟花的**粒子参数**（老项目 index.html:6694-6701 / 6762-6773 逐字）。
+ *
+ * 抽出来是因为老项目这两个动效是 **DOM `<i>` + CSS keyframes**，参数以
+ * CSS 自定义属性（`--nx/--ny/--nr/--fx/--fy`）的形式写进 inline style；
+ * 抽成纯函数后「数值对不对齐老项目」才能被单测钉住（见 `test/egg-fxplan.test.mjs`）。
+ */
+
+/** 老项目 `nsBurst` 固定撒 5 枚（:6694 `for (let i = 0; i < 5; i++)`）。 */
+export const BURST_N = 5;
+/** 老项目 `nsFirework` 固定 20 个金点（:6762 `const N = 20`）。 */
+export const FW_N = 20;
+
+export interface BurstDot {
+  /** `--nx`：横向位移，老项目 `Math.random()*70-35` ⇒ [-35,35)。 */
+  nx: string;
+  /** `--ny`：纵向位移，老项目 `-30 - Math.random()*40` ⇒ (-70,-30]，**朝上**。 */
+  ny: string;
+  /** `--nr`：终态旋转，老项目 `Math.random()*60-30` ⇒ [-30,30)。 */
+  nr: string;
+  /** `animationDelay`，老项目 `i*0.03`（**递增**，不是随机）。 */
+  delay: string;
+}
+
+export interface FwDot {
+  /** `--fx`：终点横坐标，老项目 `(Math.cos(a)*r).toFixed(1)`。 */
+  fx: string;
+  /** `--fy`：终点纵坐标，老项目 `(Math.sin(a)*r - 16).toFixed(1)`（整体上偏 16px）。 */
+  fy: string;
+  /** 点的宽高，老项目 `3 + Math.random()*5` ⇒ [3,8)。 */
+  size: string;
+  /** `animationDelay`，老项目 `Math.random()*0.12`。 */
+  delay: string;
+}
+
+/**
+ * 数字梗 5 枚 emoji 的动画参数 —— 老项目 :6694-6701 **逐字**。
+ *
+ * 🔴 `delay` 是 `i*0.03` 的**递增**序列（不是随机、也不是 0）：
+ *    老项目靠它做出"依次冒出"的层次感，改成随机会变成乱跳。
+ * @param rnd 随机源（默认 `Math.random`，测试注入口）。调用顺序 = nx, ny, nr。
+ */
+export function burstPlan(rnd: () => number = Math.random): BurstDot[] {
+  const out: BurstDot[] = [];
+  for (let i = 0; i < BURST_N; i++) {
+    // 🔴 老项目 :6697-6700 **不做 toFixed** —— 直接 `+ 'px'` / `+ 'deg'` / `+ 's'`。
+    //   bj 曾经给 nx/ny/nr 加了 `.toFixed(1)`，数值上等价但**不是老项目那份**；
+    //   对齐纪律是"逐字"，故去掉。（烟花的 fx/fy 老项目**确实**有 `.toFixed(1)`，
+    //   两边不一样，别互相抄。）
+    out.push({
+      nx: rnd() * 70 - 35 + 'px',
+      ny: -30 - rnd() * 40 + 'px',
+      nr: rnd() * 60 - 30 + 'deg',
+      delay: i * 0.03 + 's',
+    });
+  }
+  return out;
+}
+
+/**
+ * notesync 烟花 20 个金点的动画参数 —— 老项目 :6762-6773 **逐字**。
+ *
+ * 🔴 角度是 `2πi/N` **均分**再加 ±0.15 抖动（不是纯随机环形）：
+ *    均分才铺得满一圈，纯随机会让某一侧空掉，看着像"往下洒"而不是"炸开"。
+ * @param n 点数，老项目恒 20。
+ * @param rnd 随机源。调用顺序 = 角度抖动, 半径, 尺寸, 延迟。
+ */
+export function fwPlan(n: number = FW_N, rnd: () => number = Math.random): FwDot[] {
+  const out: FwDot[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = (Math.PI * 2 * i) / n + (rnd() * 0.3 - 0.15);
+    const r = 44 + rnd() * 56;
+    out.push({
+      fx: (Math.cos(a) * r).toFixed(1) + 'px',
+      fy: (Math.sin(a) * r - 16).toFixed(1) + 'px',
+      size: (3 + rnd() * 5).toFixed(1) + 'px',
+      delay: (rnd() * 0.12).toFixed(2) + 's',
+    });
+  }
+  return out;
 }
 
 /**
@@ -227,42 +305,31 @@ function loop(): void {
   //   而 getComputedStyle 是这里最贵的一项，26 个粒子逐帧调用纯属白给。
   const accent = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#8a6a2f';
   let alive = 0;
+  // 🔴 这条循环现在**只服务于节日雨**（`rain`）：数字梗与 notesync 烟花已改为
+  //   DOM + CSS keyframes（老项目就是那样）。别再往这里加"金点""延迟"分支 ——
+  //   那两类粒子已经没有 canvas 生产者了，分支留着就是死代码。
   for (const p of parts) {
-    if ((p.delay ?? 0) > 0) {
-      // 老项目每个点的 `animationDelay`：先停在原地（**仍然画出来**），到点才开始飞
-      p.delay = (p.delay ?? 0) - 1 / 60;
-    } else {
-      p.life -= 1 / 60;
-      if (p.life <= 0) continue;
-      p.x += p.vx;
-      p.y += p.vy;
-      // 🔴 重力只作用于字符粒子：金点是**匀速飞向固定终点**（老项目 ns-fw 的关键帧），
-      //    吃了重力会整体往下掉一大截，看着像"往下洒"而不是"炸开"。
-      if (!p.dot) p.vy += 0.12;
-      p.rot += p.vr;
-    }
+    p.life -= 1 / 60;
+    if (p.life <= 0) continue;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.12;
+    p.rot += p.vr;
     alive++;
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.globalAlpha = Math.max(0, Math.min(1, p.life / p.max));
     ctx.fillStyle = accent;
-    if (p.dot) {
-      // 金色圆点（老项目 nsFirework 的 `.ns-fw i`）
-      ctx.beginPath();
-      ctx.arc(0, 0, Math.max(0.5, p.size / 2), 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.rotate(p.rot);
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // 🔴🔴 这里此前写的是 `${p.size}px var(--mono, ui-monospace)` —— 同上面的坑，
-      //   ctx.font 不解析 var()，整串非法 ⇒ 赋值静默丢弃 ⇒ 每个粒子都按默认
-      //   10px sans-serif 画，`p.size`（15–25）**完全失效**。必须写字面量字体栈；
-      //   emoji 字体放后面兜回落（🔴 勿把 "Segoe UI Symbol" 排在 "Segoe UI Emoji" 前，
-      //   那会拿到单色字形）。
-      ctx.font = `${p.size}px ui-monospace, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
-      ctx.fillText(p.ch, 0, 0);
-    }
+    ctx.rotate(p.rot);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // 🔴🔴 这里此前写的是 `${p.size}px var(--mono, ui-monospace)` —— canvas 的
+    //   ctx.font **不解析 var()**，整串非法 ⇒ 赋值被静默丢弃 ⇒ 每个粒子都按默认
+    //   10px sans-serif 画，`p.size` **完全失效**。必须写字面量字体栈；
+    //   emoji 字体放后面兜回落（🔴 勿把 "Segoe UI Symbol" 排在 "Segoe UI Emoji" 前，
+    //   那会拿到单色字形）。
+    ctx.font = `${p.size}px ui-monospace, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+    ctx.fillText(p.ch, 0, 0);
     ctx.restore();
   }
   if (alive === 0) {
@@ -283,78 +350,83 @@ function stop(): void {
   canvas = null;
 }
 
-/** 撒一把粒子。count 为 0 时直接返回（不建canvas、不起 rAF）。 */
-export function burst(x: number, y: number, ch: string, count = 12): void {
-  if (count <= 0) return;
-  const cv = ensureCanvas();
-  if (!cv) return;
-  if (raf === 0) window.addEventListener('resize', fit, { passive: true });
-  // 🔴🔴 按**字素**取字符，不是按 UTF-16 码元：
-  //   🔥💕🎆😂 都是 astral 字符（`ch.length === 2`，一个代理对）。按码元取会拆出
-  //   半截代理项，fillText 画出来是方框或空白 —— 这正是"动效看着像没生效"的一半原因。
-  const glyphs = Array.from(ch);
-  for (let i = 0; i < count; i++) {
-    const a = (Math.PI * 2 * i) / count + Math.random() * 0.6;
-    const sp = 2 + Math.random() * 4;
-    parts.push({
-      x,
-      y,
-      vx: Math.cos(a) * sp,
-      vy: Math.sin(a) * sp - 2,
-      life: 0.8 + Math.random() * 0.6,
-      max: 1.4,
-      ch: glyphs[i % glyphs.length] ?? glyphs[0] ?? '✦',
-      size: 15 + Math.random() * 10,
-      rot: Math.random() * Math.PI,
-      vr: (Math.random() - 0.5) * 0.25,
-      dot: false,
-      delay: 0,
-    });
+/**
+ * 数字梗粒子 —— 老项目 `nsBurst`（index.html:6688-6705）**逐字**。
+ *
+ * 🔴🔴 **这是 DOM + CSS keyframes，不是 canvas 粒子。**
+ *   老项目建一个 `div.ns-burst`（`position:fixed` 钉在光标处），里面 5 个 `<i>`
+ *   各带一组 `--nx/--ny/--nr`，靠 `@keyframes nsBurstUp .95s ease-out` 飞出去。
+ *   bj 曾经在 canvas 里用 rAF 重画了一遍 —— 载体不同，位移范围（老项目是
+ *   ±35px 横向 + 30–70px 朝上）、时长、缓动（ease-out）、缩放（.6→1.15）、
+ *   透明度曲线（0→1@15%→0）四条**全都不一样**，用户报「动效效果不好」正是这个。
+ *   **不要改回 canvas。**
+ *
+ * 🔴 emoji 走 `textContent` —— DOM 天然按字素处理，不存在 canvas 那种
+ *   "按 UTF-16 码元取字符拆出半截代理对"的问题（🔥💕🎆😂 都是 astral 字符）。
+ * 🔴 1300ms 后自毁（老项目 :6704）：最长的一枚 delay 0.12s + 动画 .95s = 1.07s。
+ *
+ * @param x 光标横坐标（视口坐标）。
+ * @param y 光标纵坐标 —— 调用方已按老项目 `Math.max(56, bottom-6)` 夹过上边界。
+ * @param emoji 该梗的 emoji（`NUM_GAG_EMOJI`，老项目 :6657）。
+ */
+export function burst(x: number, y: number, emoji: string): void {
+  if (typeof document === 'undefined' || !document.body) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'ns-burst';
+  wrap.style.left = x + 'px';
+  wrap.style.top = y + 'px';
+  for (const p of burstPlan()) {
+    const s = document.createElement('i');
+    s.textContent = emoji;
+    s.style.setProperty('--nx', p.nx);
+    s.style.setProperty('--ny', p.ny);
+    s.style.setProperty('--nr', p.nr);
+    s.style.animationDelay = p.delay;
+    wrap.appendChild(s);
   }
-  if (raf === 0) raf = requestAnimationFrame(loop);
+  document.body.appendChild(wrap);
+  window.setTimeout(() => {
+    try {
+      wrap.remove();
+    } catch {
+      /* 已经被摘掉就算了 */
+    }
+  }, 1300);
 }
 
 /**
- * 老项目 `nsFirework`（index.html:5463-5483）：20 个金色圆点呈放射状飞向**固定终点**。
+ * notesync 烟花 —— 老项目 `nsFirework`（index.html:6757-6778）**逐字**。
  *
- * 🔴🔴 参数逐字对齐老项目：20 个点、角度抖动 ±0.15、半径 `44 + 56·rand`、
- *   终点 `sin(a)·r − 16`（整体上偏 16px）、尺寸 3–8px、时长 1.2s、随机延迟 0–0.12s、
- *   颜色吃 `--accent`（金）。
- *   🔴 此前 bj 是 `burst('✦')` + 160ms 后再 `burst('✨')` —— 那是 **bj 自创**的火花，
- *   老项目没有这一步，按"老项目没有的就去掉"的口径移除。
+ * 20 个金色圆点（`.ns-fw i` 是 `border-radius:50%` + `background:var(--accent)`），
+ * 沿 `2πi/20` 均分的方向飞向固定终点，靠 `@keyframes nsFwOut 1.2s
+ * cubic-bezier(.12,.68,.35,1)` 完成 —— **缓动是强 ease-out**，不是匀速直线。
+ * bj 曾经的 canvas 版是匀速飞（外加重力修正），看着像"洒出去"而不是"炸开"。
+ *
+ * 🔴 1500ms 后自毁（老项目 :6777）：最大 delay 0.12s + 动画 1.2s = 1.32s。
  */
-export function spark(x: number, y: number, count = 20): void {
-  const cv = ensureCanvas();
-  if (!cv) return;
-  if (raf === 0) window.addEventListener('resize', fit, { passive: true });
-  const life = 1.2; // 老项目 nsFwOut 1.2s
-  const frames = life * 60;
-  for (let i = 0; i < count; i++) {
-    const a = (Math.PI * 2 * i) / count + (Math.random() * 0.3 - 0.15);
-    const r = 44 + Math.random() * 56;
-    parts.push({
-      x,
-      y,
-      vx: (Math.cos(a) * r) / frames,
-      vy: (Math.sin(a) * r - 16) / frames,
-      // 🔴 `life` 必须**等于** `max`：loop 用 `life / max` 算透明度，
-      //   沿用 burst 的 `0.8~1.4 / max 1.4` 会让点一出生就是半透明、且提前在终点前消失。
-      life,
-      max: life,
-      ch: '',
-      size: 3 + Math.random() * 5,
-      rot: 0,
-      vr: 0,
-      dot: true,
-      delay: Math.random() * 0.12,
-    });
-  }
-  if (raf === 0) raf = requestAnimationFrame(loop);
-}
-
-/** notesync 梗的烟花 —— 老项目就是这 20 个金点，没有别的。 */
 export function firework(x: number, y: number): void {
-  spark(x, y);
+  if (typeof document === 'undefined' || !document.body) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'ns-fw';
+  wrap.style.left = x + 'px';
+  wrap.style.top = y + 'px';
+  for (const p of fwPlan()) {
+    const s = document.createElement('i');
+    s.style.setProperty('--fx', p.fx);
+    s.style.setProperty('--fy', p.fy);
+    s.style.width = p.size;
+    s.style.height = p.size;
+    s.style.animationDelay = p.delay;
+    wrap.appendChild(s);
+  }
+  document.body.appendChild(wrap);
+  window.setTimeout(() => {
+    try {
+      wrap.remove();
+    } catch {
+      /* 同上 */
+    }
+  }, 1500);
 }
 
 /**

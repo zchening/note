@@ -510,121 +510,150 @@ test('EGG-E14 🔴🔴 数字梗粒子：敲 1314 放 🎆，删掉重打仍要�
     const editable = await page.$('#editor-host[contenteditable="true"]');
     assert.ok(editable, '编辑器未挂载');
 
-    // 插桩真实绘制通道：**同时**包 fillText（emoji 粒子）与 arc（金色点阵）。
-    // 🔴 只包一个会漏掉另一类效果 —— 金点走 arc+fill，压根不经过 fillText。
-    await page.evaluate(() => {
-      window.__fxLog = [];
-      const P = CanvasRenderingContext2D.prototype;
-      const oT = P.fillText;
-      const oA = P.arc;
-      P.fillText = function (t, ...r) {
-        try {
-          window.__fxLog.push({ k: 't', s: String(t) });
-        } catch {
-          /* 记录失败不许影响绘制本身 */
-        }
-        return oT.call(this, t, ...r);
-      };
-      P.arc = function (...r) {
-        try {
-          window.__fxLog.push({ k: 'd' });
-        } catch {
-          /* 同上 */
-        }
-        return oA.apply(this, r);
-      };
-    });
-
-    // 🔴🔴 探针锚点：**先证明插桩本身是通的**。
-    //   不做这一步，插桩坏了会表现成"没有粒子"—— 与"动效真的没放"长得一模一样，
-    //   于是修完之后会继续假红，把人引向鬼影。
-    const probe = await page.evaluate(() => {
-      const c = document.createElement('canvas');
-      const ctx = c.getContext('2d');
-      ctx.fillText('probe', 0, 0);
-      ctx.beginPath();
-      ctx.arc(1, 1, 1, 0, Math.PI * 2);
-      return window.__fxLog.length;
-    });
-    assert.ok(probe >= 2, `canvas 插桩没生效（探针只记到 ${probe} 条）—— 判据本身是坏的，别往下信它`);
-
-    const drain = () =>
+    // 🔴🔴 老项目的数字梗动效是 **DOM `<i>` + CSS keyframes**（index.html:6688-6705），
+    //   不是 canvas 粒子。所以判据读的是**真实 DOM 节点与 computed style**，
+    //   而不是去包 CanvasRenderingContext2D —— 包 canvas 只能证明"画了东西"，
+    //   证明不了"和老项目是同一个动效"（载体错了照样能画出东西）。
+    const readBurst = () =>
       page.evaluate(() => {
-        const l = window.__fxLog.slice();
-        window.__fxLog.length = 0;
-        return l;
+        const w = document.querySelector('.ns-burst');
+        if (!w) return null;
+        const cs = getComputedStyle(w);
+        const items = Array.from(w.querySelectorAll('i'));
+        const ic = items[0] ? getComputedStyle(items[0]) : null;
+        return {
+          zIndex: cs.zIndex,
+          position: cs.position,
+          pointerEvents: cs.pointerEvents,
+          n: items.length,
+          texts: items.map((i) => i.textContent).join(''),
+          font: ic && ic.fontSize,
+          animName: ic && ic.animationName,
+          animDur: ic && ic.animationDuration,
+          animEase: ic && ic.animationTimingFunction,
+          animFill: ic && ic.animationFillMode,
+          vars: items.map((i) => ({
+            nx: i.style.getPropertyValue('--nx'),
+            ny: i.style.getPropertyValue('--ny'),
+            nr: i.style.getPropertyValue('--nr'),
+            delay: i.style.animationDelay,
+          })),
+          canvasFx: !!document.getElementById('nsFx'),
+        };
       });
-    // 🔴🔴 先等画布**出现**、再等它消失 —— 顺序反了就是假红：
-    //   只等"消失"的话，粒子还没放（画布从未存在）时那个条件**立刻为真**，
-    //   于是会在打字还没被 update listener 处理完时就读记录，读到空的。
-    //   这条是我在证红时实跑抓出来的判据自身竞态（画不出东西 ≠ 没画）。
-    const waitFxEnd = async () => {
-      await page
-        .waitForFunction(() => !!document.getElementById('nsFx'), null, { timeout: 4000 })
-        .catch(() => {});
-      await page.waitForFunction(() => !document.getElementById('nsFx'), null, { timeout: 8000 });
+
+    // 🔴🔴 先等节点**出现**、再等它消失 —— 顺序反了就是假红：
+    //   只等"消失"的话，节点从未存在时那个条件**立刻为真**，
+    //   于是会在打字还没被 update listener 处理完时就读数，读到 null。
+    const waitBurst = async () => {
+      // 🔴 必须 `state: 'attached'`：`.ns-burst` 是**零尺寸容器**（老项目 :310 只给
+      //   position/z-index，5 个 `<i>` 全是 absolute），Playwright 的"visible"判定
+      //   会一直说它 hidden ⇒ 等 visible 必然超时，而动效其实早就放出来了。
+      await page.waitForSelector('.ns-burst', { state: 'attached', timeout: 4000 });
+      return readBurst();
     };
-    const emojiOf = (l) => l.filter((e) => e.k === 't').map((e) => e.s).join('');
+    const waitBurstGone = () =>
+      page.waitForFunction(() => !document.querySelector('.ns-burst'), null, { timeout: 8000 });
 
     await editable.click();
-    await drain();
     await page.keyboard.type('1314');
-    await waitFxEnd();
-    const first = emojiOf(await drain());
+    const first = await waitBurst();
+    await waitBurstGone();
 
     // 同页删空重打 —— 老项目每次成梗都放，bj 被一次性门控 ⇒ 这条是红判据
     await page.keyboard.press('Control+A');
     await page.keyboard.press('Delete');
-    await waitFxEnd();
-    await drain();
     await page.keyboard.type('1314');
-    await waitFxEnd();
-    const second = emojiOf(await drain());
+    const second = await waitBurst();
 
-    assert.match(first, /🎆/, `第一次敲 1314 应放出 🎆（老项目 1314→🎆，index.html:5363），实得 ${JSON.stringify(first)}`);
+    assert.ok(first, '敲 1314 应冒出 `.ns-burst`（老项目 nsBurst 建的 DOM 浮层，index.html:6691）');
+    assert.equal(first.n, 5, `老项目固定撒 5 枚 emoji（:6694 的 i<5），实得 ${first.n}`);
+    assert.match(first.texts, /🎆/, `1314 应放 🎆（:6657），实得 ${JSON.stringify(first.texts)}`);
+    assert.equal(first.font, '16px', `老项目 .ns-burst i 是 font-size:16px（:311），实得 ${first.font}`);
+    assert.equal(first.animName, 'nsBurstUp', `动画名必须是老项目的 nsBurstUp（:311），实得 ${first.animName}`);
+    assert.equal(first.animDur, '0.95s', `时长必须是 .95s（:311），实得 ${first.animDur}`);
+    assert.equal(first.animEase, 'ease-out', `缓动必须是 ease-out（:311），实得 ${first.animEase}`);
+    assert.equal(first.zIndex, '58', `老项目 z-index 58（:310），实得 ${first.zIndex}`);
+    assert.equal(first.position, 'fixed', '老项目是 position:fixed 浮在光标处');
+    assert.equal(first.pointerEvents, 'none', '粒子层不许吃点击');
+    assert.equal(first.canvasFx, false, '🔴 数字梗必须是 DOM 动效，不该出现 canvas 粒子层 #nsFx');
+    // 位移朝上且逐枚随机（--ny 必须全为负：老项目 -30-rand*40）
+    assert.ok(
+      first.vars.every((v) => Number.parseFloat(v.ny) <= -30),
+      `--ny 必须全部朝上（老项目 -30-rand*40），实得 ${JSON.stringify(first.vars)}`,
+    );
+    // 🔴 按数值比：老项目 `(i*0.03)+'s'` 无 toFixed，且浏览器读回 inline style 会规范化
+    assert.equal(Number.parseFloat(first.vars[0].delay), 0, '第一枚 delay=0（老项目 i*0.03）');
+    assert.ok(
+      Math.abs(Number.parseFloat(first.vars[4].delay) - 0.12) < 1e-6,
+      `第五枚 delay=0.12s（老项目 i*0.03），实得 ${first.vars[4].delay}`,
+    );
+
+    assert.ok(second, '删掉重打 1314 后应**再放一次**（老项目脱梗即重新上膛）');
     assert.match(
-      second,
+      second.texts,
       /🎆/,
-      `删掉重打 1314 后应**再放一次** 🎆 —— 老项目脱梗即重新上膛，实得 ${JSON.stringify(second)}`,
+      `删掉重打后仍应是 🎆，实得 ${JSON.stringify(second && second.texts)}`,
     );
   } finally {
     await page.close();
   }
 });
 
-test('EGG-E15 🔴 notesync 烟花：敲出 notesync 放金色点阵（arc 绘制，非 ✦/✨ 字符）', async () => {
+test('EGG-E15 🔴🔴 notesync 烟花：20 枚金色圆点 + 老项目 nsFwOut 关键帧（不是字符粒子）', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'eggFw15', PASS);
   try {
     const editable = await page.$('#editor-host[contenteditable="true"]');
     assert.ok(editable, '编辑器未挂载');
 
-    await page.evaluate(() => {
-      window.__fxLog = [];
-      const P = CanvasRenderingContext2D.prototype;
-      const oA = P.arc;
-      P.arc = function (...r) {
-        try {
-          window.__fxLog.push({ k: 'd' });
-        } catch {
-          /* 同上 */
-        }
-        return oA.apply(this, r);
+    await editable.click();
+    await page.keyboard.type('notesync');
+    // 同上：先等节点出现（老项目是 div.ns-fw + 20 个 i），不能上来就读
+    // 同上：`.ns-fw` 也是零尺寸容器，只能等 attached
+    await page.waitForSelector('.ns-fw', { state: 'attached', timeout: 4000 });
+    const fw = await page.evaluate(() => {
+      const accent = getComputedStyle(document.body).getPropertyValue('--accent').trim();
+      const w = document.querySelector('.ns-fw');
+      const items = Array.from(w.querySelectorAll('i'));
+      const c0 = items[0] ? getComputedStyle(items[0]) : null;
+      return {
+        zIndex: getComputedStyle(w).zIndex,
+        n: items.length,
+        radius: c0 && c0.borderRadius,
+        bg: c0 && c0.backgroundColor,
+        accent,
+        animName: c0 && c0.animationName,
+        animDur: c0 && c0.animationDuration,
+        animEase: c0 && c0.animationTimingFunction,
+        sizes: items.map((i) => Number.parseFloat(i.style.width)),
+        fxs: items.map((i) => Number.parseFloat(i.style.getPropertyValue('--fx'))),
+        canvasFx: !!document.getElementById('nsFx'),
       };
     });
 
-    await editable.click();
-    await page.keyboard.type('notesync');
-    // 同上：先等画布出现再等它消失，否则会在粒子还没放时就读数
-    await page
-      .waitForFunction(() => !!document.getElementById('nsFx'), null, { timeout: 4000 })
-      .catch(() => {});
-    await page.waitForFunction(() => !document.getElementById('nsFx'), null, { timeout: 8000 });
-    const dots = await page.evaluate(() => window.__fxLog.filter((e) => e.k === 'd').length);
-
+    assert.equal(fw.n, 20, `老项目 nsFirework 固定 20 个点（:6762 N=20），实得 ${fw.n}`);
+    assert.equal(fw.animName, 'nsFwOut', `动画名必须是老项目的 nsFwOut（:327），实得 ${fw.animName}`);
+    assert.equal(fw.animDur, '1.2s', `时长必须是 1.2s（:327），实得 ${fw.animDur}`);
+    assert.equal(
+      fw.animEase,
+      'cubic-bezier(0.12, 0.68, 0.35, 1)',
+      `缓动必须是老项目的 cubic-bezier(.12,.68,.35,1)（:327），实得 ${fw.animEase}`,
+    );
+    assert.equal(fw.radius, '50%', `金点是圆点（border-radius:50%），实得 ${fw.radius}`);
+    assert.equal(fw.zIndex, '58', `老项目 z-index 58（:326），实得 ${fw.zIndex}`);
+    assert.equal(fw.canvasFx, false, '🔴 烟花必须是 DOM 动效，不该出现 canvas 粒子层 #nsFx');
+    // 尺寸 3–8px（老项目 :6769 `3 + Math.random()*5`）
+    // 🔴 上界必须取**闭区间**：老项目对 sz 做了 `.toFixed(1)`，7.95→"8.0" ——
+    //   写 `s < 8` 会在随机撞到边界时偶发假红（实跑抓到过，不是实现 bug）。
     assert.ok(
-      dots > 0,
-      '敲出 notesync 应放出**金色点阵**（老项目 nsFirework 20 个点，index.html:5463）—— 实得 0 个 arc 绘制，' +
-        '说明放的还是 bj 自创的 ✦/✨ 字符粒子（老项目没有）',
+      fw.sizes.every((s) => s >= 3 && s <= 8),
+      `点尺寸应在 3–8px，实得 ${JSON.stringify(fw.sizes)}`,
+    );
+    // 🔴 反向钉：老项目是**均分一圈**放射（2πi/20 ± 0.15），不是纯随机散点。
+    //   纯随机会让某一侧空掉，看着像"往下洒"而不是"炸开"。
+    assert.ok(
+      fw.fxs.filter((x) => x > 20).length >= 3 && fw.fxs.filter((x) => x < -20).length >= 3,
+      `20 点应向左右两侧都铺开（老项目 cos(a)*r），实得 ${JSON.stringify(fw.fxs)}`,
     );
   } finally {
     await page.close();

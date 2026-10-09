@@ -1791,6 +1791,20 @@ body.dark { color-scheme: dark; }
 /* 🔴 pointer-events:none 是硬要求：粒子飘过编辑器时吃掉点击，
    症状是「打字的某一刻按什么都没反应」，极难自查。 */
 #nsFx { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
+
+/* ── 数字梗粒子 `.ns-burst` 与 notesync 烟花 `.ns-fw` ──
+   🔴🔴 这两条是**逐字**抄自老项目 index.html:310-312 与 :326-328。
+   老项目的这两个动效是 **DOM `<i>` + CSS keyframes**，bj 曾经在 canvas 里用
+   rAF 重画了一遍 —— 载体不同，位移/时长/缓动/缩放四条曲线全不一样，
+   用户报「动效效果不好」正是这个。**不要把它们改回 canvas 粒子。**
+   z-index 58：高于编辑器(30)与粒子画布(40)，低于提醒卡(80)与菜单遮罩(90)。 */
+.ns-burst{position:fixed;z-index:58;pointer-events:none}
+.ns-burst i{position:absolute;left:0;top:0;font-style:normal;font-size:16px;animation:nsBurstUp .95s ease-out forwards}
+@keyframes nsBurstUp{0%{transform:translate(0,0) scale(.6);opacity:0}15%{opacity:1}100%{transform:translate(var(--nx,8px),var(--ny,-38px)) scale(1.15) rotate(var(--nr,12deg));opacity:0}}
+
+.ns-fw{position:fixed;z-index:58;pointer-events:none}
+.ns-fw i{position:absolute;left:0;top:0;width:5px;height:5px;border-radius:50%;background:var(--accent);animation:nsFwOut 1.2s cubic-bezier(.12,.68,.35,1) forwards}
+@keyframes nsFwOut{0%{transform:translate(0,0) scale(.35);opacity:0}10%{opacity:1}100%{transform:translate(var(--fx,0px),var(--fy,0px)) scale(.45);opacity:0}}
 /* 🔴🔴🔴 彩蛋徽章：老项目是**顶栏品牌内联的一枚小胶囊**（index.html:653挂点 /
    :298-302 样式 / :321 窄屏规则），不是浮在屏幕右上角的 fixed 药丸：
      #nsBadge{display:none;align-items:center;gap:6px;max-width:34vw;flex:none;font-size:12px;

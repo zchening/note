@@ -266,8 +266,10 @@ export function buildEggLayer(host: HTMLElement, store: EggStore, h: EggHost): E
         if (emo) {
           markDiscovered(store, 'num', true); // 只记账，不门控
           const r = out.rect;
-          // 老项目 :5448-5451：从光标处冒；拿不到光标矩形才退回编辑器上方
-          burst(r ? r.left : window.innerWidth / 2, r ? Math.max(56, r.bottom - 6) : 120, emo, 5);
+          // 老项目 :6742-6745：从光标处冒（`caretRect.left` / `Math.max(56, bottom-6)`）；
+          // 拿不到光标矩形才退回编辑器水平居中、上移 120px（老项目 `eb.bottom - 120`）。
+          // 🔴 不再传"粒子数"：老项目 nsBurst 固定 5 枚（:6694），数量在 fx.ts 里定死。
+          burst(r ? r.left : window.innerWidth / 2, r ? Math.max(56, r.bottom - 6) : 120, emo);
         }
         if (fwFire(fwLatch, tail)) {
           markDiscovered(store, 'fw', true);
