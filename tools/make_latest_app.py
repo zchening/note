@@ -17,13 +17,43 @@
 内容来源：用 gh API 读该 tag 的 Release（真实产物，绝不手填体积）。
 手填 size 是最危险的：原生侧用 expectedBytes 判"下载完没"，size 填 0 或偏小，
 截断的 APK 会被当已下完直接拉起安装器，报 packageInfo is null。
+
+🔴 更新要点（App 弹窗里逐条显示的那几行）**不来自 GitHub Release 正文**，而是来自
+   releases/<tag>.md —— 与 tools/push_bj_apk.py 同一份真源。GitHub 自动生成的正文里
+   全是 compare 链接，客户端 extractNotes 会把它们全滤掉 ⇒ 弹窗只剩兜底句。
+   本脚本缺该文件时拒绝生成（与 push 脚本同口径）。
 """
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 
 REPO = "zchening/note"
+
+# 仓库根（本脚本在 tools/ 下）与要点目录
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NOTES_DIR = os.path.join(REPO_ROOT, "releases")
+NOTES_MAX = 4  # 与 tools/release-notes.mjs 的 MAX_ITEMS 同值（那里是权威）
+
+
+def load_summary(tag):
+    """读 releases/<tag>.md 的 '- ' 行 → 弹窗要点。缺文件/无要点即拒绝生成。"""
+    p = os.path.join(NOTES_DIR, "%s.md" % tag)
+    if not os.path.isfile(p):
+        sys.exit("❌ 找不到本版更新要点 %s —— App 的更新弹窗只显示这份文件里 '- ' 开头的行，\n"
+                 "   缺了它用户看不到任何更新说明（格式见 releases/README.md）。" % p)
+    with open(p, "r", encoding="utf-8") as f:
+        text = f.read().lstrip("\ufeff")
+    items = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*-\s+(.*\S)\s*$", line)
+        if m:
+            items.append(m.group(1).strip())
+    if not items:
+        sys.exit("❌ %s 里没有一条 '- ' 开头的要点。" % p)
+    return items[:NOTES_MAX]
 
 
 def gh(args: list[str]) -> str:
@@ -73,6 +103,9 @@ def build(tag: str) -> dict:
     return {
         "tag_name": rel.get("tagName") or tag,
         "name": rel.get("name") or ver,
+        # 🔴 summary 才是 App 弹窗优先读的字段（ota.ts extractNotes）；body 只作回退。
+        #   所以要点必须来自 releases/<tag>.md，不能指望 GitHub 自动生成的正文。
+        "summary": load_summary(tag if tag.startswith("v") else "v" + tag),
         "body": rel.get("body") or "",
         "published_at": rel.get("publishedAt") or "",
         "prerelease": bool(rel.get("isPrerelease")),

@@ -33,7 +33,7 @@ cd packages/client && "$NODE" --test test/*.test.mjs                 # 单测
 "$NODE" --test --test-concurrency=6 test/e2e/*.test.js               # e2e（约 3 分钟）
 ```
 
-⚠️ **e2e 必须 `--test-concurrency=6`**：27+ 文件串行会超时。
+⚠️ **e2e 必须 `--test-concurrency=6`**：24 个文件串行会超时。
 ⚠️ **e2e 跑的是 `www/` 产物**，改了源码不先 `tools/build.mjs` 就测不到（反过来：
 读 `www/app.js` 断言会被压缩打脸 —— 变量名混淆、中文变 `\uXXXX`，**e2e 里要读源码**）。
 
@@ -61,6 +61,7 @@ APK 不在本机出，全部由 `.github/workflows/build-apk.yml` 完成。手�
 - **三作业**：`test`（单测闸，不绿不出包） → `build`（JDK21 + 签名出 `app-release.apk`） → `deploy`（腾讯云 OTA + GitHub Releases）。
 - **两发布目标同进同退**：`deploy` 作业先上传腾讯云并线上校验通过，最后才发 GitHub Release —— 两处不会一处新一处旧。
 - 🔴 **版本号唯一真源 = `package.json`**：tag 名 / APK `versionName` / OTA `tag_name` / Release 名全部从它派生；`build.mjs` 删静态资源必须同步删 `STATIC_REQUIRED` 清单，否则 CI 的 build 直接 `exit 1`（v1.13.1 曾因此红过一次）。
+- 🔴 **发版前必须写 `releases/<tag>.md`**（第三个同步点，漏了 CI 直接红）：App「检查更新」弹窗里那几行更新要点**只**来自这份文件（经 `latest_app.json` 的 `summary`），它同时是 GitHub Release 页正文。上限 **4 条 / 每条 24 字**、项目符号只能 `-`、不许出现链接或 `compare/` 行。规则权威在 `tools/release-notes.mjs`，CI `test` 作业跑 `tools/check-release-notes.mjs`，`push_bj_apk.py` 里还有一道硬失败（它可能被单独手动调用）。格式见 `releases/README.md`。
 - 🔴 **覆盖安装只判 `versionCode`（不判 versionName）**：加权公式 `major*10000+minor*100+patch` 在 `build-apk.yml`，**禁改回去点拼接**——位数变化时倒退（1.13.1→1131、2.0.0→**200**）被 Android 拒装（v2.0.0 实锤）。
 - 产物落点（线上已校验）：腾讯云 `https://bj.xuyinji.com.cn/dl/vX.Y.Z.apk` + `/api/latest` 指向它；GitHub Releases 同版本附 `NoteSyncX-vX.Y.Z.apk`。手机点「检查更新」走 `/api/latest`。
 - 上传顺序的硬纪律（倒装：两个 APK 先就位、`latest_app.json` 最后落）只在 `tools/push_bj_apk.py` 里有权威，CI 只调它，不另写。
@@ -77,7 +78,7 @@ git push origin main
 
 - 🔴 **git 代理按机器分**：开发机禁代理直连；**本部署服务器必须走 `HTTPS_PROXY` 环境代理**（直连 GitHub 会挂死，2026-10-08 已实证）——在此机上推送**不要**加 `-c http.proxy=` 去清空代理。`gh` CLI 两处都走 `HTTPS_PROXY`。
 - 🔴 **提交前先 `git status`**：临时探针（`_probe*` / `_diag*`）会被 `git add -A` 一起带上
-- 版本号唯一源是 `package.json` 的 `version`，改它必须同步改 `README.md` 版本历史表
+- 版本号唯一源是 `package.json` 的 `version`，改它必须同步改 `README.md` 版本历史表**与 `releases/<tag>.md`**（三处同步点）
 
 ## 五条红线（详见 ARCH.md §5）
 

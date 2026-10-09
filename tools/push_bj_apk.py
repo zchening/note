@@ -5,6 +5,7 @@
 #     gradlew assembleRelease            # 产物： android/app/build/outputs/apk/release/app-release.apk
 #     python tools/push_bj_apk.py v1.11.0            # 上传 + 落元数据 + 线上校验
 #     python tools/push_bj_apk.py v1.11.0 --dry-run  # 只本地生成/校验，不碰服务器
+#   🔴 前置条件：releases/v1.11.0.md 必须已写好（App 弹窗的更新要点就来自它，缺了直接退出）。
 #
 # 🔴🔴 协议层照搬老项目 tools/push_latest_apk.py（biji 域那条已跑了十几版的链路），
 #   但**换成 bj 的坐标**。以下是"照搬时必须知道的三处差异"：
@@ -26,6 +27,14 @@
 # 🔴 签名：与老项目一致**不额外准备keystore** —— Android 默认用 debug keystore 签
 #   release，可装可OTA。唯一硬要求：同一台构建机（同一debug key）出包，签名一致才能
 #   覆盖安装。换机器构建 ⇒ 签名不同 ⇒ 装不上（不是本脚本的锅，是 Android 规则）。
+#
+# 🔴🔴 更新要点来自 releases/<tag>.md（手写、随代码进仓库）：
+#   App 的「检查更新」弹窗内容不是客户端算的，是读这份 json 的 summary
+#   （客户端 ota.ts 的 extractNotes 优先 summary、最多 4 条）。此前这里硬编码了一句
+#   占位正文、summary 恒为空数组 ⇒ 用户点「检查更新」永远看到同一句占位话。
+#   ⇒ 规则权威（条数 / 字数 / 链接三类闸）在 tools/release-notes.mjs，CI 的 test 作业
+#     先跑一遍；本脚本只做「取 '- ' 开头的行」这一件事 + 缺文件时硬失败，
+#     不重复实现那套规则（两份实现必然漂移）。
 
 import os, sys, json, re, time, hashlib, subprocess
 
@@ -37,6 +46,12 @@ BASE = "https://bj.xuyinji.com.cn"
 #   /api/latest 都相对它取。REMOTE_DEPLOY 必须与服务端 deploy/ 目录一致。
 REMOTE_DEPLOY = r"C:\Services\NoteSyncBj\deploy"
 LOCAL_APK = os.path.join("android", "app", "build", "outputs", "apk", "release", "app-release.apk")
+
+# 仓库根（本脚本在 tools/ 下）与要点目录。要点文件随代码进仓库，不走网络。
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NOTES_DIR = os.path.join(REPO_ROOT, "releases")
+# 与 tools/release-notes.mjs 的 MAX_ITEMS 同值（那里是权威；此处只用来切片，不改判据）
+NOTES_MAX = 4
 
 SSH_OPTS = ["-i", KEY, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
             "-o", "ConnectTimeout=20", "-o", "StrictHostKeyChecking=accept-new"]
@@ -84,7 +99,31 @@ def versioned_dl_url(tag):
     return "%s/dl/%s.apk" % (BASE, tag)
 
 
-def build_latest_json(tag, apk_size):
+def load_notes(tag):
+    """读 releases/<tag>.md → (弹窗要点, Release 正文)。
+
+    🔴 缺文件**硬失败**，不许静默退回占位文案：占位正文上线过一次，表现是用户点
+       「检查更新」只看到一句写死的占位话，等于没有更新说明，且不报任何错。
+    """
+    p = os.path.join(NOTES_DIR, "%s.md" % tag)
+    if not os.path.isfile(p):
+        sys.exit("🔴 找不到本版更新要点 %s\n"
+                 "   App 的「检查更新」弹窗只显示这份文件里 '- ' 开头的行（最多 %d 条），\n"
+                 "   缺了它用户看到的是一片空白。格式见 releases/README.md。" % (p, NOTES_MAX))
+    with open(p, "r", encoding="utf-8") as f:
+        body = f.read().lstrip("\ufeff").strip()
+    items = []
+    for line in body.splitlines():
+        m = re.match(r"^\s*-\s+(.*\S)\s*$", line)
+        if m:
+            items.append(m.group(1).strip())
+    if not items:
+        sys.exit("🔴 %s 里没有一条 '- ' 开头的要点 —— 弹窗取不到任何内容。\n"
+                 "   （项目符号必须是 '-'，用 '*' / '+' 客户端读不到）" % p)
+    return items[:NOTES_MAX], body
+
+
+def build_latest_json(tag, apk_size, summary, body):
     #字段与 GitHub API 同形（客户端 ota.ts 只认 assets[].name/.browser_download_url/.size）
     return {
         "assets": [{
@@ -92,8 +131,8 @@ def build_latest_json(tag, apk_size):
             "name": "app-release.apk",
             "size": apk_size,
         }],
-        "summary": [],
-        "body": "## %s\n\n（bj release，由 push_bj_apk.py 落地）" % tag,
+        "summary": summary,
+        "body": body,
         "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tag_name": tag,
     }
@@ -116,13 +155,18 @@ def main():
 
     size = os.path.getsize(LOCAL_APK)
     local_sha = sha256(LOCAL_APK)
-    meta = build_latest_json(tag, size)
+    # 🔴 要点检查放在任何网络动作之前：缺文件就地失败，不浪费一次上传。
+    summary, body = load_notes(tag)
+    meta = build_latest_json(tag, size, summary, body)
     meta_local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "latest_app.json")
     with open(meta_local, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
     print("[pre] tag=%s apk=%d bytes sha256=%s" % (tag, size, local_sha[:16]))
     print("[pre] 下载 URL = %s" % meta["assets"][0]["browser_download_url"])
+    print("[pre] 更新要点 %d 条（弹窗逐条显示）：" % len(summary))
+    for s in summary:
+        print("        · %s" % s)
     print("[pre] 已生成 %s" % meta_local)
 
     if dry:

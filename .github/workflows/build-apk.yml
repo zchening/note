@@ -34,6 +34,22 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: 更新要点闸（缺 releases/<tag>.md 或不合规 → 直接红）
+        # 🔴🔴 放最前面：这闸 1 秒就出结果，而 build 作业要跑 5 分钟 Android 构建。
+        #   发版前忘写要点是高频疏忽，越早红越不浪费；且本作业红 ⇒ build 不执行
+        #   ⇒ 不会出现「APK 出好了、腾讯云却没更新」的半截状态。
+        # 🔴 版本号口径必须与 build 作业的「解析版本号」逐字一致：手动触发
+        #   （workflow_dispatch）时 GITHUB_REF_NAME 是分支名 "main"，直接用它会去找
+        #   releases/vmain.md ⇒ 手动发版永远红。tag 推送取 tag 名，否则退回 package.json。
+        # 🔴 本步不需要 npm ci（闸只用 node 内置模块），所以放在 Install 之前。
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VER="$GITHUB_REF_NAME"
+          else
+            VER="v$(node -p "require('./package.json').version")"
+          fi
+          node tools/check-release-notes.mjs "$VER"
+
       - name: Install
         # 🔴 --ignore-scripts：跳过 playwright 的浏览器下载（单测只要 jsdom 那层，
         #   e2e 不在 CI 跑）。不省这一步每次 CI 多下 300MB。
@@ -239,5 +255,11 @@ jobs:
           tag_name: ${{ needs.build.outputs.ver }}
           name: ${{ needs.build.outputs.ver }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          # 🔴🔴 用 releases/<ver>.md 当正文，**不再用自动生成的变更日志**：
+          #   自动生成的那份是给开发者看的（compare 链接、commit 标题），
+          #   与 App 弹窗里给用户看的要点必须同源 —— 同一份文件喂两条链路，
+          #   两处不会一处新一处旧、也不会口径不一。
+          # 🔴 不能同时给 generate_release_notes: true（会与 body_path 冲突）。
+          #   文件缺失时 test 作业已经红过，这里拿不到文件即是"闸被绕过"，宁可失败。
+          body_path: releases/${{ needs.build.outputs.ver }}.md
           files: android/app/build/outputs/apk/release/app-release.apk

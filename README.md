@@ -87,12 +87,24 @@ npm run test:e2e:live
 
 ## 发版
 
-版本号唯一来源是根 `package.json` 的 `version`，构建时由 esbuild `define` 注入。改版本必须同步改本文件的版本历史表。
+版本号唯一来源是根 `package.json` 的 `version`，构建时由 esbuild `define` 注入。改版本必须同步改**三处**：本文件的版本历史表、`releases/<tag>.md`（本版更新要点，发版必填）。
 
 ```bash
-# 1. 改 package.json version → 2. npm run verify → 3. 提交打 tag
+# 1. 改 package.json version
+# 2. 写 releases/vX.Y.Z.md（App「检查更新」弹窗的要点就是它，漏了 CI 直接红）
+# 3. npm run verify → 4. 提交打 tag
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin main --tags
+```
+
+### 🔴 本版更新要点：`releases/<tag>.md`
+
+App「检查更新」弹窗里那几行要点**不是客户端算的**，是读服务器磁盘上 `latest_app.json` 的 `summary`；而那份 json 由 `tools/push_bj_apk.py` 从 `releases/<tag>.md` 生成。所以这份文件是弹窗内容的唯一来源，同时也是 GitHub Release 页正文——同一份文件喂两条链路，两处不会一处新一处旧。
+
+格式与硬约束（上限 4 条 / 每条 24 字、项目符号只能 `-`、不许出现链接或 `compare/` 行）见 `releases/README.md`。规则权威在 `tools/release-notes.mjs`：
+
+```bash
+node tools/check-release-notes.mjs v3.0.3   # 本地自查；CI 的 test 作业也会跑，不合规直接红
 ```
 
 推送 tag 会触发 GitHub Actions 云构建 APK（`ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` 四个 secret 已在仓库配置）。本机零 Android 依赖。
@@ -111,7 +123,9 @@ App 查新版的唯一入口是 `GET /api/latest`，它读的是**服务器磁�
 python tools/make_latest_app.py --tag v1.0.0
 ```
 
-`make_latest_app.py` 会在三种情况下**拒绝生成**：Release 还是 draft（对外不可见，用户点更新跳 404）、没有 `.apk` 资产（传半份元数据比不传更坏，App 会显示"已是最新"）、`size` 为 0 或缺失（原生侧用 `expectedBytes` 判"下载完没"，填 0 会让截断的 APK 被当已下完，直接拉起安装器报 `packageInfo is null`）。
+> CI 自动发版走的是 `tools/push_bj_apk.py`（同一个作业里连 APK 一起上传），`make_latest_app.py` 是**手动补传**用的等价物。两者都从 `releases/<tag>.md` 取弹窗要点，口径一致。
+
+`make_latest_app.py` 会在四种情况下**拒绝生成**：Release 还是 draft（对外不可见，用户点更新跳 404）、没有 `.apk` 资产（传半份元数据比不传更坏，App 会显示"已是最新"）、`size` 为 0 或缺失（原生侧用 `expectedBytes` 判"下载完没"，填 0 会让截断的 APK 被当已下完，直接拉起安装器报 `packageInfo is null`）、缺 `releases/<tag>.md`（弹窗会一条要点都取不到）。
 
 真域名 e2e 的 LIVE-06 是这条链路的唯一独立判据：它分别判「有文件 → 200 + 真模块能解析 + 挑得出 .apk + `no-store`」与「无文件 → 404 + `no release metadata`」，两种状态都是合法部署态但必须各自判对。
 
