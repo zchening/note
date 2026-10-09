@@ -137,3 +137,26 @@ v1.8.0 的导出折叠补丁就是这样漏过一整批：425 个测试全绿，
 ⚠️ 但**路线差异不等于要改**：`[折叠]` 字面量老项目留在正文里靠 `font-size:0` 藏起来，
 bj 是导入时删掉、只存折叠节点 —— 这是 bj 的架构优势，**视觉能对齐就不换路线**
 （用户 2026-10-07 明确拍板）。
+
+## 10. 🔴🔴 动效层（canvas）的三条静默失效
+
+老项目 `nsBurst`（`index.html:5394`）/`nsFirework`（`:5463`）都是裸 canvas 2d。
+bj 复刻时踩的三坑**全都不报错**，只能靠真浏览器取证：
+
+| 坑 | 症状 | 修法 |
+|---|---|---|
+| `ctx.fillStyle` / `ctx.font` 里写 `var(--accent)` / `var(--mono,…)` | **canvas 2d 不解析 CSS 变量**，赋值被静默丢弃 ⇒ 颜色退回默认黑、字号恒 10px，`p.size` 完全失效 | 颜色用 `getComputedStyle` 取一次缓存；`font` 写**字面量**字体栈，emoji 字体放最后：`ui-monospace, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif` |
+| 按 UTF-16 码元取 emoji（`ch[i % ch.length]`） | 🎆🔥💕😂 都是**代理对**，取到半截 ⇒ 画成方框/豆腐块 | `Array.from(ch)` 按**字素**取 |
+| 金点沿用 burst 的重力（`vy += 0.12`） | 老项目 `nsFirework` 的点是"匀速飞到终点"，bj 一加重力就下坠约 300px | 点走独立 `dot` 分支：豁免重力，且 `life === max`（alpha 由 `life/max` 算，否则点天生半透明） |
+
+补充：**esbuild 把 astral emoji 转成 `\u{1F386}`**，grep 字面 emoji 验产物恒 0 命中
+（同 §0 的反向陷阱），要按 `\u{1F386}` 或解码后比对。
+
+### 10.1 🔴 "功能挂错对象"的静默死接线
+
+彩蛋条件触发曾**一次都没跑过**而零报错：`buildEggLayer(host, store, h)` 把 `scan`
+挂到**第三个参数 `h`**（外部 hooks 字面量，调用方不持有），而调用方拿到的是
+**返回对象** ⇒ `scanEggTriggers` 取到 `undefined`，被 `catch` 全吞。
+
+**教训**：能力要通过**返回对象的正式方法**暴露并写进接口类型；"它在源码里写着"
+不等于"运行时会走到" —— 判据必须数**真通道的调用次数**，别只看接线形状。

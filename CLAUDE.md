@@ -18,6 +18,8 @@
       （**老项目源码字面 ≠ 实际渲染**，有 `!important` 运行时覆盖层与三处死规则）
 - [ ] 要断言某个数值 ⇒ 查 `docs/gotchas.md`（那里是真浏览器实测值，不是约数）
 - [ ] 改完 UI ⇒ 走 `docs/replication-checklist.md` 的清单
+- [ ] 涉及动效 / canvas ⇒ 读 `docs/replication-discipline.md` §10（canvas 不解析
+      `var()`、emoji 按码元取会断代理对、金点不能带重力 —— 三条都静默失效）
 - [ ] 涉及架构/不变量 ⇒ 读 `ARCH.md` 对应章节（§4 冻结决定、§5 五条红线、§6 安全不变量）
 
 ## 环境
@@ -99,7 +101,7 @@ git push origin main
   的断言在 specificity 算错时**恒绿**（真发生过：425 测试全绿、导出图照样丢正文）。
 - 🔴 **`:not()` 的 specificity 取其参数**（自身不贡献），写补丁选择器必须精确数。
 - 🔴 **`--test-name-pattern` 用子测试名会整轮空跑**：e2e 是 `test('父', t => t.test('子'))` 两层结构，用**子**级名过滤会让 node 当文件级过滤、子测试全跳过，输出 `# tests 1 / # pass 1` 假绿。pattern 必须给**父级**名，并核对子测试 `ok N` 真的列出（不只看 `# pass`）。
-- 🔴 **桌面 e2e 的 Backspace/逐字符删除走 contenteditable 原生路径**，焦点稍偏就 DOM/树分叉（DOM 删了、editorState 没动，判死不触发）——与真机 beforeinput 不同构。删字符类判据用 `Control+a + 重打` 的树替换形状（REM-05/REM-19），细节见 `docs/replication-checklist.md` 判据纪律的 e2e 三坑。
+- 🔴 **桌面 e2e 的 Backspace/逐字符删除走 contenteditable 原生路径**，焦点稍偏就 DOM/树分叉（DOM 删了、editorState 没动，判死不触发）——与真机 beforeinput 不同构。删字符类判据用 `Control+a + 重打` 的树替换形状（REM-05/REM-19），细节见 `docs/replication-checklist.md` 判据纪律的 e2e 四坑。
 
 ## 深入文档
 
