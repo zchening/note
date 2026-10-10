@@ -9,10 +9,11 @@
  *      每次读新笔记都走错误分支。
  *   2. 写是 `POST`（不是老项目的 PUT），body 是**整份信封 JSON**，
  *      服务端不做 409/乐观并发，是last-write-wins + 写后 SSE 广播。
- *   3. **没有 `x-note-key`、没有 `baseV`、没有 403**。
- *      老项目 v10.0.0 引入的 HMAC 写入凭据属于"服务端有鉴权"的前提，
- *      新服务端不设鉴权（数据全在密文里），所以这一整套都不存在。
- *      照抄老项目的 403 重试在这里会永远不触发，删掉。
+ *   3. **没有 `baseV`、没有 409** —— 这两样老项目有（乐观并发），bj 是 last-write-wins，不需要。
+ *      **但 `x-note-key` 与 403 是真实存在的**：`packages/server/src/guards.js`
+ *      在 `full` 档对无凭据的写（尤其已认领笔记）一律 403。MCP 必须带
+ *      `x-note-key`（见 `vault.ts` 的 save 派生、本文件 put/del 注入），否则线上写工具全线 403。
+ *      这条注释此前写"没有 x-note-key/403"是**错的**，已订正（见 audit 2026-10-10 P0-1）。
  *
  * 那新服务端"谁能写"由什么挡？由 Caddy 前置 + 密文本身：
  * 拿不到口令的人写进去的是自己解不开的垃圾，而**真客户端**读到后
@@ -89,13 +90,18 @@ export class Remote {
    *   编一个假的"版本号"会让调用方的成功判据变成永远为真。
    *   要判断"是不是我这份写上去了"，用 size 与本地 canonical 长度对一下即可。
    */
-  async put(id: string, env: Envelope, noteChars: number, timeoutMs = 20000): Promise<{ bytes: number }> {
+  async put(id: string, env: Envelope, noteChars: number, writeKey?: string, timeoutMs = 20000): Promise<{ bytes: number }> {
     const url = `${this.base}/api/note/${encodeURIComponent(id)}`;
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    // 🔴🔴 P0-1：写入凭据闸。bj 服务端（guards.js）在 full 档对无 x-note-key 的写请求
+    //   一律 403，已认领笔记尤其如此。MCP 必须带此头，否则线上写工具全线 403。
+    //   派生自口令 + 笔记 kdf.salt/iter（见 vault.ts 的 save），与网页端同算法。
+    if (writeKey) headers['x-note-key'] = writeKey;
     let res: Response;
     try {
       res = await this.f(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ ...env, n: noteChars }),
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -103,19 +109,31 @@ export class Remote {
       throw new Error(`写 ${id} 超时或网络不可达（${timeoutMs}ms）：${msgOf(e)}`);
     }
     if (res.status === 429) throw new RemoteError('尝试太频繁（服务端限流），稍后再试', 429);
+    if (res.status === 403) {
+      throw new RemoteError(
+        '写入被拒绝（403）：MCP 未配置口令或口令不匹配，或服务端写凭据闸要求凭据。' +
+        '请检查 BJ_PASSPHRASE 是否正确，以及该笔记是否已由别的口令认领。',
+        403,
+      );
+    }
     if (!res.ok) throw new Error(`POST /api/note failed: HTTP ${res.status}`);
     const j = (await res.json().catch(() => ({}))) as { ok?: boolean; size?: number };
     if (j.ok !== true) throw new Error('写已返回但响应未确认成功（缺 ok:true），不当作写成功');
     return { bytes: typeof j.size === 'number' ? j.size : 0 };
   }
 
-  async del(id: string, timeoutMs = 20000): Promise<void> {
+  async del(id: string, writeKey?: string, timeoutMs = 20000): Promise<void> {
     const url = `${this.base}/api/note/${encodeURIComponent(id)}`;
+    const headers: Record<string, string> = {};
+    if (writeKey) headers['x-note-key'] = writeKey;
     let res: Response;
     try {
-      res = await this.f(url, { method: 'DELETE', signal: AbortSignal.timeout(timeoutMs) });
+      res = await this.f(url, { method: 'DELETE', headers, signal: AbortSignal.timeout(timeoutMs) });
     } catch (e) {
       throw new Error(`删 ${id} 超时或网络不可达（${timeoutMs}ms）：${msgOf(e)}`);
+    }
+    if (res.status === 403) {
+      throw new RemoteError('删除被拒绝（403）：写入凭据闸要求凭据，请检查 BJ_PASSPHRASE。', 403);
     }
     if (!res.ok) throw new Error(`DELETE /api/note failed: HTTP ${res.status}`);
   }

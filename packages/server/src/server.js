@@ -55,6 +55,25 @@ for (const d of [DATA_DIR, NOTES_DIR, META_DIR, ARCADE_DIR]) {
 
 guards.init(DATA_DIR); // wk-mode.txt 档位文件定位（热切用，见 guards.js）
 
+/* 🔴🔴 P1-2（选 A：fail-closed）启动期凭据闸配置校验。
+ * 显式给出非法 wk-mode ⇒ 直接 fatal 退出，绝不带病运行；
+ * 完全未配置 ⇒ 默认 off 并打醒目告警。必须在监听端口之前执行。 */
+try {
+  const wk = guards.checkWkModeConfig();
+  if (wk.warned) {
+    console.warn(
+      `[guards] ⚠️  wk-mode 未显式配置，按默认 'off' 启动（写闸完全关闭，任何人可写）。` +
+      `生产环境请在 wk-mode.txt 或 NS_BJ_WK_MODE 写入 full / new-only。`,
+    );
+  } else {
+    console.log(`[guards] wk-mode = ${wk.mode}（来源 ${wk.source}）`);
+  }
+} catch (e) {
+  console.error(String(e && e.message ? e.message : e));
+  console.error('[guards] 凭据闸配置非法，服务拒绝启动。');
+  process.exit(1);
+}
+
 /* ------------------------------------------------------------------ *
  * 安全不变量（从老项目继承，不许放宽）
  * ------------------------------------------------------------------ */

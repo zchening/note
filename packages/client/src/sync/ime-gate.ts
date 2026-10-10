@@ -33,11 +33,29 @@
 /** 打字活跃期：最后一次输入距今不足这个毫秒数，就认为用户正在打字。 */
 const TYPE_ACTIVE_MS = 1_500;
 
+/**
+ * 🔴🔴 组字结束后的冷却期（语音输入专用，用户报障 2026-10 新坑）。
+ *
+ *   键盘 IME 组字结束（compositionend）后文本已提交，1.5s 的 typingActive 足够。
+ *   但**语音输入**（豆包等输入法的语音转文字）在句子/短语之间会有 1~数秒的
+ *   **自然停顿**：停顿期间 `compositionend` 早已触发、1.5s 活跃期也已过期 ⇒
+ *   门控提前打开 ⇒ 下一轮轮询/SSE 的 `docToLexical`（`root.clear()` + 整篇重建）
+ *   落在停顿处，把光标重置、把尚未提交的组字串冲掉 ⇒ 用户报障的
+ *   「语音转文字被换位 / 丢失」。
+ *
+ *   ⇒ 组字结束后**额外**再关 `COMPOSE_COOLDOWN_MS`，覆盖语音的句间停顿。
+ *   代价：远端回灌最多推迟这么久 —— 下几轮轮询会自动重试（P0-3「推迟不排队」），
+ *   对单用户笔记可接受；多端实时协同的变更会在语音停下后至多冷却期那么久才落本机。
+ */
+const COMPOSE_COOLDOWN_MS = 4_000;
+
 export interface ImeGate {
   /** 组字中（含 compositionstart 之后、compositionend 之前）。 */
   readonly composing: boolean;
   /** 用户最近仍在打字（活跃期未过）。 */
   readonly typingActive: boolean;
+  /** 组字刚结束的冷却期内（覆盖语音句间停顿）。 */
+  readonly composeCooling: boolean;
   /** 现在**能不能**往编辑器里回灌。 */
   canApply(): boolean;
   /** 绑定到编辑器宿主。返回解绑函数（mountEditor 必须调它）。 */
@@ -53,8 +71,16 @@ export interface ImeGate {
  *
  * 🔴 `now` 显式注入：活跃期判定依赖时钟，判据里必须能**确定性地**推进时间，
  *   靠真实 `Date.now()` 写的判据要么恒绿要么恒红（时间相关判据的经典陷阱）。
+ *
+ * 🔴🔴 `isComposing` 可选注入：Lexical 编辑器自身的组字态（防御纵深）。
+ *   它捕获 DOM 门控（`compositionstart/end`）可能漏掉的组字窗口 —— 比如语音输入
+ *   把组字串挂在 Lexical 内部、但 composition 事件因时序/宿主元素问题没被本门控收到。
+ *   它**只增不减**地加固 `canApply()`，不会削弱既有判据。
  */
-export function createImeGate(now: () => number = Date.now): ImeGate {
+export function createImeGate(
+  now: () => number = Date.now,
+  isComposing?: () => boolean,
+): ImeGate {
   let composing = false;
   // 🔴🔴 初值必须是"从来没有输入过"，**不能**是 0。
   //   `now()` 是 epoch 毫秒（1.7e12 量级），`now() - 0` 是个巨大的正数，
@@ -64,8 +90,11 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
   //   **首次挂载编辑器时远端内容永远进不来**（症状："刷新取不到"）。
   //   用 -Infinity 表达"从未输入"，与时钟量级无关。
   let lastInputAt = Number.NEGATIVE_INFINITY;
+  // 🔴🔴 组字结束时间戳，初值同 "从未组过字"。
+  let lastComposeEndAt = Number.NEGATIVE_INFINITY;
 
   const typingActive = (): boolean => now() - lastInputAt < TYPE_ACTIVE_MS;
+  const composeCooling = (): boolean => now() - lastComposeEndAt < COMPOSE_COOLDOWN_MS;
 
   const onCompositionStart = (): void => {
     composing = true;
@@ -77,6 +106,11 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
     //   ⇒ 紧接着到来的远端回灌正好穿过门控 ⇒ 吞掉刚上屏的字。
     composing = false;
     lastInputAt = now();
+    // 🔴🔴 语音输入冷却起点：豆包等语音在句间停顿可达数秒，
+    //   仅 1.5s 活跃期会在停顿中提前开门 ⇒ 轮询的整篇重建落在停顿处把字弄乱。
+    //   冷却只由**真实** compositionend 事件触发（手动 setComposing 不触发，见下），
+    //   因为"刚组完字"这回事只有真实事件知道。
+    lastComposeEndAt = now();
   };
   const onBlur = (): void => {
     // 🔴🔴 blur 复位是老项目 index.html:1000 明确有的，本仓两处 IME 门控
@@ -86,8 +120,16 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
     //   症状是"同步功能坏了"，而本机一切正常 —— 极难自查。
     composing = false;
   };
-  const onInput = (): void => {
-    lastInputAt = now();
+  const onInput = (e: Event): void => {
+    lastInputAt = now(); // 现有：键盘 1.5s 活跃期
+    // 🔴🔴 语音/IME 组字中的 input（isComposing=true）⇒ 延长冷却窗。
+    //   豆包实时转文字时，每一小段都派 input(isComposing=true)；
+    //   只要"还在转"，冷却就一直被续上 ⇒ 门控整段关死，轮询的整篇重建进不来
+    //   ⇒ 用户在**说话过程中**的文本不会被同步冲掉（用户 2026-10 澄清的场景）。
+    //   键盘的 input 事件 isComposing=false ⇒ 不延长（键盘仍走 1.5s 活跃期，语义不变）。
+    //   注意：这里只读事件的 isComposing，绝不 preventDefault，不影响输入本身。
+    const ie = e as unknown as { isComposing?: boolean };
+    if (ie.isComposing === true) lastComposeEndAt = now();
   };
 
   return {
@@ -97,12 +139,20 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
     get typingActive() {
       return typingActive();
     },
+    get composeCooling() {
+      return composeCooling();
+    },
     canApply(): boolean {
+      // 🔴🔴 Lexical 内部组字态（防御纵深）：捕获 DOM 门控可能漏掉的组字窗口。
+      if (isComposing && isComposing()) return false;
       // 🔴 组字中绝对不许回灌（这是老项目四道门里的第 ①②③道）；
       //   打字活跃期也不回灌（第④道，1.5 秒静默推迟）。
       //   两条是**或**关系：组字中时 typingActive 大概率为真，但不必依赖它 ——
       //   依赖"大概率"就等于把一条正确性判据建在时序巧合上。
       if (composing) return false;
+      // 🔴🔴 组字刚结束的冷却期（覆盖语音句间停顿 > 1.5s 的窗口），
+      //   必须独立拦住 —— 否则语音停顿中门控开门、整篇重建把字弄乱。
+      if (composeCooling()) return false;
       if (typingActive()) return false;
       return true;
     },
@@ -120,6 +170,9 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
     },
     setComposing(v: boolean): void {
       composing = v;
+      // 🔴 手动置位**不**触发冷却（`lastComposeEndAt` 不动）：
+      //   这是降级场景（本来就没有 composition 事件，"刚组完字"无从判断），
+      //   且现有 SYNC-IME-01 钉的就是这条无事件的降级路径，保持语义不变。
     },
     noteInput(): void {
       lastInputAt = now();
@@ -127,4 +180,4 @@ export function createImeGate(now: () => number = Date.now): ImeGate {
   };
 }
 
-export { TYPE_ACTIVE_MS };
+export { TYPE_ACTIVE_MS, COMPOSE_COOLDOWN_MS };

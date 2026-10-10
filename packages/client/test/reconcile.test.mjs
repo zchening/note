@@ -19,10 +19,10 @@ import assert from 'node:assert/strict';
 // 🔴 这里不能写 `import { type Doc }` —— .mjs 不是 TS，`type` 修饰符会直接
 //   SyntaxError: Unexpected identifier，整份测试文件崩成1 条 fail（不是 26 条红，
 //   报错信息还指向 import 行，很容易误以为是模块解析问题）。类型标注走 JSDoc。
-import { canonicalize, normalize } from '@bj/shared-schema';
+import { canonicalize, normalize, blockText as blockTextRecursive } from '@bj/shared-schema';
 import {
   addReminder,
-  blockText,
+  blockOwnText,
   completeReminder,
   dueReminders,
   itemOf,
@@ -72,7 +72,23 @@ const remTexts = (doc) => {
 };
 
 /** 取全文纯文本，块间用 \n。 */
-const fullText = (doc) => (doc.blocks ?? []).map((b) => blockText(b)).join('\n');
+const fullText = (doc) => (doc.blocks ?? []).map((b) => blockOwnText(b)).join('\n');
+
+/* ============ 0. blockText 口径契约（P0-6 护栏） ============
+ * 🔴🔴 两个 blockText 语义相反，禁止"统一删除扁平版"：
+ *   - shared-schema 的 blockText = 递归（含 children）
+ *   - reconcile.blockOwnText = 仅本块（text/spans/title 三选一），children 由 flatten 手动递归
+ *   若把 reconcile 换成递归版，flatten 会双算 children ⇒ 提醒偏移错位（审计担心的回归）。
+ */
+test('P0-6 递归 blockText 含 children，blockOwnText 不含', () => {
+  const fold = {
+    t: 'fold',
+    title: [{ t: '标题' }],
+    children: [{ t: 'p', spans: [{ t: '子内容' }] }],
+  };
+  assert.equal(blockTextRecursive(fold).includes('子内容'), true, '递归版必须含 children 文本');
+  assert.equal(blockOwnText(fold).includes('子内容'), false, 'own-only 版不得含 children 文本');
+});
 
 /* ============ 1. 提醒 id ============ */
 

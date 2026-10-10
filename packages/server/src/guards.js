@@ -58,6 +58,47 @@ export function wkMode() {
   return m;
 }
 
+/**
+ * 🔴🔴 P1-2（选 A：fail-closed）启动期凭据闸配置校验。
+ *
+ * 语义：
+ *  - **完全未配置**（env 未设且文件不存在）→ 允许，默认 `off`，但返回 `warned:true`
+ *    让启动打一行醒目告警（灰度起步档，本就承诺无锁）。
+ *  - **显式给出非法值**（env 设了非空非法的，或 wk-mode.txt 写了非空非法的）→
+ *    **抛错**。服务据此在启动期 fatal 退出，绝不"静默退化成 off 让写闸失效"带病运行。
+ *   这是 P1-2 的核心：配置 typo 过去会悄悄关掉写闸，等于线上零保护而不自知。
+ *
+ * 注意：**仅启动期校验**。运行期 5s 热切仍是原 `wkMode()`（非法值退 off）——
+ * 因为热切写错一个字节不该把正在跑的服务直接崩掉（那比短暂无保护更糟）。
+ * 真正的保护由"启动期已 exit"保证：非法配置根本起不来。
+ *
+ * 调用方必须在 `init(DATA_DIR)` 之后、监听端口之前调用本函数。
+ */
+const WK_VALID = new Set(['off', 'new-only', 'full']);
+
+export function checkWkModeConfig() {
+  let raw = null;
+  let source = 'default';
+  try {
+    const f = fs.readFileSync(_wkModeFile, 'utf8').trim();
+    if (f) { raw = f; source = 'wk-mode.txt'; }
+  } catch { /* 文件不存在 = 未配置 */ }
+  if (raw === null) {
+    const e = process.env.NS_BJ_WK_MODE;
+    if (e !== undefined && e.trim() !== '') { raw = e.trim(); source = 'NS_BJ_WK_MODE'; }
+  }
+  if (raw === null) {
+    return { mode: 'off', warned: true, source: 'default' };
+  }
+  if (!WK_VALID.has(raw)) {
+    throw new Error(
+      `[guards] 致命：wk-mode 配置值 "${raw}"（来源 ${source}）非法。` +
+      `合法值为 off / new-only / full。拒绝以无保护状态启动（P1-2 fail-closed）。`,
+    );
+  }
+  return { mode: raw, warned: false, source };
+}
+
 /* ------------------------------------------------------------------ *
  * 凭据哈希
  * ------------------------------------------------------------------ */

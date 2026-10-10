@@ -18,6 +18,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Remote } from './remote.ts';
 import { assertId } from './config.ts';
+import { deriveWriteKey } from './write-key.ts';
 
 export const AAD_NOTE = 'note' as const;
 
@@ -125,9 +126,18 @@ export class Vault {
       //   而那会变成"读回来内容变了"这种查不出的bug。宁可写失败也不能写出去。
       throw new VaultError('canonical 序列化未达幂等（内部一致性检查失败），拒绝写入');
     }
-    const dk = await deriveKey(this.mustPass());
+    // 🔴🔴 P0-1 + 盐稳定性：已存在的笔记复用其 kdf.salt/iter（与网页端 unlock.ts:180 同口径）。
+    //   不复用 ⇒ 每次保存重新生 salt ⇒ 信封 kdf.salt 漂移 ⇒ 派生出的 writeKey 与
+    //   服务端认领时存的 wkHash 不一致 ⇒ full 档下第二次保存起一律 403（P0-1 修复后才会暴露）。
+    //   新笔记（GET 返回 null）才生新 salt（首次认领用）。
+    const existing = await this.remote.get(id);
+    const saltB64 = existing && existing.env ? existing.env.kdf.salt : undefined;
+    const dk = await deriveKey(this.mustPass(), saltB64);
     const env = await encryptString(canonical, dk.key, AAD_NOTE, dk);
-    const r = await this.remote.put(id, env, canonical.length);
+    // 🔴🔴 派生写入凭据：用与信封**同一份** salt/iter（稳定），与网页端 write-key.ts 逐字节同算法。
+    //   full 档下不带它写已认领笔记会 403；带错口令的它也会 403（由 remote.put 转成可见错误）。
+    const wk = deriveWriteKey(id, this.passphrase, dk.saltB64, dk.iter);
+    const r = await this.remote.put(id, env, canonical.length, wk ?? undefined);
     return { bytes: r.bytes, chars: canonical.length };
   }
 }

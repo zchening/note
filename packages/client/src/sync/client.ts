@@ -94,6 +94,23 @@ export interface SyncDeps {
   /** 网络层是否可达（测试注入用；默认读 navigator.onLine） */
   isOnline?: () => boolean;
   /**
+   * 🔴🔴 IME 组字门控（P0-3 修复）。返回 false 表示编辑器正处于组字 / 输入活跃期，
+   *   此刻**绝不能**把远端内容回灌进编辑器（`root.clear()` + 整篇重建会打断组字、
+   *   吞掉用户正在打的字）。
+   *
+   *   🔴🔴🔴 为什么必须由 client.ts 自己持有它（而不是只靠 main.ts 的 setDoc 门控）：
+   *   旧实现里 main.ts 的 `setDoc` 在 IME 组字中**裸 return 不回灌**，但 `decryptAndMerge`
+   *   仍把 `this.base` 推进成远端 ⇒ base（= 上次同步成功的版本）与编辑器（仍是旧内容）
+   *   悄然分叉 ⇒ 后续三方合并把"用户在远端删掉、本机还在显示"的内容当成"本地新增"
+   *   复活（P0-3「复活的删除」）。
+   *   ⇒ 这里让 client.ts 在「回灌」与「推进 base」**同进同退**：门控不通过时既不回灌、
+   *   也不推进 base，把这一轮回灌推迟到 IME 结束（canApply() 变 true）后的下一轮
+   *   轮询 / SSE 再判。local == base 的采纳分支里，base 不动就不会与编辑器分叉。
+   *
+   *   不传 ⇒ `() => true`（旧行为，由 main.ts 的 setDoc 门控兜底）。
+   */
+  imeCanApply?: () => boolean;
+  /**
    * 🔴 推送成功后，把**刚被覆盖的那一版**交给调用方存档（历史版本环）。
    *
    * 🔴🔴 传的是 `base`（上次同步成功时的文档），不是本次推的 `doc` ——
@@ -276,6 +293,18 @@ export class SyncClient {
    */
   private base: Doc;
   private stopped = false;
+  /** 🔴🔴 绑在 window 上的 'online' 监听引用（P0-2 修复）。
+   *   此前用内联箭头，全文件无对应 removeEventListener ⇒ 换笔记后旧实例仍在飞，
+   *   stop() 也清不掉 ⇒ 旧实例恢复网络时把旧 note 拉进当前编辑器（跨笔记静默串写）。
+   *   必须存引用、stop() 解绑。 */
+  private onOnline: (() => void) | undefined;
+  /**
+   * 🔴🔴 IME 组字门控（P0-3 修复）。decryptAndMerge 在「把远端回灌进编辑器」之前必须过这一关；
+   *   门控不通过 ⇒ **既不回灌、也不推进 base**，把这一轮回灌推迟到 IME 结束（canApply() 变
+   *   true）后的下一轮轮询 / SSE 再判（见 decryptAndMerge 两个 setDoc 分支的注释）。
+   *   默认 `() => true`（未注入时退化为旧行为：由 main.ts 的 setDoc 门控兜底）。
+   */
+  private imeCanApply: () => boolean = () => true;
   /** 冲突详情，供UI 展示 */
   private conflicts: MergeResultLike['conflicts'] = [];
 
@@ -286,6 +315,8 @@ export class SyncClient {
     //   （main.ts 的 startSyncFor 在 mountEditor 之后调，但换笔记的时序不保证），
     //   而 initialDoc 是调用方**显式**传进来的，不依赖任何时序。
     this.base = deps.initialDoc ?? emptyDoc();
+    // 🔴🔴 P0-3：注入 IME 门控（默认放行，由 main.ts 的 setDoc 门控兜底旧行为）。
+    this.imeCanApply = deps.imeCanApply ?? (() => true);
   }
 
   /* ---------------- 状态 ---------------- */
@@ -380,10 +411,14 @@ export class SyncClient {
     this.startPoll();
     // 🔴 浏览器从离线切回在线时立刻重拉。不监听的话"断网期间对方的改动"
     //   要等到下一次手动刷新才同步，用户会以为同步坏了。
+    //   🔴🔴 P0-2 修复：监听存为实例字段，stop() 里解绑，回调首行判 stopped ——
+    //   否则换笔记后旧实例的监听仍会触发 retryPull 拉旧 note（跨笔记静默串写）。
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => {
+      this.onOnline = () => {
+        if (this.stopped) return;
         if (this.state === 'offline') void this.retryPull();
-      });
+      };
+      window.addEventListener('online', this.onOnline);
     }
   }
 
@@ -653,6 +688,11 @@ export class SyncClient {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
     }
+    // 🔴🔴 P0-2 修复：解绑 window 'online' 监听（此前内联箭头、stop 不清 ⇒ 旧实例泄漏）。
+    if (this.onOnline) {
+      if (typeof window !== 'undefined') window.removeEventListener('online', this.onOnline);
+      this.onOnline = undefined;
+    }
     this.es?.close();
     this.es = undefined;
   }
@@ -830,6 +870,9 @@ export class SyncClient {
   /* ---------------- 拉 ---------------- */
 
   private async pull(fromStateEntry?: SyncState): Promise<void> {
+    // 🔴🔴 P0-2 修复：stop() 之后仍在飞的 pull（慢网络）落回时直接放弃，
+    //   不再 decryptAndMerge 把旧 note 内容写进已切走的编辑器（跨笔记静默串写）。
+    if (this.stopped) return;
     // 🔴🔴🔴 三道守卫，**每一条都是轮询上线的前提**（缺任一条，2 秒轮询就是故障放大器）：
     //
     //   ① conflict —— `pull()` 里原本**没有**这层守卫（只有 SSE 回调里有，
@@ -872,6 +915,8 @@ export class SyncClient {
   }
 
   private async pullInner(): Promise<void> {
+    // 🔴🔴 P0-2 修复：stop() 后入口闸（与 pull() 同源）。
+    if (this.stopped) return;
     if (!this.online()) {
       this.send('network-fail');
       return;
@@ -985,6 +1030,13 @@ export class SyncClient {
 
     // 本地 == base：只有远端变了，直接采纳
     if (eq(local, base)) {
+      // 🔴🔴🔴 P0-3：IME 组字中 ⇒ 这次**既不回灌、也不推进 base**，直接推迟。
+      //   理由：local == base 说明编辑器此刻内容就是旧 base；若我们仍把 `this.base`
+      //   推进成远端（旧实现的行为），而 main.ts 的 setDoc 因 IME 裸 return 不回灌 ⇒
+      //   base 与编辑器分叉 ⇒ 后续三方合并把"远端删掉、本机还在显示"的内容当本地新增复活。
+      //   推迟到下一轮轮询 / SSE（IME 结束 canApply() 变 true）再判即可：
+      //   base 不动 ⇒ 编辑器与 base 始终一致，重判时走同一分支正确采纳。
+      if (!this.imeCanApply()) return;
       this.d.setDoc(remoteDoc);
       this.base = remoteDoc;
       this.conflicts = [];
@@ -1036,6 +1088,10 @@ export class SyncClient {
       return;
     }
     this.conflicts = res.conflicts;
+    // 🔴🔴🔴 P0-3：IME 组字中 ⇒ 推迟回灌与 base 推进（与采纳远端分支同口径）。
+    //   res.conflicts 已赋值（供 UI），但此刻**不回灌、不推、不发状态**——
+    //   等 IME 结束后的下一轮轮询 / SSE 重判（base 不动 ⇒ 编辑器与 base 不分叉）。
+    if (!this.imeCanApply()) return;
     this.d.setDoc(res.doc);
     this.base = remoteDoc;
     if (res.conflicts.length > 0) {

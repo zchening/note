@@ -71,7 +71,7 @@ function flatten(doc: Doc): { text: string; blocks: Array<{ block: Block; start:
   const walk = (list: readonly Block[] | undefined): void => {
     if (!list) return;
     for (const b of list) {
-      const own = blockText(b);
+      const own = blockOwnText(b);
       const start = pos;
       parts.push(own);
       pos += own.length + 1; // +1 是块间换行，与 flatten 的口径一致
@@ -83,8 +83,16 @@ function flatten(doc: Doc): { text: string; blocks: Array<{ block: Block; start:
   return { text: parts.join('\n'), blocks };
 }
 
-/** 一个块自己的纯文本。 */
-export function blockText(b: Block): string {
+/**
+ * 一个块**自己**的纯文本（不含 children）。
+ *
+ * 🔴🔴 P0-6 护栏：此函数刻意是 own-only（text/spans/title 三选一），
+ *   它的调用方 `flatten()` 会**手动递归 `walk(b.children)`** 把 children 拼进来。
+ *   ⇒ 不要把它换成 `@bj/shared-schema` 的递归 `blockText`（那只含 children 才对），
+ *   否则 `flatten` 会把 children 双算，提醒时间串偏移错位 —— 正是审计担心的回归。
+ *   两个 blockText 语义相反，命名上用 `blockOwnText` 与递归版区分，杜绝误引。
+ */
+export function blockOwnText(b: Block): string {
   if (typeof b.text === 'string') return b.text;
   if (Array.isArray(b.spans)) return b.spans.map((s) => s.t).join('');
   if (Array.isArray(b.title)) return b.title.map((s) => s.t).join('');
@@ -205,7 +213,7 @@ function markAll(
 ): void {
   let off = baseOffset;
   for (const b of list) {
-    const own = blockText(b);
+    const own = blockOwnText(b);
     // 🔴🔴 时间串**必须完整落在本块内**才允许挂标记。
     //   flatten 用 '\n' 拼块，而中文日期正则里的 `\s*` 会吃掉换行 ——
     //   于是「3月1日」+ 换行 + 「10:00」两块会被拼成一段跨块时间串（index 0, length 10）。

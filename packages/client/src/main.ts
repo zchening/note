@@ -1700,7 +1700,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   为什么必须解绑（off()）：bj 是多页 SPA，会反复 mountEditor。
   //   旧监听不撤⇒ 状态跨挂载残留（新编辑器继承上一篇的组字态 / 活跃期），
   //   症状是"换一篇笔记后同步功能坏了"，而本机一切正常。
-  const imeGate: ImeGate = createImeGate();
+  // 🔴🔴 P0-3 语音修复：把 Lexical 自身的组字态也喂进门控（防御纵深）。
+  //   豆包语音转文字的组字串有时挂在 Lexical 内部、`composition` 事件因时序/宿主
+  //   元素问题没被本门控收到 ⇒ 仅靠 DOM 事件会漏拦。Lexical 的 isComposing()
+  //   是它自己监听同一批事件得出的内部态，能兜住这道漏网。它**只增不减**地加固
+  //   canApply()，不会削弱既有判据。闭包延迟读取 `editor`，此刻 editor 尚未赋值，
+  //   但 canApply() 被调用时 editor 早已挂好。
+  const imeGate: ImeGate = createImeGate(undefined, () => editor?.isComposing() ?? false);
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
@@ -2315,6 +2321,12 @@ async function startSyncFor(name: string): Promise<void> {
       //   而本机敲的会亮 —— 用户会怀疑"同步把内容搞坏了"。
       linkifyNowRef?.();
     },
+    // 🔴🔴 P0-3：把 IME 门控喂给 client.ts，让它在「回灌」与「推进 base」同进同退。
+    //   此前只有 setDoc 内部那道裸 return 门控——它挡得住回灌，却挡不住 base 推进，
+    //   于是 base 与编辑器分叉、后续三方合并复活远端删除。现在 client.ts 自己持有一份
+    //   同一来源的 canApply()，门控不通过时既不回灌也不推进 base，把回灌推迟到下一轮
+    //   轮询 / SSE。setDoc 里的旧门控保留作防御纵深（两条用的是同一谓词，不会矛盾）。
+    imeCanApply: () => (imeGateRef ? imeGateRef.canApply() : true),
     onSnapshot: (s) => {
       lastSyncState = s.state;
       const f = footFor(s.state);
