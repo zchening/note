@@ -244,6 +244,9 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): Be
 
   // 🔴 行首 `[折叠]` /`[/折叠]` 自动转成FoldNode（老项目 applyFolds 的等价物）。
   //   缺它= 折叠功能对真实用户完全不可达（只有 e2e 钩子能造）。
+  //   🔴🔴 v3.0.8 注：这里**刻意不接** canEditTree 门控 —— 它是同帧、点状、
+  //   锚定光标行的手术（顺延会让锚换行，语义直接坏，见 registerFoldAutoCreate
+  //   尾部的实测记录）；整段改写期间它天然 no-op。
   const unregisterFoldAuto = registerFoldAutoCreate(editor);
 
   // 🔴🔴 图片的两个入口：拖拽进编辑器、粘贴图片。
@@ -1230,6 +1233,18 @@ function registerFoldAutoCreate(editor: LexicalEditor): () => void {
     unregisterUpdate();
     root?.removeEventListener('beforeinput', onBeforeInput);
   };
+  // 🔴🔴🔴 v3.0.8 曾经把 IME 的 canEditTree 门控接进这里（门控不开就顺延 800ms
+  //   重试），**实测后撤掉**，原因记录在案防止后人再加回来：
+  //   $promoteFoldMarks 是**锚定光标所在行**的手术 —— 它从当前 Selection 取
+  //   anchor 行、判该行行首是否为 `[折叠]`。顺延重试意味着"跑的时候光标已经
+  //   换行/移位"：FOLD-12 实锤（插桩 __FOLD_DBG__：promote 在 T+1600ms 放行后
+  //   运行，锚已停在「乙内容」行 ⇒ 扫描 no-mark ⇒ `[折叠]组二` 永远建不了组，
+  //   测试超时）。换句话说：**对选择区锚定的手术，"推迟"本身就是语义损坏**，
+  //   不是安全的让路。
+  //   为什么它**不需要**这道闸：它是同帧、点状、只动用户光标行的手术，
+  //   与 root.clear() 整篇重建（回灌/补铺/链接识别）不是一类 —— 整段改写
+  //   （豆包智能整理）的批次间隙里，光标行不会以 `[折叠]` 开头 ⇒ promote
+  //   天然 no-op，零动树。真正的病灶路径（整篇重建类）全部已过 canEditTree。
 }
 
 /**

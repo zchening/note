@@ -599,7 +599,8 @@ let linkifyNowRef: (() => void) | undefined;
 
 // 🔴🔴 IME 门控的模块级出口（用户报障第 7 条）。
 //   两个变量各管一件事，别合并：
-//     imeGateRef   = 门控本体⇒ 三条回灌路径判canApply()
+//     imeGateRef   = 门控本体⇒ 三条回灌路径判 canEditTree()（v3.0.8 起比
+//                    canApply() 更严：还要躲"整段改写会话窗口"）
 //     detachImeRef = 解绑函数 ⇒ 下次 mountEditor 时撤掉上一篇的监听
 //   🔴🔴 都**必须**有 `undefined` 初值而不是就地 new 一个：
 //   mountEditor 之外（落地页/口令页/备份恢复卡）没有编辑器，
@@ -1788,7 +1789,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   "输入过程中的 DOM 手术"。Android 输入法靠 InputConnection 的文本视图定位，
     //   网页一改树视图就错位 ⇒ 输入法下一次提交按旧偏移操作 ⇒ 整段正文被替掉
     //   （用户报的"语音输入中突然只剩第一句"）。
-    canEdit: () => (imeGate ? imeGate.canApply() : true),
+    //   🔴🔴 v3.0.8：喂的是 canEditTree()（比 canApply() 更严）—— 除时间窗外还要
+    //   躲开"整段改写会话窗口"（豆包「智能整理」大段删除后分批插入的间隙）。
+    canEdit: () => (imeGate ? imeGate.canEditTree() : true),
   });
   // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
   //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，
@@ -1959,7 +1962,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       strayMarkFlushTimer = undefined;
       // 🔴 门控不开 ⇒ 顺延重试。用局部 imeGate（本次挂载那一个），
       //   不用模块级 imeGateRef —— 换笔记后旧挂载的门控不该影响新挂载。
-      if (imeGate && !imeGate.canApply()) {
+      //   🔴🔴 v3.0.8：判 canEditTree()（补铺是树手术，还要躲整段改写窗口）。
+      if (imeGate && !imeGate.canEditTree()) {
         scheduleStrayMarkFlush(STRAY_FLUSH_RETRY_MS);
         return;
       }
@@ -2048,6 +2052,30 @@ function mountEditor(name: string, initialDoc?: Doc): void {
 
     const exported = normalize(lexicalToDoc(editorState, latestDoc.reminders ?? []));
 
+    // 🔴🔴🔴 v3.0.8「整段改写会话窗口」的**触发器**（豆包「智能整理/精炼润色」丢字）。
+    //
+    //   豆包的智能整理是一次「大段删除原文 → 静默（"识别优化中"）→ 分批插入整理稿」。
+    //   删除与批次之间的静默可以远超 1.5s 活跃期与 4s 冷却期 —— 那时组字态早就
+    //   结束，门控（canApply）按时间判定为"没在输入"，一切程序化动树都会放行。
+    //   而 Android 输入法靠 InputConnection 的文本视图定位，只要我们在这段静默里
+    //   动一次树（回灌/补铺/链接识别/折叠建组），视图就与 DOM 错位，它下一次
+    //   commitText 按旧偏移操作 ⇒ 前面几段被整段替换（用户报障："只剩最后一段"）。
+    //
+    //   时间窗盖不住它 ⇒ 必须用**结构痕迹**触发：「这次 update 删掉了 ≥ 8 个字符」。
+    //   这是真实发生在文档上的变化，不依赖"上一次输入是多久之前"这种采样。
+    //   触发后开一个固定长度（BULK_REWRITE_MS=6s）的会话窗口，期间 canEditTree()
+    //   恒 false，一切程序化动树顺延；6s 后必然放行（下轮轮询自动重试，推迟不排队）。
+    //
+    //   误触发（用户自己 Ctrl+A 重打 / 大段退格）的代价只是远端回灌推迟 6s ——
+    //   用户此刻正在打字，本来也不该回灌；漏触发的代价是丢字（现状）。
+    //   两害相权，判据宁可偏灵敏。
+    //
+    //   🔴 用 `before`（本次 update 前的 latestDoc）与 `exported`（本次 update 后
+    //     从树导出的文档）比长度：两者都过了 normalize/对账前态，口径一致。
+    //     在 **read 回调外**调 docTextLen（纯模型函数，与 editorState 无关）。
+    if (docTextLen(before) - docTextLen(exported) >= BULK_DELETE_CHARS) {
+      imeGate?.noteBulkEdit();
+    }
 
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
@@ -2074,7 +2102,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //     只是标记这次不铺，等下一次允许回灌时补上。
     //     这条区分极其重要：判据放宽成"标记变了也拦"会把用户正常打字也拦掉。
     if (canonicalize(rec.doc) !== canonicalize(exported)) {
-      if (imeGateRef && !imeGateRef.canApply()) {
+      // 🔴🔴 v3.0.8：判 canEditTree() —— 标记重铺（局部或整篇）都是树手术，
+      //   在"整段改写会话窗口"内同样必须让路（顺延走补铺重试通道）。
+      if (imeGateRef && !imeGateRef.canEditTree()) {
         // 🔴 跳过铺标记，**但 schedule() 与 noteEdit() 照旧要走**
         //   （它们在下面）：提醒的增删是真源事实，不该被门控拦住。
         //
@@ -2344,7 +2374,9 @@ async function startSyncFor(name: string): Promise<void> {
       //   🔴 为什么是「跳过」而不是「排队」：排队就得存一份待写回的 doc，
       //   而下一轮 poll（2 秒后）会自己拉到最新内容 ⇒ 跳过即可，不需要额外状态机。
       //   老项目同款：index.html:9883 的 applyRemoteBody 首行就return。
-      if (imeGateRef && !imeGateRef.canApply()) return;
+      //   🔴🔴 v3.0.8：判 canEditTree() —— docToLexical 整篇重建在"整段改写会话窗口"
+      //   内同样必须让路（豆包智能整理大段删除后分批插入，间隙超时窗，canApply 会开门）。
+      if (imeGateRef && !imeGateRef.canEditTree()) return;
       // 远端/合并结果写回编辑器。**必须包在 update 里**，
       // 直接改 Lexical 内部状态会在渲染之外改文档，症状是"内容变了但重绘没跟上"。
       editor?.update(() => {
@@ -2360,9 +2392,12 @@ async function startSyncFor(name: string): Promise<void> {
     // 🔴🔴 P0-3：把 IME 门控喂给 client.ts，让它在「回灌」与「推进 base」同进同退。
     //   此前只有 setDoc 内部那道裸 return 门控——它挡得住回灌，却挡不住 base 推进，
     //   于是 base 与编辑器分叉、后续三方合并复活远端删除。现在 client.ts 自己持有一份
-    //   同一来源的 canApply()，门控不通过时既不回灌也不推进 base，把回灌推迟到下一轮
+    //   同一来源的谓词，门控不通过时既不回灌也不推进 base，把回灌推迟到下一轮
     //   轮询 / SSE。setDoc 里的旧门控保留作防御纵深（两条用的是同一谓词，不会矛盾）。
-    imeCanApply: () => (imeGateRef ? imeGateRef.canApply() : true),
+    //   🔴🔴 v3.0.8：喂 canEditTree()（比 canApply 多挡"整段改写会话窗口"）——
+    //   三方合并结果回灌是动树最狠的一条路，窗口内必须整轮推迟（base 也不推进，
+    //   两者同进同退的 P0-3 纪律不变）。
+    imeCanEditTree: () => (imeGateRef ? imeGateRef.canEditTree() : true),
     onSnapshot: (s) => {
       lastSyncState = s.state;
       const f = footFor(s.state);
@@ -2438,6 +2473,37 @@ async function startSyncFor(name: string): Promise<void> {
 
 /** 本次解锁是否为首建（需要首推）。 */
 let pendingFresh = false;
+
+/**
+ * 一个文档的纯文本长度（spans/title/text 全算，children 递归）。
+ *
+ * 🔴 专为「整段改写会话窗口」的触发判据服务（见 update 监听器里的 noteBulkEdit）：
+ *   判据只比**长度**，不比内容 —— 一次 update 删掉 8 个字符就是结构痕迹，
+ *   与删的是哪 8 个无关。递归 children：折叠块的子块在真源 blocks 树的 children
+ *   里（不是扁平兄弟），漏了它们会把"删掉半个折叠块"算成没删。
+ *   🔴 纯模型函数：只吃 Doc，不碰 editorState —— 在 read 回调外调用也安全。
+ */
+function docTextLen(d: Doc): number {
+  let n = 0;
+  const walk = (bs: Doc['blocks']): void => {
+    for (const b of bs ?? []) {
+      if (Array.isArray(b.spans)) for (const s of b.spans) n += s.t.length;
+      if (Array.isArray(b.title)) for (const s of b.title) n += s.t.length;
+      if (typeof b.text === 'string') n += b.text.length;
+      if (b.children) walk(b.children);
+    }
+  };
+  walk(d.blocks);
+  return n;
+}
+
+/**
+ * 「整段删除」判据阈值：一次 update 删掉 ≥ 8 个字符 ⇒ 视为输入法在整段改写。
+ *
+ * 🔴 取值口径：比单行编辑大（敲错一整行重打通常也就几个字），
+ *   比豆包智能整理的删除小得多（它删的是整篇）。误触发代价仅为回灌推迟 6s。
+ */
+const BULK_DELETE_CHARS = 8;
 
 /**
  * 真源的纯文本（给彩蛋层抽词用）。

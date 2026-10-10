@@ -186,9 +186,14 @@ test('SYNC-IME-06 三条回灌路径都必须过门控（接线）', async () =>
   //   docToLexical 的调用点若全都在门控内，是对的；
   //   这里钉的是「门控必须真的接进 mountEditor 并被解绑」，
   //   以及「不得引入第二套并行的 IME 标志」（那正是老项目单例在本仓会炸的原因）。
+  //   🔴 v3.0.8 起接线谓词升级为 canEditTree()（比 canApply 更严：还要躲
+  //   「整段改写会话窗口」—— 豆包智能整理大段删除后分批插入的批次间隙），
+  //   三条回灌路径 + 链接识别 + 补铺的接线全部判它；client.ts 的依赖注入
+  //   键也随之改名 imeCanEditTree。此处钉的是**新形状**（判据跟着现行口径走）。
   assert.match(main, /createImeGate\(/, 'mountEditor 必须建门控');
   assert.match(main, /\.attach\(/, '门控必须真的 attach 到宿主');
-  assert.match(main, /imeGate\w*\.canApply\(\)/, '回灌前必须判 canApply');
+  assert.match(main, /imeGate\w*\.canEditTree\(\)/, '回灌/动树前必须判 canEditTree（含整段改写窗口）');
+  assert.match(main, /imeCanEditTree:/, 'client.ts 依赖必须喂 canEditTree（P0-3 同进同退 + v3.0.8 窗口）');
   // 不许在 main.ts 里另开一个模块级 isComposing（跨挂载残留的老坑）
   assert.doesNotMatch(main, /^let isComposing/m, '不许模块级 isComposing（跨挂载残留）');
 });

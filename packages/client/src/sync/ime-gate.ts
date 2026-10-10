@@ -49,6 +49,27 @@ const TYPE_ACTIVE_MS = 1_500;
  */
 const COMPOSE_COOLDOWN_MS = 4_000;
 
+/**
+ * 🔴🔴 「整段改写会话窗口」（豆包「智能整理/精炼润色」专用，2026-10-11）。
+ *
+ *   老项目与小米自带笔记在同样的操作下**不丢字**，是因为它们压根没有
+ *   "网页在输入过程中程序化改树"这件事；而 bj 有（Lexical 的回灌 / 补铺 /
+ *   链接识别 / 折叠建组）。只要**一次编辑删掉了大段正文**，就说明输入法
+ *   很可能正在做「整段删除 → 分批插入」的改写 —— 这一段时间内**一切程序化
+ *   动树都必须让路**，否则 Android 的 `InputConnection` 文本视图与 DOM 错位，
+ *   输入法下一次 `commitText` 按旧偏移操作 ⇒ 前面几段被整段替换。
+ *
+ *   🔴 为什么不用"打字活跃期"去覆盖：活跃期是 1.5 秒的**时间窗**，
+ *     而豆包「识别优化中」的静默、以及批次之间的间隙都可能超过它
+ *     ⇒ 时间窗会提前开门，正好在它还在改的那一刻放行手术。
+ *   🔴 为什么是**结构痕迹**而不是时间巧合：触发条件是「这次编辑删掉了
+ *     ≥ 8 个字符」（由调用方判定后调 `noteBulkEdit()`），是真实发生在
+ *     文档上的结构变化，不依赖"上一次输入是多久之前"这种采样。
+ *   🔴 窗口是**固定长度**不是滑动的：输入持续也不会无限延长，
+ *     6 秒后必然放行（远端改动最多推迟这么久落地，下一轮轮询会自动重试）。
+ */
+const BULK_REWRITE_MS = 6_000;
+
 export interface ImeGate {
   /** 组字中（含 compositionstart 之后、compositionend 之前）。 */
   readonly composing: boolean;
@@ -56,8 +77,21 @@ export interface ImeGate {
   readonly typingActive: boolean;
   /** 组字刚结束的冷却期内（覆盖语音句间停顿）。 */
   readonly composeCooling: boolean;
+  /** 输入法正在"整段改写"正文的会话窗口内（见 noteBulkEdit）。 */
+  readonly bulkActive: boolean;
   /** 现在**能不能**往编辑器里回灌。 */
   canApply(): boolean;
+  /**
+   * 现在**能不能动树**（回灌 / 补铺 / 链接识别 / 折叠建组 —— 一切程序化改 DOM）。
+   *
+   * 🔴🔴 与 `canApply()` 的差别就一条：它**额外**被"整段改写会话窗口"挡住。
+   *   `canApply()` 只挡"组字中 / 冷却期 / 打字活跃期"这三个**时间窗**，
+   *   而输入法（豆包「智能整理」）整段删除原文、再**分批**插入整理稿时，
+   *   批次之间的静默可能超过 1.5 秒 ⇒ 时间窗开 ⇒ 我们在它还在改的时候动树。
+   */
+  canEditTree(): boolean;
+  /** 记一次"整段改写"（输入法大段删除原文）。 */
+  noteBulkEdit(): void;
   /** 绑定到编辑器宿主。返回解绑函数（mountEditor 必须调它）。 */
   attach(host: HTMLElement): () => void;
   /** 手动置组字态（给没有 composition 事件的降级场景/判据用）。 */
@@ -92,9 +126,11 @@ export function createImeGate(
   let lastInputAt = Number.NEGATIVE_INFINITY;
   // 🔴🔴 组字结束时间戳，初值同 "从未组过字"。
   let lastComposeEndAt = Number.NEGATIVE_INFINITY;
+  let lastBulkEditAt = Number.NEGATIVE_INFINITY;
 
   const typingActive = (): boolean => now() - lastInputAt < TYPE_ACTIVE_MS;
   const composeCooling = (): boolean => now() - lastComposeEndAt < COMPOSE_COOLDOWN_MS;
+  const bulkActive = (): boolean => now() - lastBulkEditAt < BULK_REWRITE_MS;
 
   const onCompositionStart = (): void => {
     composing = true;
@@ -142,6 +178,9 @@ export function createImeGate(
     get composeCooling() {
       return composeCooling();
     },
+    get bulkActive() {
+      return bulkActive();
+    },
     canApply(): boolean {
       // 🔴🔴 Lexical 内部组字态（防御纵深）：捕获 DOM 门控可能漏掉的组字窗口。
       if (isComposing && isComposing()) return false;
@@ -155,6 +194,19 @@ export function createImeGate(
       if (composeCooling()) return false;
       if (typingActive()) return false;
       return true;
+    },
+    canEditTree(): boolean {
+      // 🔴🔴🔴 比回灌更严：程序化改树还要躲开"整段改写会话窗口"。
+      //   输入法大段删除原文后还在分批插入时，时间窗可能恰好开着 ——
+      //   那一刻动树就是把 Android InputConnection 的视图打歪。
+      //   `canApply()` 本身保持原语义（回灌/合并判它，语义不变），
+      //   这里只是在其上**叠加**一条，只增不减。
+      if (!this.canApply()) return false;
+      if (bulkActive()) return false;
+      return true;
+    },
+    noteBulkEdit(): void {
+      lastBulkEditAt = now();
     },
     attach(host: HTMLElement): () => void {
       host.addEventListener('compositionstart', onCompositionStart);
@@ -180,4 +232,4 @@ export function createImeGate(
   };
 }
 
-export { TYPE_ACTIVE_MS, COMPOSE_COOLDOWN_MS };
+export { TYPE_ACTIVE_MS, COMPOSE_COOLDOWN_MS, BULK_REWRITE_MS };

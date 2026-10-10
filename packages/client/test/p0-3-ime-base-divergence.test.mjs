@@ -8,9 +8,9 @@
  *
  * 🔴🔴 判据设计（不抄第二份实现，只钉用户可见结果）：
  *   构造「base == 本地 == D_base（含 A、B 两块），远端 == D_remote（只含 A，B 被删）」。
- *   ① 组字期（imeCanApply()==false）先拉一次：必须**既不回灌、也不推进 base**；
+ *   ① 组字期（imeCanEditTree()==false）先拉一次：必须**既不回灌、也不推进 base**；
  *      —— 复刻 main.ts 的 IME 门控：setDoc 桩在 ime 关时**同样不落盘**（只记录 ime 开时的回灌）。
- *   ② 组字结束后（imeCanApply()==true）再拉一次：必须**把 D_remote 原样回灌**，
+ *   ② 组字结束后（imeCanEditTree()==true）再拉一次：必须**把 D_remote 原样回灌**，
  *      即「被删的 B 不复活」。
  *   旧实现下，第①步会把 base 推进成 D_remote（setDoc 桩静默丢弃），第②步走
  *   `eq(remoteDoc, base)` 顶层分支只 push 本地、**根本不回灌** ⇒ applied 永远为空、
@@ -66,7 +66,7 @@ async function setup(imeRef) {
     //   pullInner 会在入口判 offline 早退、根本进不了 decryptAndMerge（两条用例全红的根因）。
     //   用 SyncDeps 预留的测试注入口，不碰全局。
     isOnline: () => true,
-    imeCanApply: () => imeRef(),
+    imeCanEditTree: () => imeRef(),
   };
 
   return { c: new SyncClient(deps), envelope, applied, dk, noteId };

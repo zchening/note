@@ -86,7 +86,7 @@ async function setup(imeRef, opts = {}) {
       if (opts.onError) opts.onError(m);
     },
     isOnline: () => true, // Node 22 全局 navigator 无 onLine，必须显式注入
-    imeCanApply: () => imeRef(),
+    imeCanEditTree: () => imeRef(),
   };
 
   const restore = installGlobals();

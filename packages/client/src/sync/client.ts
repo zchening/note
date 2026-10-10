@@ -104,12 +104,17 @@ export interface SyncDeps {
    *   悄然分叉 ⇒ 后续三方合并把"用户在远端删掉、本机还在显示"的内容当成"本地新增"
    *   复活（P0-3「复活的删除」）。
    *   ⇒ 这里让 client.ts 在「回灌」与「推进 base」**同进同退**：门控不通过时既不回灌、
-   *   也不推进 base，把这一轮回灌推迟到 IME 结束（canApply() 变 true）后的下一轮
+   *   也不推进 base，把这一轮回灌推迟到门控放行后的下一轮
    *   轮询 / SSE 再判。local == base 的采纳分支里，base 不动就不会与编辑器分叉。
+   *
+   *   🔴🔴 v3.0.8 改名 imeCanEditTree：main.ts 喂的是 `canEditTree()`（比 canApply()
+   *   更严）—— 除组字时间窗外还要躲开「整段改写会话窗口」（豆包「智能整理」
+   *   大段删除原文后分批插入，批次间静默超过时间窗 ⇒ canApply 会开门，而
+   *   三方合并回灌恰是动树最狠的一条路，窗口内必须整轮推迟）。
    *
    *   不传 ⇒ `() => true`（旧行为，由 main.ts 的 setDoc 门控兜底）。
    */
-  imeCanApply?: () => boolean;
+  imeCanEditTree?: () => boolean;
   /**
    * 🔴 推送成功后，把**刚被覆盖的那一版**交给调用方存档（历史版本环）。
    *
@@ -299,12 +304,12 @@ export class SyncClient {
    *   必须存引用、stop() 解绑。 */
   private onOnline: (() => void) | undefined;
   /**
-   * 🔴🔴 IME 组字门控（P0-3 修复）。decryptAndMerge 在「把远端回灌进编辑器」之前必须过这一关；
-   *   门控不通过 ⇒ **既不回灌、也不推进 base**，把这一轮回灌推迟到 IME 结束（canApply() 变
-   *   true）后的下一轮轮询 / SSE 再判（见 decryptAndMerge 两个 setDoc 分支的注释）。
+   * 🔴🔴 IME 动树门控（P0-3 修复，v3.0.8 改收 canEditTree）。decryptAndMerge 在「把远端回灌进编辑器」之前必须过这一关；
+   *   门控不通过 ⇒ **既不回灌、也不推进 base**，把这一轮回灌推迟到门控放行后的下一轮
+   *   轮询 / SSE 再判（见 decryptAndMerge 两个 setDoc 分支的注释）。
    *   默认 `() => true`（未注入时退化为旧行为：由 main.ts 的 setDoc 门控兜底）。
    */
-  private imeCanApply: () => boolean = () => true;
+  private imeCanEditTree: () => boolean = () => true;
   /** 冲突详情，供UI 展示 */
   private conflicts: MergeResultLike['conflicts'] = [];
 
@@ -316,7 +321,7 @@ export class SyncClient {
     //   而 initialDoc 是调用方**显式**传进来的，不依赖任何时序。
     this.base = deps.initialDoc ?? emptyDoc();
     // 🔴🔴 P0-3：注入 IME 门控（默认放行，由 main.ts 的 setDoc 门控兜底旧行为）。
-    this.imeCanApply = deps.imeCanApply ?? (() => true);
+    this.imeCanEditTree = deps.imeCanEditTree ?? (() => true);
   }
 
   /* ---------------- 状态 ---------------- */
@@ -1059,7 +1064,9 @@ export class SyncClient {
       //   base 与编辑器分叉 ⇒ 后续三方合并把"远端删掉、本机还在显示"的内容当本地新增复活。
       //   推迟到下一轮轮询 / SSE（IME 结束 canApply() 变 true）再判即可：
       //   base 不动 ⇒ 编辑器与 base 始终一致，重判时走同一分支正确采纳。
-      if (!this.imeCanApply()) return;
+      // 🔴🔴 v3.0.8：门控升级为 canEditTree —— 采纳远端同样是 docToLexical 整篇重建，
+      //   在「整段改写会话窗口」内（豆包智能整理的批次间隙）同样必须整轮推迟。
+      if (!this.imeCanEditTree()) return;
       this.d.setDoc(remoteDoc);
       this.base = remoteDoc;
       this.conflicts = [];
@@ -1131,8 +1138,8 @@ export class SyncClient {
     //     无冲突（本机是远端的超集，远端只是少了本机新增的部分）：push 收口。
     if (eq(res.doc, local)) {
       if (res.conflicts.length > 0) {
-        // P0-3 同口径：组字中连冲突都不弹（等下一轮轮询/SSE 重判），不打断输入。
-        if (!this.imeCanApply()) return;
+        // P0-3 同口径：门控不开（组字中 / 整段改写窗口）连冲突都不弹（等下一轮轮询/SSE 重判），不打断输入。
+        if (!this.imeCanEditTree()) return;
         this.conflicts = res.conflicts;
         this.base = remoteDoc;
         this.send('merge-conflict');
@@ -1156,7 +1163,7 @@ export class SyncClient {
     // 🔴🔴🔴 P0-3：IME 组字中 ⇒ 推迟回灌与 base 推进（与采纳远端分支同口径）。
     //   res.conflicts 已赋值（供 UI），但此刻**不回灌、不推、不发状态**——
     //   等 IME 结束后的下一轮轮询 / SSE 重判（base 不动 ⇒ 编辑器与 base 不分叉）。
-    if (!this.imeCanApply()) return;
+    if (!this.imeCanEditTree()) return;
     this.d.setDoc(res.doc);
     this.base = remoteDoc;
     if (res.conflicts.length > 0) {
