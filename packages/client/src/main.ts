@@ -1700,7 +1700,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   为什么必须解绑（off()）：bj 是多页 SPA，会反复 mountEditor。
   //   旧监听不撤⇒ 状态跨挂载残留（新编辑器继承上一篇的组字态 / 活跃期），
   //   症状是"换一篇笔记后同步功能坏了"，而本机一切正常。
-  const imeGate: ImeGate = createImeGate();
+  // 🔴🔴 语音修复：把 Lexical 自身的组字态也喂进门控（防御纵深）。
+  //   豆包语音转文字的组字串有时挂在 Lexical 内部、`composition` 事件因时序/宿主
+  //   元素问题没被本门控收到 ⇒ 仅靠 DOM 事件会漏拦。Lexical 的 isComposing()
+  //   是它自己监听同一批事件得出的内部态，能兜住这道漏网。它**只增不减**地加固
+  //   canApply()，不会削弱既有判据。闭包延迟读取 `editor`，此刻 editor 尚未赋值，
+  //   但 canApply() 被调用时 editor 早已挂好。
+  const imeGate: ImeGate = createImeGate(undefined, () => editor?.isComposing() ?? false);
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
