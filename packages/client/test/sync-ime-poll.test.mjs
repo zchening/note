@@ -89,6 +89,10 @@ test('SYNC-IME-01 组字中禁止回灌，组字结束后放行', () => {
   assert.equal(gate.canApply(), false, '🔴 组字中绝不许回灌（吞字/吞回车的直接原因）');
 
   // 组字结束 ⇒ 立刻恢复可回灌（compositionend 会刷新活跃期）
+  // 🔴 注：这里走的是**手动 setComposing(false)** 降级路径，不触发冷却。
+  //   真实 compositionend 事件会额外进入 4s 冷却期（覆盖语音句间停顿），
+  //   见 sync-ime-voice.test.mjs 的 SYNC-IME-VOICE-01。两者不矛盾：
+  //   降级场景本就没有 composition 事件，"刚组完字"无从判断。
   gate.setComposing(false);
   assert.equal(gate.canApply(), true, '组字结束应立即放行');
   t += 100;

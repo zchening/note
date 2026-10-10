@@ -1700,7 +1700,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   为什么必须解绑（off()）：bj 是多页 SPA，会反复 mountEditor。
   //   旧监听不撤⇒ 状态跨挂载残留（新编辑器继承上一篇的组字态 / 活跃期），
   //   症状是"换一篇笔记后同步功能坏了"，而本机一切正常。
-  const imeGate: ImeGate = createImeGate();
+  // 🔴🔴 P0-3 语音修复：把 Lexical 自身的组字态也喂进门控（防御纵深）。
+  //   豆包语音转文字的组字串有时挂在 Lexical 内部、`composition` 事件因时序/宿主
+  //   元素问题没被本门控收到 ⇒ 仅靠 DOM 事件会漏拦。Lexical 的 isComposing()
+  //   是它自己监听同一批事件得出的内部态，能兜住这道漏网。它**只增不减**地加固
+  //   canApply()，不会削弱既有判据。闭包延迟读取 `editor`，此刻 editor 尚未赋值，
+  //   但 canApply() 被调用时 editor 早已挂好。
+  const imeGate: ImeGate = createImeGate(undefined, () => editor?.isComposing() ?? false);
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
@@ -1777,6 +1783,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   const behaviors = registerBehaviors(ed, {
     uploadImage: uploadImageFromFile,
     hasOverlayOpen: () => hasOverlayPanelOpen(),
+    // 🔴🔴 把 IME 门控喂给链接识别：组字中 / 语音输入冷却期内**不许动树**。
+    //   链接识别是把裸网址包成 LinkNode 的**增删节点**操作，与回灌、补铺同属
+    //   "输入过程中的 DOM 手术"。Android 输入法靠 InputConnection 的文本视图定位，
+    //   网页一改树视图就错位 ⇒ 输入法下一次提交按旧偏移操作 ⇒ 整段正文被替掉
+    //   （用户报的"语音输入中突然只剩第一句"）。
+    canEdit: () => (imeGate ? imeGate.canApply() : true),
   });
   // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
   //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，
@@ -1923,6 +1935,58 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   必须在 latestDoc 之后的**首屏内容**上取，不能等用户编辑过再取。
   mountDocSnapshot = initial;
 
+  /**
+   * 提醒标记的**补铺调度**（门控没开时顺延，不放弃）。
+   *
+   * 🔴🔴🔴 补铺是**树手术**，不是只读操作：它把已死的提醒标记节点
+   *   `insertBefore` 挪出子节点后 `remove()` 掉 —— 这是真实的节点增删，
+   *   会**重建受影响的 DOM 子树**。
+   *
+   *   在输入法（尤其**语音输入**）还在工作期间做这件事的后果不是"光标跳一下"：
+   *   Android 输入法通过 `InputConnection` 的文本视图定位光标与组字区，
+   *   网页一旦在输入过程中增删节点，那个视图就与真实 DOM 错位；
+   *   输入法下一次 `commitText` / `deleteSurroundingText` 会按**旧偏移**操作
+   *   ⇒ 整段正文被替换成它以为的那一小段 ⇒ 用户看到的
+   *   「正在说话，突然后面的字全没了，只剩第一句」（或反过来只剩后两句）。
+   *
+   *   所以补铺必须过**与回灌同一道** IME 门控；不过闸就重新排队，
+   *   绝不硬做（推迟一小会儿，标记迟早会铺上）。
+   */
+  const STRAY_FLUSH_RETRY_MS = 800;
+  const scheduleStrayMarkFlush = (delay: number): void => {
+    if (strayMarkFlushTimer !== undefined) window.clearTimeout(strayMarkFlushTimer);
+    strayMarkFlushTimer = window.setTimeout(() => {
+      strayMarkFlushTimer = undefined;
+      // 🔴 门控不开 ⇒ 顺延重试。用局部 imeGate（本次挂载那一个），
+      //   不用模块级 imeGateRef —— 换笔记后旧挂载的门控不该影响新挂载。
+      if (imeGate && !imeGate.canApply()) {
+        scheduleStrayMarkFlush(STRAY_FLUSH_RETRY_MS);
+        return;
+      }
+      const live = new Set((latestDoc.reminders ?? []).map((r) => r.id));
+      const doomed: string[] = [];
+      ed.update(() => {
+        const walk = (n: LexicalNode): void => {
+          if ($isReminderMarkNode(n)) {
+            if (!live.has(n.remId)) doomed.push(n.getKey());
+            return; // 标记节点是行内包裹层，不再下钻
+          }
+          if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
+        };
+        walk($getRoot());
+      });
+      if (doomed.length === 0) return;
+      ed.update(() => {
+        for (const key of doomed) {
+          const n = $getNodeByKey(key);
+          if (!n || !$isReminderMarkNode(n) || !n.isAttached()) continue;
+          for (const c of n.getChildren()) n.insertBefore(c);
+          n.remove();
+        }
+      }, { discrete: true });
+    }, delay);
+  };
+
   // 🔴 必须在 docToLexical 之前挂监听：initial 那一次 update 也要留下快照，
   //   否则首次 commit 之前 latestDoc 停在空文档，e2e 读到的是"从未提交过"的假象。
   /** 上一次扫描时的正文文本 —— 彩蛋「文本真变」那道闸的基准。 */
@@ -2022,31 +2086,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         //   补铺只做**点状摘除**（unwrap 树里 remId 已不在真源 reminders 的标记节点），
         //   不整篇重建：别的块一个节点都不碰，光标在被摘标记内的 TextNode
         //   随 key 存活（insertBefore 移动不换 key）。幂等：已清时 walk 空跑。
-        if (strayMarkFlushTimer !== undefined) window.clearTimeout(strayMarkFlushTimer);
-        strayMarkFlushTimer = window.setTimeout(() => {
-          strayMarkFlushTimer = undefined;
-          const live = new Set((latestDoc.reminders ?? []).map((r) => r.id));
-          const doomed: string[] = [];
-          ed.update(() => {
-            const walk = (n: LexicalNode): void => {
-              if ($isReminderMarkNode(n)) {
-                if (!live.has(n.remId)) doomed.push(n.getKey());
-                return; // 标记节点是行内包裹层，不再下钻
-              }
-              if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
-            };
-            walk($getRoot());
-          });
-          if (doomed.length === 0) return;
-          ed.update(() => {
-            for (const key of doomed) {
-              const n = $getNodeByKey(key);
-              if (!n || !$isReminderMarkNode(n) || !n.isAttached()) continue;
-              for (const c of n.getChildren()) n.insertBefore(c);
-              n.remove();
-            }
-          }, { discrete: true });
-        }, TYPE_ACTIVE_MS + 150);
+        // 🔴 补铺一律走 `scheduleStrayMarkFlush`（它内部过 IME 门控并顺延），
+        //   **不要**在这里直接 setTimeout —— 那样会在输入法还在工作时下刀。
+        scheduleStrayMarkFlush(TYPE_ACTIVE_MS + 150);
       } else {
         // 🔴🔴🔴 **局部重写**（用户拍板 B 的后半段），替掉原来的整篇 docToLexical。
         //
@@ -2315,6 +2357,12 @@ async function startSyncFor(name: string): Promise<void> {
       //   而本机敲的会亮 —— 用户会怀疑"同步把内容搞坏了"。
       linkifyNowRef?.();
     },
+    // 🔴🔴 P0-3：把 IME 门控喂给 client.ts，让它在「回灌」与「推进 base」同进同退。
+    //   此前只有 setDoc 内部那道裸 return 门控——它挡得住回灌，却挡不住 base 推进，
+    //   于是 base 与编辑器分叉、后续三方合并复活远端删除。现在 client.ts 自己持有一份
+    //   同一来源的 canApply()，门控不通过时既不回灌也不推进 base，把回灌推迟到下一轮
+    //   轮询 / SSE。setDoc 里的旧门控保留作防御纵深（两条用的是同一谓词，不会矛盾）。
+    imeCanApply: () => (imeGateRef ? imeGateRef.canApply() : true),
     onSnapshot: (s) => {
       lastSyncState = s.state;
       const f = footFor(s.state);

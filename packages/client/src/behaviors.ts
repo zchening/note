@@ -149,6 +149,14 @@ export interface BehaviorDeps {
    *   零报错、极难自查。
    */
   hasOverlayOpen: () => boolean;
+  /**
+   * 编辑器此刻允许动树吗（IME 门控）。不给 = 总是允许。
+   *
+   * 🔴 链接识别会**增删节点**（裸网址 → LinkNode），属"输入过程中的 DOM 手术"。
+   *   由 main.ts 把 IME 门控喂进来：组字中 / 语音输入的冷却期内不许动刀，
+   *   否则 Android 输入法按旧偏移提交 ⇒ 整段正文被替换（语音丢字报障）。
+   */
+  canEdit?: () => boolean;
 }
 
 /**
@@ -201,7 +209,12 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): Be
   //        "Attempted to create node AutoLinkNode that was not configured"
   //        —— 症状是整篇文档变空（探针 probe-b.mjs 实测）。
   //   ⇒ 走项目自己的 linkify/，规则逐条抄老项目并已实跑对拍（test/linkify.test.mjs）。
-  const linkify = registerLinkify(editor, { hasOverlayOpen: deps.hasOverlayOpen });
+  const linkify = registerLinkify(editor, {
+    hasOverlayOpen: deps.hasOverlayOpen,
+    // 🔴 可选依赖：`exactOptionalPropertyTypes` 下不能显式传 undefined，
+    //   所以"没给"就整个键不带（语义与"总是允许动树"一致）。
+    ...(deps.canEdit ? { canEdit: deps.canEdit } : {}),
+  });
 
   // 列表：Tab / Shift+Tab 缩进与反缩进、Enter 新建条目、Backspace 退出列表。
   const unregisterList = registerList(editor);

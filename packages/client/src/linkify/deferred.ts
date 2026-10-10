@@ -50,6 +50,21 @@ export interface LinkifyDeps {
    * （猜错的后果是"面板开着时链接照跑、光标被弹走"，且零报错）。
    */
   hasOverlayOpen: () => boolean;
+  /**
+   * 编辑器此刻**允许动树**吗（IME 门控）。不传 = 总是允许（保持旧行为）。
+   *
+   * 🔴🔴 为什么需要这一条（语音输入丢字，2026-10 报障）：
+   *   本模块原有的两道守卫是「组字中」（靠 `beforeinput` 的 inputType 前缀
+   *   `insertComposition`）与「停笔 1.5s」。前者在**不走 composition 通道的输入法**
+   *   （部分语音输入法直接 `commitText`）下恒为 false；后者在语音的句间停顿
+   *   （常 > 1.5s）里会过期。两道一起失效 ⇒ 用户还在说话时链接识别动了树。
+   *
+   *   链接识别是真的**增删节点**（把裸网址包成 LinkNode），与回灌/补铺同属
+   *   "输入过程中的 DOM 手术"：Android 输入法按 `InputConnection` 的文本视图
+   *   定位，网页一改树，视图就与真实 DOM 错位，输入法下一次提交会按旧偏移
+   *   操作 ⇒ 整段正文被替换成它以为的那一小段（"只剩第一句"）。
+   */
+  canEdit?: () => boolean;
 }
 
 export interface LinkifyHandle {
@@ -71,6 +86,36 @@ export interface LinkifyHandle {
  *
  * @returns 句柄：runNow（真源换档时用）与 dispose（注销）
  */
+/**
+ * 链接识别「要不要再等等」的判据 —— 抽成纯函数是为了能被单测钉住。
+ *
+ * 🔴🔴 两道闸是**互补**的，缺任一条都会被某类输入法绕过：
+ *   ① 老项目的停笔闸（`typingNow && !overlayOpen && focused`，index.html:3632）：
+ *      连续打字中推迟，斩断"手术 → 光标落不可绘制位 → relocate"链条。
+ *   ② IME 门控闸（`!canEdit`）：覆盖①认不出的场景 ——
+ *      不走 composition 通道的输入法（部分语音输入法直接 commitText）
+ *      让①里的 typingNow 在句间停顿（常 > 1.5s）后过期，
+ *      于是链接识别在用户还在说话时动刀。
+ */
+export interface LinkifyGuard {
+  /** 最近还在打字（末次击键距今 < QUIET_MS）。 */
+  typingNow: boolean;
+  /** 有遮罩态面板开着。 */
+  overlayOpen: boolean;
+  /** 焦点在编辑器根元素上。 */
+  focused: boolean;
+  /** IME 门控允许动树吗（组字中 / 语音冷却期为 false）。 */
+  canEdit: boolean;
+}
+
+export function shouldDeferLinkify(g: LinkifyGuard): boolean {
+  // ① 老项目停笔闸：三个条件是**与**（连接词照抄，别改成或）
+  if (g.typingNow && !g.overlayOpen && g.focused) return true;
+  // ② IME 闸
+  if (!g.canEdit) return true;
+  return false;
+}
+
 export function registerLinkify(editor: LexicalEditor, deps: LinkifyDeps): LinkifyHandle {
   let timer: number | null = null;
   /** 末次击键时间戳。老项目 index.html:3626 `lastTypeAt` */
@@ -121,8 +166,14 @@ export function registerLinkify(editor: LexicalEditor, deps: LinkifyDeps): Linki
    */
   const tryLinkify = (): void => {
     clearTimer();
-    const typingNow = Date.now() - lastTypeAt < QUIET_MS;
-    if (typingNow && !deps.hasOverlayOpen() && hasFocus()) {
+    if (
+      shouldDeferLinkify({
+        typingNow: Date.now() - lastTypeAt < QUIET_MS,
+        overlayOpen: deps.hasOverlayOpen(),
+        focused: hasFocus(),
+        canEdit: deps.canEdit ? deps.canEdit() : true,
+      })
+    ) {
       timer = setTimeout(tryLinkify, RETRY_MS);
       return;
     }

@@ -33,6 +33,7 @@ import { $createReminderMarkNode } from '../src/nodes.ts';
 import { docToLexical, lexicalToDoc } from '../src/serialize.ts';
 import { canonicalize, normalize } from '../../shared-schema/src/canonical.ts';
 import { $applyToTextNode, $linkifyEditor } from '../src/linkify/apply.ts';
+import { shouldDeferLinkify } from '../src/linkify/deferred.ts';
 import {
   denyAsUrl,
   FILE_EXT_DENY,
@@ -769,4 +770,61 @@ test('L4-06 $applyToTextNode 对无命中节点返回 false（不产生空 updat
   }, { discrete: true });
   assert.equal(r1, false, '无命中必须返回 false');
   assert.equal(r2, true, '有命中必须返回 true');
+});
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * L5 组：链接识别「什么时候不许动刀」（语音输入丢字，2026-10 报障）
+ *
+ * 🔴🔴 链接识别会**增删节点**（裸网址 → LinkNode）。在输入法还在工作时做这件事，
+ *   Android 的 InputConnection 文本视图会与真实 DOM 错位 ⇒ 输入法下一次提交
+ *   按旧偏移操作 ⇒ 整段正文被替换成它以为的那一小段（"只剩第一句"）。
+ *   所以「动刀时机」本身是正确性判据，不是性能调优。
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test('L5-01 停笔 + 可动树 ⇒ 不推迟（否则链接永远不亮）', () => {
+  assert.equal(
+    shouldDeferLinkify({ typingNow: false, overlayOpen: false, focused: true, canEdit: true }),
+    false,
+  );
+});
+
+test('L5-02 打字中 + 无遮罩 + 聚焦 ⇒ 推迟（老项目 index.html:3632 停笔闸）', () => {
+  assert.equal(
+    shouldDeferLinkify({ typingNow: true, overlayOpen: false, focused: true, canEdit: true }),
+    true,
+  );
+});
+
+test('L5-03 🔴🔴 停笔已过但 IME 门控不开 ⇒ 仍必须推迟（语音句间停顿）', () => {
+  // 🔴 这是本次修复的靶心：语音输入在句子之间有 1~数秒停顿，
+  //   `typingNow` 早已为 false（> 1.5s），老项目那道闸**认不出**用户在说话；
+  //   若只看它就会放行 ⇒ 链接识别在用户还在说话时动刀 ⇒ 丢字。
+  assert.equal(
+    shouldDeferLinkify({ typingNow: false, overlayOpen: false, focused: true, canEdit: false }),
+    true,
+    '门控不开时必须推迟（语音句间停顿：停笔闸认不出，只剩 IME 闸）',
+  );
+});
+
+test('L5-04 🔴 变异反证：只留老项目那道停笔闸，L5-03 场景会错误放行', () => {
+  // 复刻**只有①没有②**的旧判据，证明 canEdit 这一项单独就是红/绿的分界。
+  const oldGuard = (g) => g.typingNow && !g.overlayOpen && g.focused;
+  const g = { typingNow: false, overlayOpen: false, focused: true, canEdit: false };
+  assert.equal(oldGuard(g), false, '反向证据：旧判据此刻错误地放行（即 bug 成立）');
+  assert.equal(shouldDeferLinkify(g), true, '新判据必须拦住');
+});
+
+test('L5-05 遮罩开着时不走"打字推迟"分支（老项目 e2e V545-1：连接词照抄）', () => {
+  // 三个条件是**与**：面板开着 ⇒ 即便 typingNow 也不因"打字"推迟，
+  // 但 IME 门控闸仍然独立生效（它不看面板）。
+  assert.equal(
+    shouldDeferLinkify({ typingNow: true, overlayOpen: true, focused: true, canEdit: true }),
+    false,
+    '面板开着时不按"打字"推迟（否则下划线晚 1.6s）',
+  );
+  assert.equal(
+    shouldDeferLinkify({ typingNow: true, overlayOpen: true, focused: true, canEdit: false }),
+    true,
+    '但 IME 门控闸与面板无关，仍然要拦',
+  );
 });
