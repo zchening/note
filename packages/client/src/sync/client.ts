@@ -28,6 +28,7 @@ import { mergeDocs } from '@bj/shared-schema';
 import { writeCache } from './local-cache.ts';
 import { getWriteKey } from './write-key.ts';
 import { snapshotOf, reduce, type SyncEvent, type SyncSnapshot, type SyncState } from './fsm.ts';
+import { flightHash } from './flight-recorder.ts';
 
 /** 客户端与服务端之间的载荷：永远是**信封**，不是明文。 */
 interface NotePayload extends Envelope {
@@ -115,6 +116,13 @@ export interface SyncDeps {
    *   不传 ⇒ `() => true`（旧行为，由 main.ts 的 setDoc 门控兜底）。
    */
   imeCanEditTree?: () => boolean;
+  /**
+   * 飞行记录器出口（v3.0.9 诊断版，见 sync/flight-recorder.ts 文件头）。
+   *
+   * 🔴 只记事件名 + 长度 + 短哈希，**绝不传内容**（笔记端到端加密，
+   *   日志会被用户粘贴传播）。不传 ⇒ 不记录（诊断版外的构建零开销）。
+   */
+  onFlightEvent?: (type: string, d: string) => void;
   /**
    * 🔴 推送成功后，把**刚被覆盖的那一版**交给调用方存档（历史版本环）。
    *
@@ -310,6 +318,8 @@ export class SyncClient {
    *   默认 `() => true`（未注入时退化为旧行为：由 main.ts 的 setDoc 门控兜底）。
    */
   private imeCanEditTree: () => boolean = () => true;
+  /** 飞行记录器（v3.0.9 诊断版）：未注入时退化为 no-op。 */
+  private flight: (type: string, d: string) => void = () => undefined;
   /** 冲突详情，供UI 展示 */
   private conflicts: MergeResultLike['conflicts'] = [];
 
@@ -322,12 +332,15 @@ export class SyncClient {
     this.base = deps.initialDoc ?? emptyDoc();
     // 🔴🔴 P0-3：注入 IME 门控（默认放行，由 main.ts 的 setDoc 门控兜底旧行为）。
     this.imeCanEditTree = deps.imeCanEditTree ?? (() => true);
+    this.flight = deps.onFlightEvent ?? (() => undefined);
   }
 
   /* ---------------- 状态 ---------------- */
 
   private send(ev: SyncEvent): void {
     if (this.stopped) return;
+    // 飞行记录器：状态机转移是唯一总线，记事件名即可（v3.0.9 诊断版）。
+    this.flight('state', this.state + '--' + ev);
     let next: SyncState;
     try {
       next = reduce(this.state, ev);
@@ -1018,6 +1031,12 @@ export class SyncClient {
 
     const local = this.d.getDoc();
     const base = this.base;
+    // 飞行记录器：三方长度 + 远端哈希（比对"推上去的是不是同一版"用）。
+    this.flight(
+      'pull>',
+      'b=' + canonicalize(base).length + ' l=' + canonicalize(local).length +
+        ' r=' + canonicalize(remoteDoc).length + ' rh=' + flightHash(canonicalize(remoteDoc)),
+    );
 
     // 🔴🔴🔴 三个比较**全部**改用 `eq`（= canonicalize(normalize(·))）——
     //   病态是它们原本用裸 `canonicalize`，而 canonicalize **不做**"相邻同格式
@@ -1066,7 +1085,11 @@ export class SyncClient {
       //   base 不动 ⇒ 编辑器与 base 始终一致，重判时走同一分支正确采纳。
       // 🔴🔴 v3.0.8：门控升级为 canEditTree —— 采纳远端同样是 docToLexical 整篇重建，
       //   在「整段改写会话窗口」内（豆包智能整理的批次间隙）同样必须整轮推迟。
-      if (!this.imeCanEditTree()) return;
+      if (!this.imeCanEditTree()) {
+        this.flight('gate:adopt', 'remoteLen=' + canonicalize(remoteDoc).length);
+        return;
+      }
+      this.flight('pull:adopt', 'remoteLen=' + canonicalize(remoteDoc).length);
       this.d.setDoc(remoteDoc);
       this.base = remoteDoc;
       this.conflicts = [];
@@ -1108,6 +1131,7 @@ export class SyncClient {
     //   （`eq(local, base)` 为假）。本机没改动的情况早就走上面「采纳远端」分支了，
     //   所以"在另一台设备真的清空了这篇"**不会**被这条挡住（那时本地会跟随清空）。
     if (isDocEmpty(remoteDoc) && !isDocEmpty(local)) {
+      this.flight('pull:empty-remote', 'localLen=' + canonicalize(local).length);
       this.base = remoteDoc;
       this.conflicts = [];
       this.send('merge-clean');
@@ -1139,7 +1163,11 @@ export class SyncClient {
     if (eq(res.doc, local)) {
       if (res.conflicts.length > 0) {
         // P0-3 同口径：门控不开（组字中 / 整段改写窗口）连冲突都不弹（等下一轮轮询/SSE 重判），不打断输入。
-        if (!this.imeCanEditTree()) return;
+        if (!this.imeCanEditTree()) {
+          this.flight('gate:eq-conflict', 'n=' + res.conflicts.length);
+          return;
+        }
+        this.flight('pull:eq-conflict', 'n=' + res.conflicts.length);
         this.conflicts = res.conflicts;
         this.base = remoteDoc;
         this.send('merge-conflict');
@@ -1153,6 +1181,7 @@ export class SyncClient {
       //    不推的话，本机改动停在本地、底栏却显示『已同步』（谎报）。
       //    `eq` 已剥 rem 标记并做 canonicalize+normalize，所以"只是提醒下划线不同"
       //    不会误判为差异（那类差异由本机 reconcile 自会重建）。
+      this.flight('pull:eq-clean', '');
       this.base = remoteDoc;
       this.conflicts = [];
       this.send('merge-clean');
@@ -1163,7 +1192,13 @@ export class SyncClient {
     // 🔴🔴🔴 P0-3：IME 组字中 ⇒ 推迟回灌与 base 推进（与采纳远端分支同口径）。
     //   res.conflicts 已赋值（供 UI），但此刻**不回灌、不推、不发状态**——
     //   等 IME 结束后的下一轮轮询 / SSE 重判（base 不动 ⇒ 编辑器与 base 不分叉）。
-    if (!this.imeCanEditTree()) return;
+    if (!this.imeCanEditTree()) {
+      this.flight('gate:merge', 'conflicts=' + res.conflicts.length + ' resLen=' + canonicalize(res.doc).length);
+      return;
+    }
+    // 🔴 v3.0.9 取证：这是「三方合并结果回灌」—— 整篇 docToLexical 重建的最后
+    //   一条同步路径。丢字现场若时间线上出现它且 resLen < localLen，真凶就是它。
+    this.flight('pull:merge', 'conflicts=' + res.conflicts.length + ' resLen=' + canonicalize(res.doc).length + ' localLen=' + canonicalize(local).length);
     this.d.setDoc(res.doc);
     this.base = remoteDoc;
     if (res.conflicts.length > 0) {
@@ -1215,6 +1250,8 @@ export class SyncClient {
     }
     this.send('push');
     const doc = normalize(this.d.getDoc());
+    // 飞行记录器：推的是哪一版（长度+短哈希，绝不含内容）。
+    this.flight('push>', 'len=' + canonicalize(doc).length + ' h=' + flightHash(canonicalize(doc)));
     // 🔴 记住本轮推之前的 base，成功后作为"刚被覆盖的那一版"交给 onArchive。
     //   在 push() 开头取（而不是成功后再读 this.base）——成功后它已经被覆盖成 doc 了。
     const prev = this.base;
@@ -1289,6 +1326,7 @@ export class SyncClient {
     }
     // 🔴 只有确认成功才推进 base —— 失败时 base 保持旧值，
     //   下次合并的"祖先"才不会错位。
+    this.flight('push<', 'ok');
     this.base = doc;
     // 🔴 存档"刚被覆盖的那一版"（历史版本环）。
     //   两个必须挡掉的：

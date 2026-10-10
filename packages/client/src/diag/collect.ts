@@ -31,6 +31,8 @@ export interface DiagDeps {
   scan: () => DiagReadings['scan'];
   /** 上次原生闹钟同步的结论（`native-rem` 侧留存；没留存过给 null）。 */
   lastNativeSync: () => { note: string; at: number; scheduled: number | null } | null;
+  /** 飞行记录器（v3.0.9 诊断版）：格式化的事件流。不给 = 不追加该区块。 */
+  flight?: () => string[];
 }
 
 /** 从 DOM 里取「活动元素」的可读名（老项目 :1941 `ae.id || ae.nodeName`）。 */
@@ -245,5 +247,15 @@ export function collectDiagReadings(deps: DiagDeps, now: number): DiagReadings {
  *   结果整份 10 组读数全丢）。现在坏一项只坏一项。
  */
 export function collectDiagLines(deps: DiagDeps, now: number): string[] {
-  return renderDiagLines(collectDiagReadings(deps, now), now);
+  const lines = renderDiagLines(collectDiagReadings(deps, now), now);
+  // 🔴 飞行记录器（v3.0.9 诊断版）：追加在读数之后，面板的复制按钮一并带走。
+  //   独立 try：日志读数坏了不许拖垮 10 组诊断读数（与本函数"每项各自 try"同款纪律）。
+  if (deps.flight) {
+    try {
+      lines.push('', '── 飞行日志（只含事件名/长度/哈希，绝不含正文）──', ...deps.flight());
+    } catch (e) {
+      lines.push('', '── 飞行日志生成失败：' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+  return lines;
 }

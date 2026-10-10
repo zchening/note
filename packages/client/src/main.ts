@@ -127,6 +127,7 @@ import {
 import { collectBakMaterials, proveBakMaterials } from './migrate/bak-materials.ts';
 import { readPassVault, savePassVault } from './sync/pass-vault.ts';
 import { createImeGate, TYPE_ACTIVE_MS, type ImeGate } from './sync/ime-gate.ts';
+import { recordFlight, flightLines } from './sync/flight-recorder.ts';
 import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
 import { nativeDepsFromWindow } from './update/ota-native.ts';
@@ -1185,6 +1186,8 @@ function diagDeps(): DiagDeps {
     scan: () => window.__NOTESYNC_SCAN_DIAG__?.() ?? null,
     // 🔴 留存放在 reminder/ui.ts（真正产出 SyncOutcome 的地方，见那里的注释）
     lastNativeSync: lastNativeSyncOutcome,
+    // 飞行记录器（v3.0.9 诊断版）：追加在诊断读数之后，复制按钮一并带走。
+    flight: () => flightLines(),
   };
 }
 
@@ -1711,7 +1714,31 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
-  detachImeRef = imeGate.attach(editorHost);
+  const detachIme = imeGate.attach(editorHost);
+  // 🔴 飞行记录器输入探针（v3.0.9 诊断版）：**capture 阶段被动监听**，
+  //   只记事件名与数据长度，绝不 preventDefault / stopPropagation ——
+  //   记录器本身不许成为新的"程序化动树"。与门控同生共死（同一个 detach）。
+  const onFlightBI = (e: Event): void => {
+    const ie = e as InputEvent;
+    recordFlight('in:bi', (ie.inputType ?? '?') + ' d=' + (ie.data == null ? '-' : String(ie.data.length)));
+  };
+  const onFlightI = (e: Event): void => {
+    const ie = e as InputEvent;
+    recordFlight('in:i', (ie.inputType ?? '?') + ' comp=' + (ie.isComposing ? 1 : 0));
+  };
+  const onFlightCS = (): void => recordFlight('in:cs', '');
+  const onFlightCE = (): void => recordFlight('in:ce', '');
+  editorHost.addEventListener('beforeinput', onFlightBI, true);
+  editorHost.addEventListener('input', onFlightI, true);
+  editorHost.addEventListener('compositionstart', onFlightCS, true);
+  editorHost.addEventListener('compositionend', onFlightCE, true);
+  detachImeRef = () => {
+    detachIme();
+    editorHost.removeEventListener('beforeinput', onFlightBI, true);
+    editorHost.removeEventListener('input', onFlightI, true);
+    editorHost.removeEventListener('compositionstart', onFlightCS, true);
+    editorHost.removeEventListener('compositionend', onFlightCE, true);
+  };
   // 挂到模块级：三条回灌路径（setDoc / 对账回灌 / 提醒回灌）都要判它。
   imeGateRef = imeGate;
   // 补铺定时器句柄（IME 门控推迟标记回写后的最终一致兜底，见 update listener
@@ -1919,8 +1946,18 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   只把已有节点 setDone 摘不掉"事项段缺失"。
     //   ⚠️ 权衡：整篇重建在到点瞬间冲光标 —— 与老项目 fireReminder 到点重画
     //   同一风险（老项目没有 IME 门控照做），到点恰逢组字的概率低，接受。
-    refreshDone: () => {
+    //   🔴 v3.0.9：到点重画同样是 docToLexical 整篇重建 —— 与回灌同级的树手术，
+    //   也是此前**唯一不过门控**的整篇重建路径。现在有了 canEditTree（v3.0.8），
+    //   顺手纳管：窗口内顺延 800ms 重试（与补铺同节奏；重试用当时的 latestDoc
+    //   重新对账，不拿过期快照）。
+    refreshDone: function refreshDoneImpl(): void {
       if (!ed) return;
+      if (imeGate && !imeGate.canEditTree()) {
+        recordFlight('gate:refreshDone', 'retry');
+        window.setTimeout(refreshDoneImpl, 800);
+        return;
+      }
+      recordFlight('tree:refreshDone', '');
       const rec = reconcileReminders(latestDoc);
       latestDoc = rec.doc;
       latestDocRef = rec.doc;
@@ -1964,6 +2001,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //   不用模块级 imeGateRef —— 换笔记后旧挂载的门控不该影响新挂载。
       //   🔴🔴 v3.0.8：判 canEditTree()（补铺是树手术，还要躲整段改写窗口）。
       if (imeGate && !imeGate.canEditTree()) {
+        recordFlight('gate:stray', 'retry');
         scheduleStrayMarkFlush(STRAY_FLUSH_RETRY_MS);
         return;
       }
@@ -2073,7 +2111,17 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   🔴 用 `before`（本次 update 前的 latestDoc）与 `exported`（本次 update 后
     //     从树导出的文档）比长度：两者都过了 normalize/对账前态，口径一致。
     //     在 **read 回调外**调 docTextLen（纯模型函数，与 editorState 无关）。
-    if (docTextLen(before) - docTextLen(exported) >= BULK_DELETE_CHARS) {
+    // 🔴 取证核心（v3.0.9）：每次 update 记录导出的正文本长度与增量 ——
+    //   丢字时间线的主动脉。长度在**单个**输入事件内塌掉 ⇒ Lexical 内部丢；
+    //   被 tree:* 事件砸回去 ⇒ 程序化动树丢。nofx 标记区分程序化重建与用户输入。
+    const prevLen = docTextLen(before);
+    const newLen = docTextLen(exported);
+    recordFlight(
+      'upd',
+      'len=' + newLen + ' d=' + (newLen - prevLen) + (tags && tags.has(EGG_NOFX_TAG) ? ' nofx' : ''),
+    );
+    if (prevLen - newLen >= BULK_DELETE_CHARS) {
+      recordFlight('bulk', 'drop=' + (prevLen - newLen));
       imeGate?.noteBulkEdit();
     }
 
@@ -2105,6 +2153,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       // 🔴🔴 v3.0.8：判 canEditTree() —— 标记重铺（局部或整篇）都是树手术，
       //   在"整段改写会话窗口"内同样必须让路（顺延走补铺重试通道）。
       if (imeGateRef && !imeGateRef.canEditTree()) {
+        recordFlight('gate:upd', 'rw-deferred');
         // 🔴 跳过铺标记，**但 schedule() 与 noteEdit() 照旧要走**
         //   （它们在下面）：提醒的增删是真源事实，不该被门控拦住。
         //
@@ -2139,6 +2188,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
           // 🔴 块数变了 / 或者**每一块都要改**（短文档上局部并不划算，
           //   而且此时下标对齐也失去意义）⇒ 老老实实整篇重建。
           //   这是性能回退，不是正确性回退。
+          recordFlight('tree:rw', 'full blocks=' + before.length);
           const snapshot = latestDoc;
           ed.update(() => {
             docToLexical(snapshot);
@@ -2146,6 +2196,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         } else if (path === 'local') {
           const snapshot = latestDoc;
           const idx = plan.rebuild;
+          recordFlight('tree:rw', 'local n=' + idx.length);
           ed.update(() => {
             // 🔴 逐块 replace：Lexical 会复用未变的兄弟节点，
             //   光标/选区/折叠状态在**别的块**上原封不动。
@@ -2376,7 +2427,11 @@ async function startSyncFor(name: string): Promise<void> {
       //   老项目同款：index.html:9883 的 applyRemoteBody 首行就return。
       //   🔴🔴 v3.0.8：判 canEditTree() —— docToLexical 整篇重建在"整段改写会话窗口"
       //   内同样必须让路（豆包智能整理大段删除后分批插入，间隙超时窗，canApply 会开门）。
-      if (imeGateRef && !imeGateRef.canEditTree()) return;
+      if (imeGateRef && !imeGateRef.canEditTree()) {
+        recordFlight('gate:setdoc', 'len=' + docTextLen(d));
+        return;
+      }
+      recordFlight('tree:setdoc', 'len=' + docTextLen(d));
       // 远端/合并结果写回编辑器。**必须包在 update 里**，
       // 直接改 Lexical 内部状态会在渲染之外改文档，症状是"内容变了但重绘没跟上"。
       editor?.update(() => {
@@ -2398,6 +2453,8 @@ async function startSyncFor(name: string): Promise<void> {
     //   三方合并结果回灌是动树最狠的一条路，窗口内必须整轮推迟（base 也不推进，
     //   两者同进同退的 P0-3 纪律不变）。
     imeCanEditTree: () => (imeGateRef ? imeGateRef.canEditTree() : true),
+    // 飞行记录器（v3.0.9 诊断版）：push/pull/合并分支/状态机全记（只长度与哈希）。
+    onFlightEvent: recordFlight,
     onSnapshot: (s) => {
       lastSyncState = s.state;
       const f = footFor(s.state);
@@ -4394,6 +4451,22 @@ function registerSW(): void {
 }
 
 try {
+  // 🔴 飞行记录器全局钩子（v3.0.9 诊断版）：排除"丢字其实是页面重载/崩溃"。
+  //   error/unhandledrejection/visibilitychange/pagehide 全部**同步落盘** ——
+  //   丢字现场常伴随页面被杀，节流落盘会丢最后几条（恰恰是最重要的几条）。
+  //   观察者纪律：只记录，绝不 preventDefault / 改时序。
+  window.addEventListener('error', (e) => {
+    recordFlight('err', String(e.message ?? '').slice(0, 100), true);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    recordFlight('err:rej', String(e.reason ?? '').slice(0, 100), true);
+  });
+  document.addEventListener('visibilitychange', () => {
+    recordFlight('vis', document.visibilityState, document.visibilityState === 'hidden');
+  });
+  window.addEventListener('pagehide', () => {
+    recordFlight('vis', 'pagehide', true);
+  });
   boot();
   registerSW();
   // 🔴 PWA 安装引导：监听必须在 boot 之后立刻挂（`beforeinstallprompt` 可能很早来），
