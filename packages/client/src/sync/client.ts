@@ -753,10 +753,33 @@ export class SyncClient {
     //   加密是异步且很贵的（PBKDF2 600,000 次），所以这里是"发起"而不是"等结果"；
     //   pendingEnv 会被**后一次**编辑的结果覆盖（后写的版本才是要存的那一版）。
     this.stageEnvFromTimer();
+    this.schedulePush();
+  }
+
+  /**
+   * 排一次去抖推送。
+   *
+   * 🔴🔴🔴 这里**故意不加 IME 门控**（2026-10-11 实测，别再顺手加回去）：
+   *   试过「门控不开就顺延、开了再推」—— 单测全绿（SYNC-IME-PUSH-01/02），
+   *   但真浏览器 e2e 直接崩两条（REM-09「提醒要真推上服务器」、REM-20）：
+   *   页面里同步状态**已经走到 idle（= 客户端认为推送成功）**，而 harness 的
+   *   服务端 store 里**根本没有那篇笔记**（只有 `rem09/claim`）。
+   *   ⇒ "推送被推迟"与"新笔记的首推"之间有一条没搞清的耦合：
+   *     服务端没有这篇时 pull 走 `200 + 空体` 的「新笔记」分支，那条分支**不推**，
+   *     于是首推**只能**靠去抖定时器；把它推迟到 1.5s 打字活跃期之后，
+   *     这条唯一的路就和别的时序撞上了。门控本身实测是好的（1.8s 就开）。
+   *   ⇒ 在搞清那条耦合之前，**不许**在推这条路上加门控 —— 那是用"同步彻底不推"
+   *     换"少推一次中间态"，代价远大于收益。
+   *
+   *   真正治「豆包智能整理丢字」的是 `decryptAndMerge` 里那两道（见那里）：
+   *   远端为空不覆盖本机 + 合并结果与本机一致就不回灌。
+   */
+  private schedulePush(): void {
     if (this.pushTimer !== undefined) clearTimeout(this.pushTimer);
     this.pushTimer = setTimeout(() => {
       this.pushTimer = undefined;
-      if (this.state === 'dirty') this.pushFromTimer();
+      if (this.state !== 'dirty') return;
+      this.pushFromTimer();
     }, PUSH_DEBOUNCE_MS);
   }
 
@@ -1063,24 +1086,66 @@ export class SyncClient {
       return;
     }
 
+    // 🔴🔴🔴 远端那一版是**空的**、本机还有内容 ⇒ 那是「清空」或「删完还没插完」的
+    //   中间态，**绝不拿它去动本机**，直接把本机这一版推回去。
+    //
+    //   用户实锤（2026-10-11，带截图）：豆包「智能整理/精炼润色」是**整段删除原文、
+    //   再分批插入**整理稿；删除落地那一刻推上去的正是"空"。若拿它去三方合并，
+    //   结果就是"本机内容被判成该删"，用户看到开头几段全没、只剩最后一段。
+    //
+    // 🔴 与老项目同口径：index.html:9485 `if (!mergedHtml || !mergedHtml.trim()) return false;`
+    //   —— 「合并结果空/变空一律不落地（防误清空）」。丢了内容是不可逆的，
+    //   多保留一版只是"要再删一次"，两者代价完全不对等。
+    //
+    // 🔴 作用域很窄：能走到这里 ⟺ 上面三个 `eq` 全为假，即**本机确有未推送的改动**
+    //   （`eq(local, base)` 为假）。本机没改动的情况早就走上面「采纳远端」分支了，
+    //   所以"在另一台设备真的清空了这篇"**不会**被这条挡住（那时本地会跟随清空）。
+    if (isDocEmpty(remoteDoc) && !isDocEmpty(local)) {
+      this.base = remoteDoc;
+      this.conflicts = [];
+      this.send('merge-clean');
+      await this.push();
+      return;
+    }
+
     // 真的两边都改了 → 三方合并
     const res = mergeDocs(base, local, remoteDoc);
-    // 🔴🔴 合并结果与本机**实质一致** ⇒ 不回灌（避免 docToLexical 整篇重建带来的底栏抖动），
-    //   **但必须把本机这一版推上去**（用户报障第 7 条的另一半）。
-    //   病态：`setDoc(res.doc)` 会走 `docToLexical` 的 `root.clear()` + 整篇重建，
-    //   触发 update 监听 → `noteEdit()` → 状态 dirty → pushing ⇒ 底栏从『已同步』
-    //   抖成『保存中…』，**而内容一个字没变**（合并结果就是本机那一版）。
-    //   `eq` 已剥 rem 标记并做 canonicalize+normalize，所以"只是提醒下划线不同"
-    //   不会误判为差异（那类差异由本机 reconcile 自会重建）。
+    // 🔴🔴🔴 合并结果与本机**实质一致** ⇒ **绝不回灌**（`setDoc` → `docToLexical` 是
+    //   `root.clear()` + 整篇重建：内容与本机一字不差，却把整棵 DOM 推倒重来）。
     //
-    //   🔴🔴🔴 为什么**必须 push**（对抗审 D1，曾写成 `send('pulled')` 静默收敛）：
-    //     能走到这里 ⟺ `eq(remote,base)`/`eq(local,base)`/`eq(local,remoteDoc)` **全为假**
-    //     ⇒ 远端 R ≠ 本机 L。而 `res.doc == local` 恰恰是"**L 是 R 的超集**"这一常见形态
-    //     （mergeDocs 把 left 纯新增照单收下 ⇒ 本机多出的改动原样保留在结果里）。
-    //     此时远端**缺**本机那部分改动；若只 `send('pulled')` 不推，本机改动就停在本地，
-    //     底栏却显示『已同步』（谎报）。旧实现正是如此，属"静默丢推送"。
-    //     正确口径与文件末尾那条三方合并分支一致：不回灌，但要 `merge-clean` + push。
-    if (res.conflicts.length === 0 && eq(res.doc, local)) {
+    //   ── 「豆包智能整理丢字」的**直接病灶**（2026-10-11，探针实测而非推断）────────
+    //     本机若把"删完还没插完"的中间态推上服务器，下次 pull 的三方合并里
+    //     base=上一完整版 / local=整理稿 / remote=中间态 ⇒ `mergeDocs` 为**每一块**
+    //     都记一条 conflict，而 `res.doc` **与 local 逐字相同**（探针实测：2~3 条冲突、
+    //     `blocks` 与 local 完全一致）。旧实现的判据是
+    //     `conflicts.length === 0 && eq(res.doc, local)` ⇒ 有冲突条目时落到下面的
+    //     `setDoc(res.doc)`，于是那次白重建落在输入法还在分批插入的窗口里 ⇒
+    //     Android 的 InputConnection 文本视图与真实 DOM 错位 ⇒ 输入法下一次
+    //     `commitText` 按**旧偏移**操作 ⇒ 前面几段被整段替换
+    //     （用户截图：只剩最后一段，开头的「帮我记录3件事」与前两件事全没）。
+    //
+    //   🔴🔴 但**不许**因为"结果等于本机"就顺手把冲突也吞掉：
+    //     有冲突条目意味着**双方真的改了同一处**（mergeDocs 只是按 left 优先挑了一份），
+    //     静默站本机就是"静默覆盖远端" —— 那是老项目的铁律禁区，也是 FSM-07 钉住的
+    //     「用户没拍板就不许自己恢复」。⇒ 有冲突：不回灌，**但照旧交给用户拍板**；
+    //     无冲突（本机是远端的超集，远端只是少了本机新增的部分）：push 收口。
+    if (eq(res.doc, local)) {
+      if (res.conflicts.length > 0) {
+        // P0-3 同口径：组字中连冲突都不弹（等下一轮轮询/SSE 重判），不打断输入。
+        if (!this.imeCanApply()) return;
+        this.conflicts = res.conflicts;
+        this.base = remoteDoc;
+        this.send('merge-conflict');
+        this.d.onError('两台设备同时改了同一处，需要你选保留哪一份');
+        return;
+      }
+      // ── 无冲突：不回灌也避免底栏抖动（重建会触发 update 监听 → noteEdit →
+      //    dirty → pushing，底栏从『已同步』抖成『保存中…』，而内容一个字没变）。
+      //    **必须 push**（曾写成 `send('pulled')` 静默收敛，是"静默丢推送"）：
+      //    能走到这里 ⟺ 上面三个 `eq` 全为假 ⇒ 远端 R ≠ 本机 L；只 `send('pulled')`
+      //    不推的话，本机改动停在本地、底栏却显示『已同步』（谎报）。
+      //    `eq` 已剥 rem 标记并做 canonicalize+normalize，所以"只是提醒下划线不同"
+      //    不会误判为差异（那类差异由本机 reconcile 自会重建）。
       this.base = remoteDoc;
       this.conflicts = [];
       this.send('merge-clean');
