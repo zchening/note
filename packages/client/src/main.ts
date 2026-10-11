@@ -178,6 +178,14 @@ declare global {
        *  撤稿恢复的「树延迟同步」只能靠它钉住：模型落账是即时的，树有没有被
        *  重建 / 有没有被杀锚点，只有读树才知道。 */
       treeTextLen: () => number;
+      /** v3.0.18 回归钩子：模拟**锚点死亡后的空转帧**——comp=1 组字帧持续到达
+       *  （组字串 dLen 远长于文档）但写入全部空转（树长纹丝不动；真机 Android
+       *  宿主专属形状：宿主撤稿杀锚点后组字 reconciliation 找不到锚点节点）。
+       *  桌面用 selection 置位制造「有 flush 但树长不变」的等价形状，喂
+       *  锚点死亡检测（连续 4 帧 ⇒ wd:dead + wd:reboot 自愈）。 */
+      stallBi: (dLen: number) => void;
+      /** v3.0.18 只读探针：ed.isComposing() 当前值（死会话是否被 reboot 强制结束）。 */
+      probeComposing: () => boolean;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1750,10 +1758,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   docToLexical 重建会**杀死组字锚点**：锚点节点被销毁后，后续每帧
   //   insertCompositionText 全部模型空转（upd len=9 d=0 冻结、组字串
   //   d=77→93 持续增长 3.5s+），用户继续口述的内容一个字都进不了文档。
-  //   改为：撤稿帧只写模型（peakDoc），树同步延迟 —— v3.0.17 起机制演进为：
-  //     - 组字帧/组字会话开始 ⇒ holdDeferredTreeSync()：解冻＋推迟（锚点未
-  //       破坏，输入法全量串替换让文档自动追上，口述照常进模型）；
+  //   改为：撤稿帧只写模型（peakDoc），树同步延迟 —— v3.0.17/18 机制演进为：
+  //     - 组字帧/组字会话开始 ⇒ holdDeferredTreeSync()：只推迟（v3.0.18 解冻
+  //       移到 update 监听，锚=会话峰值 deferPeakLen——树长涨过峰值才算组字
+  //       恢复写入成功）；
   //     - 组字态活着 ⇒ 观察窗顺延（帧稀疏只是口述停顿，不等于组字死）；
+  //     - 连续 4 帧空转（组字串远长于文档+树长不动）⇒ wd:dead 取证 + wd:reboot
+  //       自愈（强制结束死会话+重建 peakDoc，v3.0.18：锚点死亡实时流断裂治本）；
   //     - 组字态真正结束（ce/comp=0）后窗口到期 ⇒ 重建兜底（峰值内容上屏）。
   //   ⚠️ 这是同一闭包内的局部 timer：换笔记重挂载后旧 timer 随旧闭包废弃，
   //   不会跨笔记触发（回调里捕获的 ed/最新引用都是旧闭包自己的）。
@@ -1774,6 +1785,15 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  意图，绝不能重建抹掉；只解冻让常规同步接管。变短/不变 = 塌方收尾或无写入
    *  = 正常兜底重建。 */
   let deferTreeLen = 0;
+  /** 🔴🔴🔴 v3.0.18 解冻判据的锚：判定时刻的**会话峰值长度**（撤稿=peakLen、
+   *  塌方=prevLen）。探针实测（WD-E2E-05）：v3.0.18 初版用「树长 > deferTreeLen
+   *  基线」做解冻判据 —— 合成 compositionstart 重开组字会话的副作用能让树长
+   *  +1（组字锚点重建），14 > 13 基线 ⇒ 误解冻 ⇒ peakDoc 被残串覆盖（docLen
+   *  108→13）。树长涨过**会话峰值**才是「组字恢复写入成功」的真证据（组字串
+   *  全量替换语义下，恢复=树长追上并超过峰值）；锚点死亡空转场景树长永远
+   *  到不了峰值 ⇒ peakDoc 绝不被覆盖。wd:sync 的 skip 判据仍用 deferTreeLen
+   *  （保手动打字，两层判据各司其职）。 */
+  let deferPeakLen = 0;
   const armDeferredSync = (): void => {
     if (deferredTreeSyncTimer != null) clearTimeout(deferredTreeSyncTimer);
     deferTreeLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
@@ -1798,23 +1818,30 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       if (doc != null) ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG });
     }, WD_SYNC_WINDOW_MS);
   };
-  /** 🔴🔴🔴 v3.0.17：组字帧/组字会话开始 = 锚点活着的证据。与 v3.0.15/16 的
-   *  「取消重建」不同 —— 取消是**永不**重建，而语音口述停顿会让固定窗口误判
-   *  （v3.0.16 真机：778ms 停顿 → 定时器到期重建 → 杀锚点 → 后续口述空转）。
-   *  改为「解冻＋推迟」：解冻让口述内容照常进模型（树=组字串，v3.0.16 已验证
-   *  这条链），arm 推迟重建到最后一次组字帧+窗口；到期时若组字态仍活着再顺延
-   *  （见 arm 内部）。只有组字态真正结束后才允许兜底重建。 */
+  /** 🔴🔴🔴 v3.0.18：组字帧到达 = 推迟重建（锚点可能活着）。**解冻不在这里做**
+   *  —— v3.0.17 真机（尾段 len=8 冻结、组字串 d=196→222）实测：锚点可能已被
+   *  宿主撤稿操作杀死，组字帧写不进树（空转）；此时解冻会让落账的 peakDoc 被
+   *  残串覆盖。解冻决策在 update 监听：树长涨过**会话峰值**（deferPeakLen，
+   *  组字恢复写入成功的真证据）才解冻让模型=树；空转则保持冻结（peakDoc
+   *  保住，wd:sync 到期照常上屏），并记 wd:dead 取证（连续空转帧）。 */
   const holdDeferredTreeSync = (): void => {
     if (deferredTreeSyncTimer == null) return;
-    wdFreeze = false;
     armDeferredSync();
     recordFlight('wd:hold', '');
   };
-  const scheduleDeferredTreeSync = (info: string): void => {
+  const scheduleDeferredTreeSync = (info: string, peakLen: number): void => {
     wdFreeze = true;
+    stallCount = 0;
+    deferPeakLen = peakLen;
     recordFlight('wd:defer', info);
     armDeferredSync();
   };
+  /** 🔴🔴🔴 v3.0.18：锚点死亡（空转）检测。延迟同步机制激活期间，组字帧持续
+   *  到达（composing=true）但树长纹丝不动、而组字串远长于文档 ⇒ 锚点已死
+   *  （宿主撤稿操作/僵尸组字），写入全部空转。连续 4 帧记一次 wd:dead 取证
+   *  ——下一轮真机日志靠它钉死锚点死亡根因（宿主杀 vs 我方杀）。 */
+  let lastBiDataLen = 0;
+  let stallCount = 0;
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -1837,9 +1864,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (ie.inputType === 'insertCompositionText') {
       lastBiIsComposing = !!ie.isComposing;
       if (lastBiIsComposing) {
+        // 🔴🔴🔴 v3.0.18：组字串长度喂锚点死亡检测（update 监听空转判定用：
+        //   组字串远长于文档但树长不动 = 写入全部空转）。
+        lastBiDataLen = ie.data == null ? 0 : ie.data.length;
         // 🔴🔴🔴 v3.0.17：comp=1 组字帧到达 = 锚点活着 → 解冻（口述内容照常进
         //   模型）＋推迟重建到最后一次组字帧+窗口（原 v3.0.15/16 的「取消」在
         //   语音停顿场景失效：停顿超窗 → 定时器到期重建 → 杀锚点 → 后续口述空转）。
+        //   v3.0.18：解冻决策移到 update 监听（树长增长证据），这里只推迟。
         holdDeferredTreeSync();
         // 🔴🔴 v3.0.12 治本：DOM 正在组字但 Lexical 内部未进入组字态（豆包只发
         //   insertCompositionText、不稳定发 compositionstart）⇒ 合成 compositionstart，
@@ -2427,12 +2458,51 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   豆包智能整理常不发 compositionstart，故不能只靠 begin() 激活 —— 否则守卫永不触发
     //   （v3.0.10 漏拦真因）。lastLen 每帧都在 observe 内维护，prevLen 始终为上一帧真实长度。
     const composing = lastBiIsComposing || ed.isComposing() === true;
-    // 🔴🔴🔴 v3.0.16：观察窗内组字态下的写入（塌方延续帧——判定帧后 root.clear
+    // 🔴🔴🔴 v3.0.16/18：观察窗内组字态下的写入（塌方延续帧——判定帧后 root.clear
     //   与插入分多帧 flush、或组字帧）= 锚点/组字还活着的证据 → 重置观察窗：
-    //   组字死亡（compositionend/comp=0）后重新倒数 600ms，deferTreeLen 吸收
+    //   组字死亡（compositionend/comp=0）后重新倒数，deferTreeLen 吸收
     //   延续帧树长，避免到期时把塌方自身的多帧过程误判成「树被外部改动」而 skip。
-    //   comp=1 组字帧已在 onFlightBI cancel（timer==null 则此处自然跳过）。
+    //   🔴🔴🔴 v3.0.18：解冻决策移到这里（树长增长证据），onFlightBI 的 hold 只
+    //   推迟。树长真涨了（组字写入成功）→ 解冻让模型=树（口述进模型）；树长
+    //   不动且组字串远长于文档 → 锚点已死（宿主撤稿杀/僵尸组字），写入全空转
+    //   → 保持冻结（peakDoc 不被残串覆盖）＋连续 4 帧记 wd:dead 取证。
     if (deferredTreeSyncTimer != null && composing) {
+      const treeLenNow = ed.getEditorState().read(() => $getRoot().getTextContent().length);
+      // 🔴🔴🔴 v3.0.18：解冻锚 = 会话峰值（deferPeakLen）。树长涨过基线不够——
+      //   合成 cs 重开组字会话的锚点重建副作用能让树长 +1（WD-E2E-05 探针实测
+      //   误解冻 → peakDoc 被残串覆盖）。涨过峰值才是组字恢复写入成功的真证据。
+      if (treeLenNow > deferPeakLen) {
+        wdFreeze = false;
+        stallCount = 0;
+      } else if (lastBiDataLen > treeLenNow + 12) {
+        stallCount += 1;
+        if (stallCount === 4) {
+          stallCount = 0;
+          recordFlight('wd:dead', 'len=' + treeLenNow + ' d=' + lastBiDataLen);
+          // 🔴🔴🔴 v3.0.18 自愈：锚点确认死亡（4 帧空转 + 组字串远长于文档）
+          //   → 强制结束死会话（合成 compositionend，绕 ensureSyntheticComposeEnd
+          //   的 syntheticCompose 闸——死会话可能是真 cs 开的）+ 重建 peakDoc。
+          //   下一帧 comp=1 到达时 ed.isComposing()=false → 孤儿分支合成
+          //   compositionstart → 新组字会话走全量插入路径 → 实时流自愈恢复
+          //   （v3.0.12 已真机验证的恢复通道）。判定帧已落账 peakDoc
+          //   （latestDocRef）；ce 的残串 commit 期间 wdFreeze 仍为 true，
+          //   模型不被残串覆盖；重建后树=peakDoc，涨过 deferPeakLen 的
+          //   新写入照常解冻。延迟同步 timer 保持活着：新会话再死可再次
+          //   检出（自愈循环），组字静默则 wd:sync 到期重建兜底。
+          //   setTimeout：脱离当前 update flush 再派发 DOM 事件 / 动树，
+          //   避免嵌套 flush。
+          setTimeout(() => {
+            recordFlight('wd:reboot', '');
+            clearSyntheticComposeTimer();
+            editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+            syntheticCompose = false;
+            const doc = latestDocRef;
+            if (doc != null) {
+              ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
+            }
+          }, 0);
+        }
+      }
       armDeferredSync();
       recordFlight('wd:defer', 'reset len=' + deferTreeLen);
     }
@@ -2451,7 +2521,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //   此时组字活着）。改为同款延迟同步：600ms 内 comp=1 组字帧 ⇒ 取消
       //   （锚点未破坏，输入法全量串替换让文档追上组字串）；超时 ⇒ 组字真死，
       //   重建 before 安全（塌方前内容上屏兜底）。
-      scheduleDeferredTreeSync('peak=' + prevLen + ' cur=' + newLen);
+      scheduleDeferredTreeSync('peak=' + prevLen + ' cur=' + newLen, prevLen);
       return;
     }
     // 🔴🔴 v3.0.12：组字中本帧"部分欠插"（未达到塌方阈值）也量化，确认合成
@@ -2478,7 +2548,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //     600ms 内 comp=1 帧恢复 ⇒ 取消树同步（锚点从未被破坏，输入法的全量
       //       串替换会让文档自动追上组字串，口述继续落地）；
       //     超时仍无组字帧 ⇒ 组字真死了，此时重建安全（回写峰值内容上屏）。
-      scheduleDeferredTreeSync('peak=' + wd.peakLen + ' cur=' + wd.currentLen);
+      scheduleDeferredTreeSync('peak=' + wd.peakLen + ' cur=' + wd.currentLen, wd.peakLen);
       return;
     }
 
@@ -2715,6 +2785,28 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     end: (): void => {
       editorHost.dispatchEvent(new CompositionEvent('compositionend'));
     },
+    // 🔴🔴🔴 v3.0.18 回归钩子：模拟**锚点死亡后的空转帧**——comp=1 组字帧
+    //   持续到达（组字串 dLen 远长于文档）但写入全部空转（树长纹丝不动）。
+    //   真机 Android 宿主专属形状：宿主撤稿杀锚点后，组字 reconciliation
+    //   每帧 flush（upd len=8 d=0）却找不到锚点节点可写。桌面合成 beforeinput
+    //   不产生 update flush（探针实测：只有 wd:hold、无重置分支帧）——
+    //   markDirty 制造「有 flush 但树长不变」的等价形状，喂锚点死亡检测
+    //   （连续 4 帧 ⇒ wd:dead 取证 + wd:reboot 自愈）。
+    stallBi: (dLen: number): void => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: 'y'.repeat(dLen),
+          isComposing: true,
+          bubbles: true,
+        } as InputEventInit),
+      );
+      ed.update(() => {
+        $getRoot().markDirty();
+      });
+    },
+    // 🔴 v3.0.18 只读探针：ed.isComposing() 当前值（死会话是否被 reboot 强制结束）。
+    probeComposing: (): boolean => ed.isComposing() === true,
     flightLines: (): string[] => flightLines(),
     guardActive: (): boolean => composeGuard.isActive,
     treeTextLen: (): number => ed.getEditorState().read(() => $getRoot().getTextContent().length),

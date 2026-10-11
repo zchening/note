@@ -200,3 +200,63 @@ test('WD-E2E-04 🔴 撤稿后无恢复 ⇒ 1200ms 观察窗后延迟重建（�
     await page.close();
   }
 });
+
+// ── v3.0.18：锚点死亡自愈 ──────────────────────────────────────────────────
+//   真机 v3.0.17 日志钉死的第三阶段病灶：撤稿判定后锚点已被宿主杀死，组字帧
+//   持续到达（组字串 d=196→222 增长）但写入全部空转（upd len=8 d=0 冻结）——
+//   实时流断裂：用户继续口述 300 字只见 7 字，点「智能识别」才恢复。
+//   自愈链：连续 4 帧空转（组字串远长于文档 + 树长不动）⇒ wd:dead 取证 ⇒
+//   wd:reboot 强制结束死会话（合成 compositionend）+ 重建 peakDoc ⇒ 下一帧
+//   comp=1 由孤儿分支合成新 compositionstart ⇒ 实时流自愈恢复。
+//   ⚠️ 形状纪律同上：逐帧 evaluate + 节拍；stallBi 只发 4 帧——reboot 之后
+//   任何新 comp=1 帧都会重开合成会话（probeComposing 断言会被污染）。
+test('WD-E2E-05 🔴🔴 锚点死亡自愈：4 帧空转 ⇒ wd:reboot 结束死会话 + 重建峰值上屏', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde05', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 组字会话到峰值 108（分两次 evaluate——形状纪律）
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+    // 撤稿判定：延迟同步激活（wdFreeze=true、观察窗计时中）
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.withdrawTo(13));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:defer'),
+      null,
+      { timeout: 5000 },
+    );
+    // 锚点死亡模拟：组字帧（组字串 200 远长于文档 13）持续到达但写入全部空转
+    //   （stallBi 不动树）。逐帧节拍，第 4 帧应触发 wd:dead 取证 + wd:reboot 自愈。
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:reboot'),
+      null,
+      { timeout: 5000 },
+    );
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:dead'), '🔴 连续 4 帧空转必须留 wd:dead 取证（len/d 形状钉死空转现场）');
+    assert.ok(flight.includes('wd:reboot'), '🔴 死亡确认必须触发 wd:reboot 自愈动作');
+    // 死会话结束断言：reboot 后第 4 帧的孤儿分支可能已重开合成会话（1500ms
+    // 静默收口）——等组字态转假再断言（死锁的组字态永远不转假，等不到即红）。
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.probeComposing() === false,
+      null,
+      { timeout: 5000 },
+    );
+    const composing = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.probeComposing());
+    assert.equal(composing, false, '🔴 死会话必须被 reboot 强制结束（组字态能转假=没有死锁）');
+    const tree = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
+    assert.equal(tree, 108, `reboot 必须把峰值内容重建上屏（树=108），实得 ${tree}`);
+    const doc = await textLen(page);
+    assert.equal(doc, 108, `真源必须保持峰值 108（ce 残串 commit 被 wdFreeze 挡住），实得 ${doc}`);
+  } finally {
+    await page.close();
+  }
+});

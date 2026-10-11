@@ -16,6 +16,7 @@
  *   把 CAP 的 splice 删掉 ⇒ FLIGHT-02 红；把 ensureLoaded 的读档删掉 ⇒
  *   FLIGHT-03 红；把 flush 分支删掉（全走节流）⇒ FLIGHT-04 红；
  *   把 slice(0,140) 删掉 ⇒ FLIGHT-05 红。四向验证过。
+ *   把 recordFlight 的 keyBuf 双写块删掉 ⇒ FLIGHT-09 红（v3.0.18）。
  */
 
 import test from 'node:test';
@@ -156,4 +157,47 @@ test('FLIGHT-08 🔴 会话级累计计数：不随 ring 淘汰、跨重载存�
   clearFlight();
   c = flightCounts();
   assert.ok(!c['upd'] && !c['cmp:synthed'], '清空后计数必须归零');
+});
+
+test('FLIGHT-09 🔴🔴 关键事件通道：输入帧挤爆普通 ring 后，判定现场必须仍在（v3.0.18 取证）', () => {
+  // 🔴 为什么必须有：v3.0.17 真机出事尾段 400 条 ring 全是 in:bi/upd 高噪帧，
+  //   gate:collapse/gate:withdraw 判定现场全被挤掉，只能靠全程计数反推 ——
+  //   判定时刻前后各帧（wd:defer→wd:hold→wd:dead→wd:reboot 链）丢了就无法
+  //   钉死锚点死亡根因。关键事件必须独立 ring，永不随输入帧滚动淘汰。
+  const store = memStore();
+  _flightTestReset(store);
+  // 判定现场（先发生）
+  recordFlight('gate:withdraw', 'withdraw 40->5 drop=35>12.0');
+  recordFlight('wd:defer', 'peak=40 cur=5');
+  recordFlight('wd:dead', 'len=8 d=222');
+  // 高噪输入帧：450 条 > CAP=400 ⇒ 普通段里最早的判定现场必然被挤掉
+  for (let i = 0; i < 450; i += 1) recordFlight('in:bi', 'insertCompositionText comp=1 d=' + i);
+  recordFlight('wd:reboot', '');
+  const lines = flightLines();
+  const head = lines[0];
+  // 分段：普通段时间线 = head 之后、关键段分隔行之前
+  const sepAt = lines.findIndex((l) => l.startsWith('── 关键事件'));
+  assert.ok(sepAt > 0, '🔴 必须有关键事件段分隔行（独立 ring 的可见边界）');
+  const normal = lines.slice(1, sepAt);
+  const keySeg = lines.slice(sepAt + 1);
+  // 钉「挤压真的发生了」：普通段已无最早的判定现场（否则判据恒真）
+  assert.ok(!normal.some((l) => l.includes('gate:withdraw')), '普通段 400 条上限必须挤掉最早的判定现场（挤压前提）');
+  assert.ok(!normal.some((l) => l.includes('wd:defer')), '普通段必须挤掉最早的 wd:defer（挤压前提）');
+  // 🔴 关键段必须保住判定现场全链
+  assert.ok(keySeg.some((l) => l.includes('gate:withdraw withdraw 40->5')), '🔴🔴 判定帧必须留在关键段');
+  assert.ok(keySeg.some((l) => l.includes('wd:defer peak=40')), '🔴🔴 延迟同步调度帧必须留在关键段');
+  assert.ok(keySeg.some((l) => l.includes('wd:dead len=8 d=222')), '🔴🔴 锚点死亡取证帧必须留在关键段');
+  assert.ok(keySeg.some((l) => l.includes('wd:reboot')), '🔴🔴 自愈动作帧必须留在关键段');
+  // 最新普通帧仍在（普通 ring 语义未被破坏；wd:reboot 比它更晚，故用 some）
+  assert.ok(normal.some((l) => l.includes('insertCompositionText comp=1 d=449')), '最新输入帧仍在普通段');
+  // 高噪帧不许进关键段（否则关键 ring 自己被挤爆，通道白建）
+  assert.ok(!keySeg.some((l) => l.includes('in:bi')), '🔴 输入帧严禁进关键段');
+  // 跨"重载"存活：关键段随存储读回
+  recordFlight('vis', 'pagehide-flush', true);
+  _flightTestReset(store);
+  const lines2 = flightLines();
+  assert.ok(
+    lines2.some((l) => l.includes('wd:dead len=8 d=222')),
+    '🔴 重载后关键段必须从存储读回（丢字现场伴随页面被杀）',
+  );
 });

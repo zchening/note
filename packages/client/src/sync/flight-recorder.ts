@@ -40,12 +40,22 @@ export interface FlightEvent {
 
 /** ring 上限：400 条 × ~150B ≈ 60KB，localStorage 单键放得下。 */
 const CAP = 400;
+/** 🔴🔴🔴 v3.0.18 关键事件通道上限：100 条。判定现场（gate/wd/cmp 类）与
+ *   输入帧（in:bi/upd 每键一条）共用一个 400 条 ring 时，豆包语音高帧率
+ *   输入会在几秒内把判定现场挤掉（v3.0.17 真机实测：出事尾段只有 in:bi/upd，
+ *   gate:collapse/gate:withdraw 现场全被冲走，只能靠全程计数反推）。
+ *   关键事件独立 ring：判定时刻前后各若干条**永不**被输入帧挤掉。 */
+const KEY_CAP = 100;
+/** 关键事件 pattern：守卫判定/延迟同步/合成组字/孤儿帧/程序化动树/错误。
+ *   与 KEY_CAP 配套；命中即同时进普通 ring 与关键 ring。 */
+const KEY_RE = /^(gate:|wd:|cmp:|sel:|orphan0|tree:|bulk|compose:drop|err)/;
 /** 落盘节流：打字期每 500ms 最多写一次。 */
 const SAVE_EVERY_MS = 500;
 /** localStorage 键：bj 前缀（与 favs/diag 同款纪律）。 */
 const LS_KEY = 'notesync_bj_flight';
 
 let buf: FlightEvent[] = [];
+let keyBuf: FlightEvent[] = [];
 let startedAt = 0;
 let startWall = '';
 let loaded = false;
@@ -70,6 +80,7 @@ function st(): FlightStore | undefined {
 /** 判据专用：换存储 + 清空内存态（生产不调用）。 */
 export function _flightTestReset(s?: FlightStore): void {
   buf = [];
+  keyBuf = [];
   counts = {};
   startedAt = 0;
   startWall = '';
@@ -84,8 +95,12 @@ function ensureLoaded(): void {
   try {
     const raw = st()?.getItem(LS_KEY);
     if (raw) {
-      const j = JSON.parse(raw) as { startWall?: string; buf?: FlightEvent[]; counts?: Record<string, number> };
+      const j = JSON.parse(raw) as {
+        startWall?: string; buf?: FlightEvent[]; counts?: Record<string, number>; keyBuf?: FlightEvent[];
+      };
       if (Array.isArray(j.buf)) buf = j.buf.slice(-CAP);
+      // v3.0.18：keyBuf 向后兼容 —— 旧存档没有这个键就当空表
+      if (Array.isArray(j.keyBuf)) keyBuf = j.keyBuf.slice(-KEY_CAP);
       if (typeof j.startWall === 'string') startWall = j.startWall;
       // v3.0.13：counts 向后兼容 —— 旧存档没有这个键就当空表
       if (j.counts && typeof j.counts === 'object') counts = j.counts;
@@ -97,7 +112,7 @@ function ensureLoaded(): void {
 
 function persist(): void {
   try {
-    st()?.setItem(LS_KEY, JSON.stringify({ startWall, buf, counts }));
+    st()?.setItem(LS_KEY, JSON.stringify({ startWall, buf, counts, keyBuf }));
   } catch {
     /* 隐私模式/满：丢日志不丢功能 */
   }
@@ -129,6 +144,12 @@ export function recordFlight(type: string, d: string, flush = false): void {
   }
   buf.push({ t: now - startedAt, type, d: d.slice(0, 140) });
   if (buf.length > CAP) buf.splice(0, buf.length - CAP);
+  // 🔴🔴🔴 v3.0.18：关键事件双写 —— 判定/守卫/恢复链事件同时进独立 keyBuf，
+  //   不随普通 ring 的输入帧滚动而淘汰（见 KEY_CAP 注释）。
+  if (KEY_RE.test(type)) {
+    keyBuf.push({ t: now - startedAt, type, d: d.slice(0, 140) });
+    if (keyBuf.length > KEY_CAP) keyBuf.splice(0, keyBuf.length - KEY_CAP);
+  }
   counts[type] = (counts[type] ?? 0) + 1;
   if (flush) {
     lastSaveAt = now;
@@ -160,7 +181,16 @@ export function flightLines(): string[] {
     ` collapse=${c['gate:collapse'] ?? 0} wd=${c['gate:withdraw'] ?? 0}` +
     ` drop=${c['compose:drop'] ?? 0}` +
     ` bulk=${c['bulk'] ?? 0} gate=${sum('gate:')} tree=${sum('tree:')}`;
-  return [head, ...buf.map((e) => `${String(e.t).padStart(8, ' ')} ${e.type} ${e.d}`)];
+  return [
+    head,
+    ...buf.map((e) => `${String(e.t).padStart(8, ' ')} ${e.type} ${e.d}`),
+    // 🔴🔴🔴 v3.0.18：关键事件段放**末尾** —— 用户贴日志常只贴末尾，尾段普通
+    //   ring 全是 in:bi/upd 高噪帧，关键段在末尾保证贴出来的部分一定带上判定现场。
+    ...(keyBuf.length > 0
+      ? [`── 关键事件（近 ${keyBuf.length}/${KEY_CAP} 条，独立 ring 不被输入帧挤掉）──`,
+         ...keyBuf.map((e) => `${String(e.t).padStart(8, ' ')} ${e.type} ${e.d}`)]
+      : []),
+  ];
 }
 
 /** 全程计数（type → 次数）。不随 ring 淘汰；clearFlight 归零；跨重载从存储读回。 */
@@ -172,6 +202,7 @@ export function flightCounts(): Record<string, number> {
 /** 清空（诊断面板"清空日志"按钮 / 判据用）。 */
 export function clearFlight(): void {
   buf = [];
+  keyBuf = [];
   counts = {};
   startedAt = 0;
   startWall = '';
