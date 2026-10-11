@@ -47,6 +47,7 @@ import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
 import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
 import { SyncClient, fetchTextWithTimeout, FETCH_TIMEOUT_GET_MS, type TimedResponse } from './sync/client.ts';
+import { ComposeGuard } from './sync/compose-guard.ts';
 import {
   autoSnapshotThrottled,
   fetchHistoryDoc,
@@ -158,6 +159,14 @@ declare global {
     __NOTESYNC_EDITOR__?: LexicalEditor;
     /** 读取最近一次提交的真源快照（深拷贝）。正式接口，非调试后门。 */
     __NOTESYNC_DOC__?: () => Doc;
+    /** v3.0.10 合成塌方守卫 e2e 驱动钩子（正式接口，仅驱动真实 update 监听）。 */
+    __NOTESYNC_COMPOSE_TEST__?: {
+      start: () => void;
+      collapse: (short: string) => void;
+      end: () => void;
+      flightLines: () => string[];
+      guardActive: () => boolean;
+    };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
     /**
@@ -1711,6 +1720,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   canApply()，不会削弱既有判据。闭包延迟读取 `editor`，此刻 editor 尚未赋值，
   //   但 canApply() 被调用时 editor 早已挂好。
   const imeGate: ImeGate = createImeGate(undefined, () => editor?.isComposing() ?? false);
+  // 🔴🔴 v3.0.10：跨段组字串塌方守卫（豆包智能整理丢字的根因修复）。
+  //   见 compose-guard.ts 顶部注释。它**只依赖自己的 active 标志**（由下面
+  //   compositionstart 处理器设置），不读 editor.isComposing() —— 因为塌方发生时
+  //   Lexical 原生合成回灌已经把正文吞了，isComposing 真假都不影响判定。
+  const composeGuard = new ComposeGuard();
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
@@ -1728,16 +1742,39 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   };
   const onFlightCS = (): void => recordFlight('in:cs', '');
   const onFlightCE = (): void => recordFlight('in:ce', '');
+  // 🔴🔴 v3.0.10：合成起止 → 喂守卫。compositionstart 时算选区是否跨多个顶层块
+  //   （豆包整理=全选替换 ⇒ 跨段），并把当前正文本长度作为基准。compositionend
+  //   清空 active，避免之后正常编辑被误判。两个都是 capture 被动监听，不拦截事件。
+  const onComposeStartGuard = (): void => {
+    const multi = ed.getEditorState().read(() => {
+      const sel = $getSelection();
+      if (!$isRangeSelection(sel) || sel.isCollapsed()) return false;
+      const aTop = sel.anchor.getNode().getTopLevelElement();
+      const fTop = sel.focus.getNode().getTopLevelElement();
+      return !!aTop && !!fTop && aTop.getKey() !== fTop.getKey();
+    });
+    const len = docTextLen(lexicalToDoc(ed.getEditorState(), latestDoc.reminders ?? []));
+    composeGuard.begin(multi, len);
+    recordFlight('cmp:start', 'mb=' + (multi ? 1 : 0) + ' len=' + len);
+  };
+  const onComposeEndGuard = (): void => {
+    composeGuard.end();
+    recordFlight('cmp:end', '');
+  };
   editorHost.addEventListener('beforeinput', onFlightBI, true);
   editorHost.addEventListener('input', onFlightI, true);
   editorHost.addEventListener('compositionstart', onFlightCS, true);
   editorHost.addEventListener('compositionend', onFlightCE, true);
+  editorHost.addEventListener('compositionstart', onComposeStartGuard, true);
+  editorHost.addEventListener('compositionend', onComposeEndGuard, true);
   detachImeRef = () => {
     detachIme();
     editorHost.removeEventListener('beforeinput', onFlightBI, true);
     editorHost.removeEventListener('input', onFlightI, true);
     editorHost.removeEventListener('compositionstart', onFlightCS, true);
     editorHost.removeEventListener('compositionend', onFlightCE, true);
+    editorHost.removeEventListener('compositionstart', onComposeStartGuard, true);
+    editorHost.removeEventListener('compositionend', onComposeEndGuard, true);
   };
   // 挂到模块级：三条回灌路径（setDoc / 对账回灌 / 提醒回灌）都要判它。
   imeGateRef = imeGate;
@@ -2125,6 +2162,33 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       imeGate?.noteBulkEdit();
     }
 
+    // 🔴🔴🔴 v3.0.10 跨段组字串塌方守卫（豆包智能整理丢字根因修复）。
+    //
+    //   真因：insertCompositionText 走 Lexical 原生 $updateSelectedTextFromDOM，
+    //   它只读 anchor 一个 DOM 节点的文本写回那一个 TextNode（见 compose-guard.ts）。
+    //   跨段组字串被收进 anchor、其余段落 DOM 被浏览器移除时，正文被整段吞掉，
+    //   单帧 116→19，全程零 tree:* / gate:* —— 四道 IME 门控都没触发。
+    //
+    //   判定：合成进行中（composeGuard.active，由 compositionstart 喂）+ 单帧
+    //   灾难性塌方（decideCollapseRestore）。命中即把真源回退到塌方前那帧
+    //   `before`（= 上一帧的 latestDoc = 峰值健康正文），并重建树，避免把损坏
+    //   状态写回真源 / 推到远端。`return` 跳过后续对账/回灌（那些都是基于损坏
+    //   exported 的，不应在此帧执行；重建会触发下一帧正常走完）。
+    //
+    //   🔴 用 `before` 而非重新捕获峰值文本：before 就是塌方前最后一帧的健康
+    //   真源，零额外开销、零内容泄漏（飞行记录器只记长度/哈希）。
+    //   🔴 重建走 NOFX 标记：避免触发"整段改写会话窗口"把这次恢复又顺延掉。
+    const collapse = composeGuard.observe(newLen);
+    if (collapse.restore) {
+      recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
+      latestDoc = before;
+      latestDocRef = before;
+      ed.update(() => {
+        docToLexical(before);
+      }, { tag: EGG_NOFX_TAG });
+      return;
+    }
+
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
     // 🔴 诊断面板的真源引用（见 latestDocRef 的注释）。必须在对账**之后**赋值：
@@ -2255,6 +2319,28 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   // 以及 e2e 的「输入是否真进了真源」判据都走它，是正式接口的一部分。
   window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latestDoc);
   window.__NOTESYNC_EDITOR__ = ed;
+  // 🔴 v3.0.10 合成塌方守卫 e2e 驱动钩子（正式接口，仅用于驱动真实 update 监听）。
+  //   桌面无法复现 Android InputConnection 的原生塌方，这条用真实 compositionstart
+  //   事件 + 真实 ed.update 塌方，验证守卫确实在 update 监听里把真源回退。不含内容。
+  window.__NOTESYNC_COMPOSE_TEST__ = {
+    start: (): void => {
+      editorHost.dispatchEvent(new CompositionEvent('compositionstart'));
+    },
+    collapse: (short: string): void => {
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode(short));
+        root.append(p);
+      });
+    },
+    end: (): void => {
+      editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+    },
+    flightLines: (): string[] => flightLines(),
+    guardActive: (): boolean => composeGuard.isActive,
+  };
   window.__NOTESYNC_INSERT_FOLD__ = () => {
     if (ed) insertFoldAtCaret(ed);
   };
