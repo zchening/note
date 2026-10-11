@@ -35,8 +35,10 @@ import {
   $createParagraphNode,
   $createTextNode,
   $getRoot,
+  $getSelection,
   $isElementNode,
   $isLineBreakNode,
+  $isRangeSelection,
   $isTextNode,
   IS_BOLD,
   IS_CODE,
@@ -582,6 +584,28 @@ export function docToLexical(doc: Doc): void {
   //   双向闭合靠导出侧那条「唯一空块 ⇒ 归零」规则，见 lexicalToDoc 的注释。
   //   （我试过在导入侧不补 —— 那条被 S3-30 直接判红，理由就是上面那句产品要求。）
   root.append(...(nodes.length > 0 ? nodes : [$createParagraphNode()]));
+
+  // 🔴🔴 v3.0.12：重建后归一化/重锚失效选区。
+  //   root.clear() 不碰 editorState._selection（RootNode.clear 不重置），若原选区锚在
+  //   被移除的旧节点（或外壳节点，如关于页浮层标题"关于 NoteSync"），提交时按死 key
+  //   取不到 DOM ⇒ 原生 caret 停在外壳 ⇒ 后续输入落不到编辑器（v3.0.11 诊断
+  //   anchor=关于NoteSync、inEditor=no）。仅当"存在选区但锚点已不在新 root 内"才重锚，
+  //   有效选区一律不动（不打断正常打字）。
+  const sel = $getSelection();
+  if (sel && $isRangeSelection(sel)) {
+    let n: LexicalNode | null = sel.anchor.getNode();
+    let inRoot = false;
+    while (n) {
+      if (n === root) { inRoot = true; break; }
+      n = n.getParent();
+    }
+    if (!inRoot) {
+      const children = root.getChildren();
+      let node: LexicalNode | null = children.length > 0 ? children[children.length - 1]! : null;
+      while (node && $isElementNode(node) && node.getChildrenSize() > 0) node = node.getLastChild();
+      if (node) node.selectEnd();
+    }
+  }
 }
 
 /**

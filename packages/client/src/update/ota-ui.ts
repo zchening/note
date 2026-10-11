@@ -55,6 +55,14 @@ export interface AboutDeps {
     /** 点整行开图鉴（老项目 `nsEggOpen()`）。 */
     open: () => void;
   };
+  /**
+   * 🔴🔴 v3.0.12：关于页关闭后的回调（归还焦点/选区到编辑器）。
+   *   关于页浮层标题"关于 NoteSync"位于 editorHost 之外的外壳节点；点开关闭后若
+   *   原生 caret 仍停在外壳节点，后续输入会落到编辑器外（v3.0.11 诊断 anchor=关于NoteSync、
+   *   inEditor=no）。关页时主动把焦点与选区交还编辑器，避免该失效选区遗留。
+   *   不传 ⇒ 不接（不留半个实现）。
+   */
+  onClose?: () => void;
 }
 
 /** 彩蛋入口行的 chevron —— 老项目 index.html:11124 逐字（24 视框、描边 2.4、圆头圆角）。 */
@@ -259,7 +267,10 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
   /* ---------- 行为 ---------- */
   let current: LatestRelease | null = null;
 
-  const closeAbout = () => el.classList.add('hidden');
+  const closeAbout = () => {
+    el.classList.add('hidden');
+    deps.onClose?.();
+  };
   const closeUpd = () => um.classList.add('hidden');
 
   x.onclick = closeAbout;

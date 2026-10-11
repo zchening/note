@@ -194,8 +194,11 @@ test('COMPOSE-E2E-02 🔴🔴 回归：无 compositionstart、仅 insertComposit
     assert.ok(recoveredLen >= typedLen - 2, `救回字数应≈塌方前（${typedLen}），实得 ${recoveredLen}`);
 
     const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
-    assert.ok(flight.includes('gate:collapse'), '飞行日志应含 gate:collapse（无 compositionstart 也触发）');
-    assert.ok(!flight.includes('cmp:start'), '本测试未发 compositionstart，飞行日志不应含 cmp:start');
+    assert.ok(flight.includes('gate:collapse'), '飞行日志应含 gate:collapse（v3.0.11 起守卫改由 isComposing 驱动，无真实 compositionstart 也触发）');
+    // v3.0.12 起：collapseNoStart 的 isComposing 输入会被①识别并合成 compositionstart（治本路径），
+    // 所以本场景现在**应当**含 cmp:synthed —— 这正是①在补豆包"只发 insertCompositionText 不发 compositionstart"的缺口。
+    // 断言它出现，证明①与守卫协同：①补 compositionstart、守卫兜底塌方，两者不互斥。
+    assert.ok(flight.includes('cmp:synthed'), 'collapseNoStart 的 isComposing 输入应被①识别并合成 compositionstart（cmp:synthed）');
   } finally {
     await page.close();
   }

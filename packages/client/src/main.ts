@@ -168,6 +168,8 @@ declare global {
       end: () => void;
       flightLines: () => string[];
       guardActive: () => boolean;
+      /** v3.0.12 回归钩子：只 insertCompositionText(isComposing=true) 不发真实 compositionstart 时，返回 ed.isComposing() 是否被合成置位。 */
+      probeSynthCompose: () => boolean;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1665,6 +1667,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             ensureEggLayer()?.openCodex();
           },
         },
+        // 🔴🔴 v3.0.12：关于页关闭后归还焦点/选区到编辑器（见 ota-ui.ts onClose）。
+        onClose: () => restoreFocusAndReanchor(),
       });
       void about.open();
     },
@@ -1746,32 +1750,65 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   一旦捕获到跨段选区（全选替换），记进 multiBlock，极端塌方兜底之外的主判据路径才生效。
     if (ie.inputType === 'insertCompositionText') {
       lastBiIsComposing = !!ie.isComposing;
-      if (lastBiIsComposing && !composeGuard.isMultiBlock) {
-        const multi = ed.getEditorState().read(() => {
-          const sel = $getSelection();
-          if (!$isRangeSelection(sel) || sel.isCollapsed()) return false;
-          const aTop = sel.anchor.getNode().getTopLevelElement();
-          const fTop = sel.focus.getNode().getTopLevelElement();
-          return !!aTop && !!fTop && aTop.getKey() !== fTop.getKey();
-        });
-        composeGuard.noteComposingInput(multi);
-      } else if (lastBiIsComposing) {
+      if (lastBiIsComposing) {
+        // 🔴🔴 v3.0.12 治本：DOM 正在组字但 Lexical 内部未进入组字态（豆包只发
+        //   insertCompositionText、不稳定发 compositionstart）⇒ 合成 compositionstart，
+        //   让 Lexical 走全量插入路径，绕过孤儿 composition 分支（逐帧只读单锚点节点吞字）。
+        if (ed.isComposing() !== true) {
+          recordFlight('sel:orphaned', 'bi');
+          ensureSyntheticComposeStart();
+        }
+        clearSyntheticComposeTimer();
+        syntheticComposeTimer = setTimeout(ensureSyntheticComposeEnd, SYNTHETIC_COMPOSE_MAX_MS);
+        if (!composeGuard.isMultiBlock) {
+          const multi = ed.getEditorState().read(() => {
+            const sel = $getSelection();
+            if (!$isRangeSelection(sel) || sel.isCollapsed()) return false;
+            const aTop = sel.anchor.getNode().getTopLevelElement();
+            const fTop = sel.focus.getNode().getTopLevelElement();
+            return !!aTop && !!fTop && aTop.getKey() !== fTop.getKey();
+          });
+          composeGuard.noteComposingInput(multi);
+        }
+      } else {
         composeGuard.noteComposingInput(false);
+        ensureSyntheticComposeEnd();
       }
     } else {
       lastBiIsComposing = false;
+      // 非组字输入（insertText / 回车 / 删除…）⇒ 收掉可能残留的合成态
+      ensureSyntheticComposeEnd();
     }
   };
   const onFlightI = (e: Event): void => {
     const ie = e as InputEvent;
     recordFlight('in:i', (ie.inputType ?? '?') + ' comp=' + (ie.isComposing ? 1 : 0));
+    // 🔴🔴 v3.0.12：input 也按 isComposing 反推（某些宿主 beforeinput 时序不稳定）。
+    if (ie.isComposing === true) {
+      if (ed.isComposing() !== true) {
+        recordFlight('sel:orphaned', 'i');
+        ensureSyntheticComposeStart();
+      }
+      clearSyntheticComposeTimer();
+      syntheticComposeTimer = setTimeout(ensureSyntheticComposeEnd, SYNTHETIC_COMPOSE_MAX_MS);
+    } else {
+      ensureSyntheticComposeEnd();
+    }
   };
-  const onFlightCS = (): void => recordFlight('in:cs', '');
-  const onFlightCE = (): void => recordFlight('in:ce', '');
+  const onFlightCS = (): void => {
+    syntheticCompose = false; // 真实 compositionstart 到了，交还，不再由我们维护
+    recordFlight('in:cs', '');
+  };
+  const onFlightCE = (): void => {
+    syntheticCompose = false;
+    clearSyntheticComposeTimer();
+    recordFlight('in:ce', '');
+  };
   // 🔴🔴 v3.0.10：合成起止 → 喂守卫。compositionstart 时算选区是否跨多个顶层块
   //   （豆包整理=全选替换 ⇒ 跨段），并把当前正文本长度作为基准。compositionend
   //   清空 active，避免之后正常编辑被误判。两个都是 capture 被动监听，不拦截事件。
   const onComposeStartGuard = (): void => {
+    syntheticCompose = false; // 真实 compositionstart 到了，交还，不再由我们维护
     const multi = ed.getEditorState().read(() => {
       const sel = $getSelection();
       if (!$isRangeSelection(sel) || sel.isCollapsed()) return false;
@@ -1785,9 +1822,88 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     recordFlight('cmp:start', 'mb=' + (multi ? 1 : 0) + ' len=' + len);
   };
   const onComposeEndGuard = (): void => {
+    syntheticCompose = false;
+    clearSyntheticComposeTimer();
     composeGuard.end();
     lastBiIsComposing = false;
     recordFlight('cmp:end', '');
+  };
+  // 🔴🔴 v3.0.12 治本 —— 豆包语音只发 insertCompositionText、不稳定发 compositionstart
+  //   ⇒ Lexical 内部 `isComposing()` 恒 false ⇒ 孤儿 composition 分支：逐帧只读单个 DOM
+  //   锚点节点写回单个 TextNode，其余正文被吞（v3.0.11 诊断 DOM comp=1 但 editor composing=no）。
+  //   我们在 **capture 相位**（早于 Lexical 挂在 editorHost 上的非 capture beforeinput 监听器）
+  //   按 DOM `InputEvent.isComposing` 反推：当 DOM 正在组字、而 Lexical 内部还没进入组字态时，
+  //   向 editorHost 合成派发 `compositionstart`，让 Lexical 走全量插入路径（绕过孤儿分支）。
+  //   合成的 compositionstart 只在"我们反推出来"时发；真实 compositionstart 一到就交还（不重复、不冲突）。
+  let syntheticCompose = false;
+  let syntheticComposeTimer: ReturnType<typeof setTimeout> | null = null;
+  // 组字静默超过此窗（豆包句间停顿）仍未收到新组字输入 ⇒ 收掉合成态，避免永不结束。
+  const SYNTHETIC_COMPOSE_MAX_MS = 1500;
+  const clearSyntheticComposeTimer = (): void => {
+    if (syntheticComposeTimer !== null) {
+      clearTimeout(syntheticComposeTimer);
+      syntheticComposeTimer = null;
+    }
+  };
+  const ensureSyntheticComposeStart = (): void => {
+    if (syntheticCompose || ed.isComposing() === true) return;
+    editorHost.dispatchEvent(new CompositionEvent('compositionstart'));
+    syntheticCompose = true;
+    recordFlight('cmp:synthed', 'start');
+  };
+  const ensureSyntheticComposeEnd = (): void => {
+    clearSyntheticComposeTimer();
+    if (!syntheticCompose) return;
+    editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+    syntheticCompose = false;
+    recordFlight('cmp:synthed', 'end');
+  };
+  // 🔴🔴 v3.0.12：关于页/菜单等外壳浮层关闭后，把焦点与失效选区归还编辑器
+  //   （见 ota-ui.ts 的 onClose）。外壳节点（如关于页标题"关于 NoteSync"）在 editorHost
+  //   之外；浮层打开期间原生 caret 可能停在外壳，关页不交还 ⇒ 后续输入落到编辑器外
+  //   （v3.0.11 诊断 anchor=关于NoteSync、inEditor=no）。
+  const reanchorSelection = (): void => {
+    ed.update(
+      () => {
+        const root = $getRoot();
+        const sel = $getSelection();
+        if (sel && $isRangeSelection(sel)) {
+          let n: LexicalNode | null = sel.anchor.getNode();
+          let inRoot = false;
+          while (n) {
+            if (n === root) { inRoot = true; break; }
+            n = n.getParent();
+          }
+          if (inRoot) return; // 有效选区不动
+        }
+        // 找到最后一个叶子文本节点，把 caret 重锚到其末尾
+        let node: LexicalNode | null = root.getLastChild();
+        while (node && $isElementNode(node) && node.getChildrenSize() > 0) {
+          node = node.getLastChild();
+        }
+        if (node) node.selectEnd();
+      },
+      { discrete: true },
+    );
+  };
+  // 🔴🔴🔴 命名纪律：这里**绝不能**叫 restoreEditorFocusOnClose —— 模块级已有同名守卫版
+  //   （platform/touch.ts，带 CHIP_HOVER_OK：触屏关闭浮层不得聚焦编辑器，否则弹软键盘
+  //   = 报障第 10 条）。若在内层重名会遮蔽守卫版，mountEditor 后续所有既有调用点
+  //   （图片查看器/菜单/口令弹窗关闭）全部被劫持成裸 ed.focus() —— VVW-26 已实测红。
+  const restoreFocusAndReanchor = (): void => {
+    try {
+      restoreEditorFocusOnClose(); // 模块级守卫版：非触屏才真正 focus
+      // 🔴🔴 reanchor 必须以「焦点真的落回编辑器」为闸：selectEnd 会触发 Lexical commit
+      //   把 DOM Selection 写回 contenteditable，Chromium 在那一步**隐式聚焦**编辑器 ——
+      //   触屏上就是用户报障第 10 条的"关个弹窗键盘弹出"（VVW-26 已实测红）。
+      //   焦点没还回来（触屏）就什么都不做；rebuild 场景的重锚已由 serialize.ts 兜底。
+      const rootEl = ed.getRootElement();
+      const host = rootEl ?? document.getElementById('editor-host');
+      if (!host || !host.contains(document.activeElement)) return;
+      reanchorSelection();
+    } catch {
+      /* focus 失败（如页面不可聚焦）不阻塞关页 */
+    }
   };
   editorHost.addEventListener('beforeinput', onFlightBI, true);
   editorHost.addEventListener('input', onFlightI, true);
@@ -2223,6 +2339,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       }, { tag: EGG_NOFX_TAG });
       return;
     }
+    // 🔴🔴 v3.0.12：组字中本帧"部分欠插"（未达到塌方阈值）也量化，确认合成
+    //   compositionstart 后是否仍有丢字（真机靠飞行记录器回传验证治本成效）。
+    if (composing && prevLen - newLen > 0) {
+      recordFlight('compose:drop', 'd=' + (prevLen - newLen) + ' newLen=' + newLen);
+    }
 
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
@@ -2390,6 +2511,24 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         p.append($createTextNode(short));
         root.append(p);
       });
+    },
+    // 🔴🔴 v3.0.12 回归钩子：验证"只发 insertCompositionText（isComposing=true）、
+    //   不发真实 compositionstart"时，我们按 isComposing 反推并合成 compositionstart，
+    //   使 Lexical 内部 isComposing() 置位（绕过孤儿 composition 分支的治本路径）。
+    //   返回 ed.isComposing()：修复前恒 false（红），修复后应为 true（绿）。
+    probeSynthCompose: (): boolean => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: '语音测试',
+          isComposing: true,
+          bubbles: true,
+        } as InputEventInit),
+      );
+      const composing = ed.isComposing() === true;
+      // 探针用完即复位，避免污染后续断言
+      editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+      return composing;
     },
     end: (): void => {
       editorHost.dispatchEvent(new CompositionEvent('compositionend'));
