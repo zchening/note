@@ -1750,22 +1750,27 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   docToLexical 重建会**杀死组字锚点**：锚点节点被销毁后，后续每帧
   //   insertCompositionText 全部模型空转（upd len=9 d=0 冻结、组字串
   //   d=77→93 持续增长 3.5s+），用户继续口述的内容一个字都进不了文档。
-  //   改为：撤稿帧只写模型（peakDoc），树同步延迟 600ms ——
-  //     - 期间任何 comp=1 组字帧 ⇒ cancelDeferredTreeSync()：锚点从未被
-  //       破坏，输入法的全量串替换会让文档自动追上组字串，口述继续落地；
-  //     - 超时仍无组字帧 ⇒ 组字真死了，此时重建安全（峰值内容上屏兜底）。
+  //   改为：撤稿帧只写模型（peakDoc），树同步延迟 —— v3.0.17 起机制演进为：
+  //     - 组字帧/组字会话开始 ⇒ holdDeferredTreeSync()：解冻＋推迟（锚点未
+  //       破坏，输入法全量串替换让文档自动追上，口述照常进模型）；
+  //     - 组字态活着 ⇒ 观察窗顺延（帧稀疏只是口述停顿，不等于组字死）；
+  //     - 组字态真正结束（ce/comp=0）后窗口到期 ⇒ 重建兜底（峰值内容上屏）。
   //   ⚠️ 这是同一闭包内的局部 timer：换笔记重挂载后旧 timer 随旧闭包废弃，
   //   不会跨笔记触发（回调里捕获的 ed/最新引用都是旧闭包自己的）。
+  /** 🔴🔴🔴 v3.0.17：观察窗从 600ms 放宽到 1200ms。v3.0.16 真机日志实测：豆包
+   *  语音口述有停顿，组字帧间隔可达 778ms（54351→55129）——600ms「无帧=组字死」
+   *  不成立，定时器在停顿中到期重建杀了锚点，用户再开口述全部空转（len=20 冻结、
+   *  组字串 d=193→212 增长）。窗口必须盖过正常停顿间隔。 */
+  const WD_SYNC_WINDOW_MS = 1200;
   let deferredTreeSyncTimer: ReturnType<typeof setTimeout> | null = null;
   // 🔴🔴🔴 v3.0.16：延迟同步窗口内**冻结「树→模型」常规同步**。探针实测（e2e
   //   E2E-01/04 破案）：塌方判定帧落账 before 之后，紧跟着的塌方残留帧（树=短串）
   //   会走常规 reconcile 把 latestDoc/latestDocRef **覆盖成残串** —— 600ms 后
-  //   wd:sync 重建的就是残串，峰值内容照样丢。冻结规则：schedule 置位 → cancel
-  //   （组字恢复帧）或 wd:sync 执行时解除。解除后第一帧恢复常规同步（模型=树
-  //   =组字串，新口述优先），语义正确。
+  //   wd:sync 重建的就是残串，峰值内容照样丢。冻结解除：组字帧 hold（模型=树，
+  //   口述内容进模型）或 wd:sync 重建完成时。
   let wdFreeze = false;
   /** 观察窗基线：判定/重置时刻的树长。到期时树**变长**了 = 窗口内有新内容写入
-   *  （用户切键盘手动打字 —— insertText 不走 cancel 通道），树内容是用户最新
+   *  （用户切键盘手动打字 —— insertText 不走 hold 通道），树内容是用户最新
    *  意图，绝不能重建抹掉；只解冻让常规同步接管。变短/不变 = 塌方收尾或无写入
    *  = 正常兜底重建。 */
   let deferTreeLen = 0;
@@ -1774,6 +1779,14 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     deferTreeLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
     deferredTreeSyncTimer = setTimeout(() => {
       deferredTreeSyncTimer = null;
+      // 🔴🔴🔴 v3.0.17：到期时 Lexical 组字态还活着 = 组字会话没死（帧稀疏只是
+      //   口述停顿）—— 此时重建必杀锚点。顺延观察窗，等 ce/comp=0 真正结束。
+      //   记独立标记 wd:wait（ wd:sync 保留给「真正执行重建」，判据好区分）。
+      if (ed.isComposing() === true) {
+        armDeferredSync();
+        recordFlight('wd:wait', 'composing');
+        return;
+      }
       wdFreeze = false;
       const nowLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
       if (nowLen > deferTreeLen) {
@@ -1783,14 +1796,19 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       const doc = latestDocRef;
       recordFlight('wd:sync', doc == null ? 'no-doc' : '');
       if (doc != null) ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG });
-    }, 600);
+    }, WD_SYNC_WINDOW_MS);
   };
-  const cancelDeferredTreeSync = (): void => {
+  /** 🔴🔴🔴 v3.0.17：组字帧/组字会话开始 = 锚点活着的证据。与 v3.0.15/16 的
+   *  「取消重建」不同 —— 取消是**永不**重建，而语音口述停顿会让固定窗口误判
+   *  （v3.0.16 真机：778ms 停顿 → 定时器到期重建 → 杀锚点 → 后续口述空转）。
+   *  改为「解冻＋推迟」：解冻让口述内容照常进模型（树=组字串，v3.0.16 已验证
+   *  这条链），arm 推迟重建到最后一次组字帧+窗口；到期时若组字态仍活着再顺延
+   *  （见 arm 内部）。只有组字态真正结束后才允许兜底重建。 */
+  const holdDeferredTreeSync = (): void => {
     if (deferredTreeSyncTimer == null) return;
-    clearTimeout(deferredTreeSyncTimer);
-    deferredTreeSyncTimer = null;
     wdFreeze = false;
-    recordFlight('wd:cancel', '');
+    armDeferredSync();
+    recordFlight('wd:hold', '');
   };
   const scheduleDeferredTreeSync = (info: string): void => {
     wdFreeze = true;
@@ -1819,9 +1837,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (ie.inputType === 'insertCompositionText') {
       lastBiIsComposing = !!ie.isComposing;
       if (lastBiIsComposing) {
-        // 🔴🔴🔴 v3.0.15：comp=1 组字帧到达 = 组字会话还活着（锚点未被破坏）。
-        //   撤稿恢复的延迟树同步必须取消 —— 此时重建就是 v3.0.14 的杀锚点病灶。
-        cancelDeferredTreeSync();
+        // 🔴🔴🔴 v3.0.17：comp=1 组字帧到达 = 锚点活着 → 解冻（口述内容照常进
+        //   模型）＋推迟重建到最后一次组字帧+窗口（原 v3.0.15/16 的「取消」在
+        //   语音停顿场景失效：停顿超窗 → 定时器到期重建 → 杀锚点 → 后续口述空转）。
+        holdDeferredTreeSync();
         // 🔴🔴 v3.0.12 治本：DOM 正在组字但 Lexical 内部未进入组字态（豆包只发
         //   insertCompositionText、不稳定发 compositionstart）⇒ 合成 compositionstart，
         //   让 Lexical 走全量插入路径，绕过孤儿 composition 分支（逐帧只读单锚点节点吞字）。
@@ -1883,10 +1902,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   （豆包整理=全选替换 ⇒ 跨段），并把当前正文本长度作为基准。compositionend
   //   清空 active，避免之后正常编辑被误判。两个都是 capture 被动监听，不拦截事件。
   const onComposeStartGuard = (): void => {
-    // 🔴🔴🔴 v3.0.15：真实组字会话开始 = 锚点活着（或刚建立新锚点）。
-    //   撤稿恢复的延迟树同步必须取消 —— 否则「cs 先于第一帧 comp=1 到达」的
+    // 🔴🔴🔴 v3.0.17：真实组字会话开始 = 锚点活着（或刚建立新锚点）。
+    //   撤稿恢复的延迟树同步必须推迟 —— 否则「cs 先于第一帧 comp=1 到达」的
     //   间隙里定时器触发重建，会杀掉新组字锚点（同 v3.0.14 病灶）。
-    cancelDeferredTreeSync();
+    holdDeferredTreeSync();
     syntheticCompose = false; // 真实 compositionstart 到了，交还，不再由我们维护
     const multi = ed.getEditorState().read(() => {
       const sel = $getSelection();

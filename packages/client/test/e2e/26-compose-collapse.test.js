@@ -244,17 +244,19 @@ test('COMPOSE-E2E-03 🔴🔴 塌方后组字恢复 ⇒ 树同步取消（绝不
     assert.ok(flight1.includes('gate:collapse'), '塌方判定必须留痕');
     assert.ok(!/gate:collapse[\s\S]*upd len=144/.test(flight1), '塌方后不得立即重建树（gate:collapse 之后不得出现 len=144 的重建 upd 帧）');
 
-    // 600ms 内组字恢复（comp=1 全量替换到 150）⇒ 取消树同步，文档追上组字串
+    // 组字恢复（comp=1 全量替换到 150）⇒ 解冻＋推迟重建（wd:hold），文档追上组字串
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(150));
     await page.waitForFunction(
       () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 150,
       null,
       { timeout: 5000 },
     );
-    await page.waitForTimeout(900); // 超过 600ms 窗口：cancel 生效则 wd:sync 永不触发
+    await page.waitForTimeout(1600); // 超过 1200ms 窗口：组字态还挂着 ⇒ wd:wait 顺延，重建绝不允许发生
     const flight2 = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
-    assert.ok(flight2.includes('wd:cancel'), '组字恢复帧必须取消延迟树同步（wd:cancel）');
+    assert.ok(flight2.includes('wd:hold'), '组字恢复帧必须解冻＋推迟重建（wd:hold）');
+    assert.ok(flight2.includes('wd:wait'), '窗口到期时组字态还活着必须顺延（wd:wait），不得重建');
     assert.ok(!flight2.includes('wd:sync'), '恢复后重建绝不允许发生（不得出现 wd:sync）');
+    assert.ok(!flight2.includes('wd:cancel'), 'v3.0.17 起组字帧不再走 cancel（旧标记不得出现）');
     const tree2 = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
     assert.equal(tree2, 150, `树必须追上组字串 150（不得被重建的 144 覆盖），实得 ${tree2}`);
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
@@ -263,7 +265,7 @@ test('COMPOSE-E2E-03 🔴🔴 塌方后组字恢复 ⇒ 树同步取消（绝不
   }
 });
 
-test('COMPOSE-E2E-04 🔴🔴 塌方后无恢复 ⇒ 600ms 后延迟重建（塌方前内容上屏兜底）', async () => {
+test('COMPOSE-E2E-04 🔴🔴 塌方后无恢复 ⇒ 1200ms 观察窗后延迟重建（塌方前内容上屏兜底）', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp04', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
@@ -279,15 +281,20 @@ test('COMPOSE-E2E-04 🔴🔴 塌方后无恢复 ⇒ 600ms 后延迟重建（塌
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.start());
 
     // 塌方帧，随后组字死亡（end = compositionend，与真机撤稿 comp=0 同语义）：
-    // 不发任何 comp=1 恢复帧，600ms 后必须重建
+    // 不发任何 comp=1 恢复帧，1200ms 窗口到期后必须重建。
+    // 🔴 900ms 时点先断言「尚未重建」——v3.0.16 的 600ms 窗口在此时点已重建
+    //（先红判据），v3.0.17 的 1200ms 窗口此时尚未到期。
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapse('被吞后的短文本'));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
 
     await page.waitForTimeout(900);
+    const flightEarly = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(!flightEarly.includes('wd:sync'), '1200ms 窗口内不得提前重建（900ms 时点 wd:sync 尚不应出现）');
+    await page.waitForTimeout(800); // 累计 1700ms > 1200ms 窗口
     const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
     assert.ok(flight.includes('wd:defer'), '塌方后必须调度延迟树同步（wd:defer）');
     assert.ok(flight.includes('wd:sync'), '超时无恢复必须执行延迟树同步（wd:sync）');
-    assert.ok(!flight.includes('wd:cancel'), '无恢复时不得出现 wd:cancel');
+    assert.ok(!flight.includes('wd:hold'), '无恢复时不得出现 wd:hold');
     const tree = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
     assert.ok(tree >= 142, `超时重建必须把塌方前内容上屏（树≈144），实得 ${tree}`);
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
