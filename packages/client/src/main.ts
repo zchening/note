@@ -163,6 +163,8 @@ declare global {
     __NOTESYNC_COMPOSE_TEST__?: {
       start: () => void;
       collapse: (short: string) => void;
+      /** v3.0.11 回归钩子：模拟豆包智能整理「只 insertCompositionText、不发 compositionstart」。 */
+      collapseNoStart: (short: string) => void;
       end: () => void;
       flightLines: () => string[];
       guardActive: () => boolean;
@@ -1725,6 +1727,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   compositionstart 处理器设置），不读 editor.isComposing() —— 因为塌方发生时
   //   Lexical 原生合成回灌已经把正文吞了，isComposing 真假都不影响判定。
   const composeGuard = new ComposeGuard();
+  // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
+  //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
+  //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
+  let lastBiIsComposing = false;
   // 🔴 上一篇的监听必须先解绑（见上面"为什么必须解绑"）。
   //   顺序不能反：先建新的再解旧的，中间那一瞬会没有任何门控。
   detachImeRef?.();
@@ -1735,6 +1741,26 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   const onFlightBI = (e: Event): void => {
     const ie = e as InputEvent;
     recordFlight('in:bi', (ie.inputType ?? '?') + ' d=' + (ie.data == null ? '-' : String(ie.data.length)));
+    // 🔴🔴 v3.0.11：从组字输入事件抽 isComposing，喂守卫激活（兜底 compositionstart 不发的情况）。
+    //   insertCompositionText 且 isComposing=true ⇒ 正处组字中；其余类型 ⇒ 退出组字态。
+    //   一旦捕获到跨段选区（全选替换），记进 multiBlock，极端塌方兜底之外的主判据路径才生效。
+    if (ie.inputType === 'insertCompositionText') {
+      lastBiIsComposing = !!ie.isComposing;
+      if (lastBiIsComposing && !composeGuard.isMultiBlock) {
+        const multi = ed.getEditorState().read(() => {
+          const sel = $getSelection();
+          if (!$isRangeSelection(sel) || sel.isCollapsed()) return false;
+          const aTop = sel.anchor.getNode().getTopLevelElement();
+          const fTop = sel.focus.getNode().getTopLevelElement();
+          return !!aTop && !!fTop && aTop.getKey() !== fTop.getKey();
+        });
+        composeGuard.noteComposingInput(multi);
+      } else if (lastBiIsComposing) {
+        composeGuard.noteComposingInput(false);
+      }
+    } else {
+      lastBiIsComposing = false;
+    }
   };
   const onFlightI = (e: Event): void => {
     const ie = e as InputEvent;
@@ -1755,10 +1781,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     });
     const len = docTextLen(lexicalToDoc(ed.getEditorState(), latestDoc.reminders ?? []));
     composeGuard.begin(multi, len);
+    lastBiIsComposing = true;
     recordFlight('cmp:start', 'mb=' + (multi ? 1 : 0) + ' len=' + len);
   };
   const onComposeEndGuard = (): void => {
     composeGuard.end();
+    lastBiIsComposing = false;
     recordFlight('cmp:end', '');
   };
   editorHost.addEventListener('beforeinput', onFlightBI, true);
@@ -2169,8 +2197,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   跨段组字串被收进 anchor、其余段落 DOM 被浏览器移除时，正文被整段吞掉，
     //   单帧 116→19，全程零 tree:* / gate:* —— 四道 IME 门控都没触发。
     //
-    //   判定：合成进行中（composeGuard.active，由 compositionstart 喂）+ 单帧
-    //   灾难性塌方（decideCollapseRestore）。命中即把真源回退到塌方前那帧
+    //   判定：合成进行中（composing，由输入事件流的 isComposing 驱动，兜底
+    //   editor.isComposing()；不再只靠 compositionstart，豆包智能整理常不发它）+
+    //   单帧灾难性塌方（decideCollapseRestore）。命中即把真源回退到塌方前那帧
     //   `before`（= 上一帧的 latestDoc = 峰值健康正文），并重建树，避免把损坏
     //   状态写回真源 / 推到远端。`return` 跳过后续对账/回灌（那些都是基于损坏
     //   exported 的，不应在此帧执行；重建会触发下一帧正常走完）。
@@ -2178,7 +2207,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   🔴 用 `before` 而非重新捕获峰值文本：before 就是塌方前最后一帧的健康
     //   真源，零额外开销、零内容泄漏（飞行记录器只记长度/哈希）。
     //   🔴 重建走 NOFX 标记：避免触发"整段改写会话窗口"把这次恢复又顺延掉。
-    const collapse = composeGuard.observe(newLen);
+    //
+    //   🔴🔴 v3.0.11：composing 由输入事件流的 isComposing 决定（lastBiIsComposing，从
+    //   beforeinput 的 insertCompositionText 抽到），并兜底 editor.isComposing()。
+    //   豆包智能整理常不发 compositionstart，故不能只靠 begin() 激活 —— 否则守卫永不触发
+    //   （v3.0.10 漏拦真因）。lastLen 每帧都在 observe 内维护，prevLen 始终为上一帧真实长度。
+    const composing = lastBiIsComposing || ed.isComposing() === true;
+    const collapse = composeGuard.observe(newLen, composing);
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
       latestDoc = before;
@@ -2327,6 +2362,27 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       editorHost.dispatchEvent(new CompositionEvent('compositionstart'));
     },
     collapse: (short: string): void => {
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode(short));
+        root.append(p);
+      });
+    },
+    // 🔴🔴 v3.0.11 回归钩子：模拟豆包智能整理「只发 insertCompositionText、不发 compositionstart」
+    //   的真实入口。先喂一个 isComposing=true 的 beforeinput（让 onFlightBI 把守卫激活），
+    //   再真实 ed.update 塌方。若守卫仍只靠 compositionstart 激活（v3.0.10 的缺陷），这条会红
+    //   —— 塌方后真源不回退、飞行日志无 gate:collapse。
+    collapseNoStart: (short: string): void => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: short,
+          isComposing: true,
+          bubbles: true,
+        } as InputEventInit),
+      );
       ed.update(() => {
         const root = $getRoot();
         root.clear();

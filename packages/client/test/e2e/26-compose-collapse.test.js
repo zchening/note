@@ -110,3 +110,93 @@ test('COMPOSE-E2E-01 🔴 合成中单帧塌方必须被守卫救回真源', asy
     await page.close();
   }
 });
+
+test('COMPOSE-E2E-02 🔴🔴 回归：无 compositionstart、仅 insertCompositionText 塌方也必须被守卫救回', async () => {
+  // v3.0.10 漏拦真因：豆包智能整理只发 insertCompositionText、不发 compositionstart，
+  // 守卫从不激活。这条用 collapseNoStart 钩子模拟该真实入口（含 isComposing=true 的
+  // beforeinput，但绝不发 compositionstart），验证守卫即便没收到 compositionstart 也能兜住塌方。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'cmp02', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    const base = '笔记内容测试文本';
+    const part1 = base.repeat(12);
+    const part2 = base.repeat(12);
+    await page.keyboard.type(part1, { delay: 5 });
+    await page.keyboard.press('Enter');
+    await page.keyboard.type(part2, { delay: 5 });
+
+    const typedLen = await page.evaluate(() => {
+      const d = window.__NOTESYNC_DOC__();
+      let n = 0;
+      const walk = (bs) => {
+        for (const b of bs ?? []) {
+          if (Array.isArray(b.spans)) for (const s of b.spans) n += s.t.length;
+          if (Array.isArray(b.title)) for (const s of b.title) n += s.t.length;
+          if (typeof b.text === 'string') n += b.text.length;
+          if (b.children) walk(b.children);
+        }
+      };
+      walk(d.blocks);
+      return n;
+    });
+    assert.ok(typedLen >= 110, `塌方前正文应 >=110 字，实得 ${typedLen}`);
+
+    // 全选（让 beforeinput 时选区跨块 ⇒ multiBlock=true），但**绝不发 compositionstart**
+    await page.keyboard.press('Control+A');
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.guardActive()),
+      false,
+      '未发 compositionstart 时守卫应处于未激活（v3.0.10 正因此漏拦）',
+    );
+
+    // 模拟豆包智能整理：仅 insertCompositionText（isComposing=true），不发 compositionstart
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapseNoStart('被吞后的短文本'));
+
+    // 守卫应在 update 监听里把真源回退到塌方前的字数（即便从未 compositionstart）
+    await withTimeout(
+      page.waitForFunction(
+        (want) => {
+          const d = window.__NOTESYNC_DOC__();
+          let n = 0;
+          const walk = (bs) => {
+            for (const b of bs ?? []) {
+              if (Array.isArray(b.spans)) for (const s of b.spans) n += s.t.length;
+              if (Array.isArray(b.title)) for (const s of b.title) n += s.t.length;
+              if (typeof b.text === 'string') n += b.text.length;
+              if (b.children) walk(b.children);
+            }
+          };
+          walk(d.blocks);
+          return n >= want - 2;
+        },
+        typedLen,
+        { timeout: 5000 },
+      ),
+      5000,
+      '守卫(无compositionstart)必须把真源从塌方态救回原字数',
+    );
+
+    const recoveredLen = await page.evaluate(() => {
+      const d = window.__NOTESYNC_DOC__();
+      let n = 0;
+      const walk = (bs) => {
+        for (const b of bs ?? []) {
+          if (Array.isArray(b.spans)) for (const s of b.spans) n += s.t.length;
+          if (Array.isArray(b.title)) for (const s of b.title) n += s.t.length;
+          if (typeof b.text === 'string') n += b.text.length;
+          if (b.children) walk(b.children);
+        }
+      };
+      walk(d.blocks);
+      return n;
+    });
+    assert.ok(recoveredLen >= typedLen - 2, `救回字数应≈塌方前（${typedLen}），实得 ${recoveredLen}`);
+
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('gate:collapse'), '飞行日志应含 gate:collapse（无 compositionstart 也触发）');
+    assert.ok(!flight.includes('cmp:start'), '本测试未发 compositionstart，飞行日志不应含 cmp:start');
+  } finally {
+    await page.close();
+  }
+});

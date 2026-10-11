@@ -18,9 +18,12 @@
  *   塌方前那帧（`before`），并重建树，避免把损坏状态写回真源 / 推到远端。
  *
  *   🔴 双保险触发条件（避免误伤正常打字）：
- *     ① 跨段合成（compositionstart 时选区跨多个顶层块，豆包整理=全选替换）；
+ *     ① 跨段合成（组字输入事件时选区跨多个顶层块，豆包整理=全选替换）；
  *     ② 极端的单帧塌方（即便没捕获到 compositionstart，丢字 >70% 且 prev 很大
  *        也兜住）。正常打字每帧只是几个字的增删，两类都碰不到。
+ * 🔴🔴 激活由输入事件流的 isComposing 驱动（beforeinput/input 的 isComposing，
+ *   含 compositionstart 与 insertCompositionText 两条路径），不再只靠 compositionstart
+ *   DOM 事件 —— 豆包智能整理常不发 compositionstart，v3.0.10 因此从不激活而漏拦。
  *
  * ── 判据纪律 ─────────────────────────────────────────────────────────────
  *   decideCollapseRestore 是纯函数，COMPOSE-01~06 钉它；ComposeGuard 状态机
@@ -87,8 +90,16 @@ export function decideCollapseRestore(opts: {
 }
 
 /**
- * 状态机：在 compositionstart 调 begin()，每次 update 调 observe(currentLen)，
- * compositionend 调 end()。observe 用「上一帧长度」做判定，再更新跟踪。
+ * 状态机：compositionstart 调 begin()，每个组字输入事件调 noteComposingInput()，
+ * 每次 update 调 observe(currentLen, composing)。observe 用「上一帧长度」做判定，
+ * 再更新跟踪。
+ *
+ * 🔴🔴 v3.0.11 修正（v3.0.10 漏拦真因）：激活不再只靠 compositionstart DOM 事件。
+ *   豆包「智能整理/精炼润色」常**只发 insertCompositionText、不发 compositionstart**，
+ *   导致 v3.0.10 的守卫从不激活 ⇒ 塌方被漏掉（用户侧仍丢字）。故 observe 的
+ *   composing 由**输入事件流的 isComposing** 决定（beforeinput/input 的 isComposing
+ *   可靠，v3.0.9 飞行日志证到 `in:i insertCompositionText comp=1`），且 lastLen
+ *   每帧都维护，漏掉 compositionstart 时 prevLen 依然正确。
  */
 export class ComposeGuard {
   private active = false;
@@ -101,11 +112,18 @@ export class ComposeGuard {
     this.cfg = cfg;
   }
 
+  /** compositionstart：捕获跨段标志 + 基准长度（豆包整理=全选替换）。 */
   begin(multiBlock: boolean, currentLen: number): void {
     this.active = true;
-    this.multiBlock = multiBlock;
+    this.multiBlock = this.multiBlock || multiBlock;
     this.lastLen = currentLen;
     this.restored = false;
+  }
+
+  /** 组字输入事件（insertCompositionText，常不发 compositionstart 时的兜底）：同样喂跨段标志。 */
+  noteComposingInput(multiBlock: boolean): void {
+    this.active = true;
+    this.multiBlock = this.multiBlock || multiBlock;
   }
 
   end(): void {
@@ -125,17 +143,28 @@ export class ComposeGuard {
     return this.restored;
   }
 
-  /** 每帧调一次：先用上一帧 lastLen 判定，再更新为当前帧长度。 */
-  observe(currentLen: number): CollapseDecision {
-    if (!this.active) return { restore: false, reason: 'inactive' };
+  /**
+   * 每帧调一次。
+   * @param composing 本次 update 是否处在组字中 —— 由输入事件流的 isComposing 决定，
+   *   不再只依赖 compositionstart DOM 事件（豆包智能整理常不发它，v3.0.10 因此漏拦）。
+   * 🔴 无论是否激活都维护 lastLen，使 prevLen 始终为上一帧真实长度，
+   *   漏掉 compositionstart 时也能正确判定单帧塌方。
+   */
+  observe(currentLen: number, composing: boolean): CollapseDecision {
+    const prevLen = this.lastLen;
+    this.lastLen = currentLen;
+    if (!composing) {
+      this.active = false;
+      return { restore: false, reason: 'not-composing' };
+    }
+    this.active = true;
     const dec = decideCollapseRestore({
       currentLen,
-      prevLen: this.lastLen,
+      prevLen,
       multiBlock: this.multiBlock,
       cfg: this.cfg,
     });
     if (dec.restore) this.restored = true;
-    this.lastLen = currentLen;
     return dec;
   }
 }
