@@ -1757,21 +1757,45 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   ⚠️ 这是同一闭包内的局部 timer：换笔记重挂载后旧 timer 随旧闭包废弃，
   //   不会跨笔记触发（回调里捕获的 ed/最新引用都是旧闭包自己的）。
   let deferredTreeSyncTimer: ReturnType<typeof setTimeout> | null = null;
-  const cancelDeferredTreeSync = (): void => {
-    if (deferredTreeSyncTimer == null) return;
-    clearTimeout(deferredTreeSyncTimer);
-    deferredTreeSyncTimer = null;
-    recordFlight('wd:cancel', '');
-  };
-  const scheduleDeferredTreeSync = (info: string): void => {
+  // 🔴🔴🔴 v3.0.16：延迟同步窗口内**冻结「树→模型」常规同步**。探针实测（e2e
+  //   E2E-01/04 破案）：塌方判定帧落账 before 之后，紧跟着的塌方残留帧（树=短串）
+  //   会走常规 reconcile 把 latestDoc/latestDocRef **覆盖成残串** —— 600ms 后
+  //   wd:sync 重建的就是残串，峰值内容照样丢。冻结规则：schedule 置位 → cancel
+  //   （组字恢复帧）或 wd:sync 执行时解除。解除后第一帧恢复常规同步（模型=树
+  //   =组字串，新口述优先），语义正确。
+  let wdFreeze = false;
+  /** 观察窗基线：判定/重置时刻的树长。到期时树**变长**了 = 窗口内有新内容写入
+   *  （用户切键盘手动打字 —— insertText 不走 cancel 通道），树内容是用户最新
+   *  意图，绝不能重建抹掉；只解冻让常规同步接管。变短/不变 = 塌方收尾或无写入
+   *  = 正常兜底重建。 */
+  let deferTreeLen = 0;
+  const armDeferredSync = (): void => {
     if (deferredTreeSyncTimer != null) clearTimeout(deferredTreeSyncTimer);
-    recordFlight('wd:defer', info);
+    deferTreeLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
     deferredTreeSyncTimer = setTimeout(() => {
       deferredTreeSyncTimer = null;
+      wdFreeze = false;
+      const nowLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
+      if (nowLen > deferTreeLen) {
+        recordFlight('wd:sync', 'skip len=' + nowLen);
+        return;
+      }
       const doc = latestDocRef;
       recordFlight('wd:sync', doc == null ? 'no-doc' : '');
       if (doc != null) ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG });
     }, 600);
+  };
+  const cancelDeferredTreeSync = (): void => {
+    if (deferredTreeSyncTimer == null) return;
+    clearTimeout(deferredTreeSyncTimer);
+    deferredTreeSyncTimer = null;
+    wdFreeze = false;
+    recordFlight('wd:cancel', '');
+  };
+  const scheduleDeferredTreeSync = (info: string): void => {
+    wdFreeze = true;
+    recordFlight('wd:defer', info);
+    armDeferredSync();
   };
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
@@ -2384,14 +2408,31 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   豆包智能整理常不发 compositionstart，故不能只靠 begin() 激活 —— 否则守卫永不触发
     //   （v3.0.10 漏拦真因）。lastLen 每帧都在 observe 内维护，prevLen 始终为上一帧真实长度。
     const composing = lastBiIsComposing || ed.isComposing() === true;
+    // 🔴🔴🔴 v3.0.16：观察窗内组字态下的写入（塌方延续帧——判定帧后 root.clear
+    //   与插入分多帧 flush、或组字帧）= 锚点/组字还活着的证据 → 重置观察窗：
+    //   组字死亡（compositionend/comp=0）后重新倒数 600ms，deferTreeLen 吸收
+    //   延续帧树长，避免到期时把塌方自身的多帧过程误判成「树被外部改动」而 skip。
+    //   comp=1 组字帧已在 onFlightBI cancel（timer==null 则此处自然跳过）。
+    if (deferredTreeSyncTimer != null && composing) {
+      armDeferredSync();
+      recordFlight('wd:defer', 'reset len=' + deferTreeLen);
+    }
     const collapse = composeGuard.observe(newLen, composing);
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
       latestDoc = before;
       latestDocRef = before;
-      ed.update(() => {
-        docToLexical(before);
-      }, { tag: EGG_NOFX_TAG });
+      // 🔴🔴🔴 v3.0.16：与 wd restore（v3.0.15）同款——**绝不能在这里立即
+      //   docToLexical 重建**。v3.0.15 真机日志钉死：撤稿/塌方判定后浏览器侧
+      //   组字常常还活着（synthed=0、comp=1 每帧都来），立即重建杀死组字锚点
+      //   ⇒ 后续组字帧全部模型空转（upd len=5 d=0 冻结、组字串 d=260→279
+      //   增长 6.4s+，用户继续口述一字进不了文档）。v3.0.15 只修了 wd 路径
+      //   （真机 gate=24 = collapse 17 + wd 7）——**collapse 路径的 17 次立即
+      //   重建仍在杀锚点**（豆包重识别修订的大幅掉幅帧 comp=1 走 collapse、
+      //   此时组字活着）。改为同款延迟同步：600ms 内 comp=1 组字帧 ⇒ 取消
+      //   （锚点未破坏，输入法全量串替换让文档追上组字串）；超时 ⇒ 组字真死，
+      //   重建 before 安全（塌方前内容上屏兜底）。
+      scheduleDeferredTreeSync('peak=' + prevLen + ' cur=' + newLen);
       return;
     }
     // 🔴🔴 v3.0.12：组字中本帧"部分欠插"（未达到塌方阈值）也量化，确认合成
@@ -2423,10 +2464,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     }
 
     const rec = reconcileReminders(exported);
-    latestDoc = rec.doc;
-    // 🔴 诊断面板的真源引用（见 latestDocRef 的注释）。必须在对账**之后**赋值：
-    //   对账可能增删提醒，赋早了会让诊断第 8 组的 rem/future 少算刚变动的那几条。
-    latestDocRef = rec.doc;
+    // 🔴🔴🔴 v3.0.16：延迟同步窗口内冻结「树→模型」常规同步 —— 塌方/撤稿判定
+    //   落账的 before/peakDoc 绝不能被紧跟着的残留短串帧覆盖（探针实测：塌方
+    //   第二帧 len=7 覆盖落账 ⇒ wd:sync 重建残串，峰值照样丢）。冻结在 cancel
+    //   （组字恢复，模型=树=组字串，新口述优先）或 wd:sync（重建完成）时解除。
+    if (!wdFreeze) {
+      latestDoc = rec.doc;
+      // 🔴 诊断面板的真源引用（见 latestDocRef 的注释）。必须在对账**之后**赋值：
+      //   对账可能增删提醒，赋早了会让诊断第 8 组的 rem/future 少算刚变动的那几条。
+      latestDocRef = rec.doc;
+    }
     shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);
 
     // 对账可能改了 rem 标记（正文没变但标记变了）→ 此时必须把结果写回编辑器，
