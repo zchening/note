@@ -1832,6 +1832,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   const scheduleDeferredTreeSync = (info: string, peakLen: number): void => {
     wdFreeze = true;
     stallCount = 0;
+    stallPrevTreeLen = -1;
     deferPeakLen = peakLen;
     recordFlight('wd:defer', info);
     armDeferredSync();
@@ -1842,6 +1843,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  ——下一轮真机日志靠它钉死锚点死亡根因（宿主杀 vs 我方杀）。 */
   let lastBiDataLen = 0;
   let stallCount = 0;
+  /** 🔴🔴🔴 v3.0.19：上一组字帧的树长（静止判定基准）。空转=树长**纹丝不动**
+   *  （连续帧同值）才计数；树长在变（撤稿后锚点活着、全量替换逐帧追）绝不
+   *  计——防「串远长于树但正在追上」的追帧场景误 reboot 杀活锚点。 */
+  let stallPrevTreeLen = -1;
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -2466,45 +2471,61 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   推迟。树长真涨了（组字写入成功）→ 解冻让模型=树（口述进模型）；树长
     //   不动且组字串远长于文档 → 锚点已死（宿主撤稿杀/僵尸组字），写入全空转
     //   → 保持冻结（peakDoc 不被残串覆盖）＋连续 4 帧记 wd:dead 取证。
-    if (deferredTreeSyncTimer != null && composing) {
+    // 🔴🔴🔴 v3.0.19：空转检测**解耦延迟同步机制**（真机 v3.0.18 尾段实锤盲区）：
+    //   判定帧（gate=30，ring 之外更早时段）触发延迟同步，1200ms 窗口到期 wd:sync
+    //   重建收尾（timer=null）之后锚点再死 —— 组字帧全程空转（upd len=23 d=0
+    //   冻结、组字串 d=153→169 增长 8.6s+、整段 400 条无任何 wd: 帧、synthed=0
+    //   = Lexical 组字态整场 true 但锚点已没）。v3.0.18 检测挂在 timer!=null
+    //   前提下，机制收尾后永远不跑。改为组字态下**全程监测**：composing &&
+    //   组字串远长于文档 && 树长**纹丝不动**（连续 4 帧同值，防「追帧」误判：
+    //   撤稿后锚点活着时全量替换逐帧追、树长帧帧在变）⇒ wd:dead 取证 +
+    //   wd:reboot 自愈（强制 ce + 重建 latestDocRef），机制激活与否无关。
+    if (composing) {
       const treeLenNow = ed.getEditorState().read(() => $getRoot().getTextContent().length);
-      // 🔴🔴🔴 v3.0.18：解冻锚 = 会话峰值（deferPeakLen）。树长涨过基线不够——
-      //   合成 cs 重开组字会话的锚点重建副作用能让树长 +1（WD-E2E-05 探针实测
-      //   误解冻 → peakDoc 被残串覆盖）。涨过峰值才是组字恢复写入成功的真证据。
-      if (treeLenNow > deferPeakLen) {
-        wdFreeze = false;
-        stallCount = 0;
-      } else if (lastBiDataLen > treeLenNow + 12) {
-        stallCount += 1;
-        if (stallCount === 4) {
-          stallCount = 0;
-          recordFlight('wd:dead', 'len=' + treeLenNow + ' d=' + lastBiDataLen);
-          // 🔴🔴🔴 v3.0.18 自愈：锚点确认死亡（4 帧空转 + 组字串远长于文档）
-          //   → 强制结束死会话（合成 compositionend，绕 ensureSyntheticComposeEnd
-          //   的 syntheticCompose 闸——死会话可能是真 cs 开的）+ 重建 peakDoc。
-          //   下一帧 comp=1 到达时 ed.isComposing()=false → 孤儿分支合成
-          //   compositionstart → 新组字会话走全量插入路径 → 实时流自愈恢复
-          //   （v3.0.12 已真机验证的恢复通道）。判定帧已落账 peakDoc
-          //   （latestDocRef）；ce 的残串 commit 期间 wdFreeze 仍为 true，
-          //   模型不被残串覆盖；重建后树=peakDoc，涨过 deferPeakLen 的
-          //   新写入照常解冻。延迟同步 timer 保持活着：新会话再死可再次
-          //   检出（自愈循环），组字静默则 wd:sync 到期重建兜底。
-          //   setTimeout：脱离当前 update flush 再派发 DOM 事件 / 动树，
-          //   避免嵌套 flush。
-          setTimeout(() => {
-            recordFlight('wd:reboot', '');
-            clearSyntheticComposeTimer();
-            editorHost.dispatchEvent(new CompositionEvent('compositionend'));
-            syntheticCompose = false;
-            const doc = latestDocRef;
-            if (doc != null) {
-              ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
-            }
-          }, 0);
+      if (lastBiDataLen > treeLenNow + 12) {
+        if (treeLenNow === stallPrevTreeLen) {
+          stallCount += 1;
+          if (stallCount === 4) {
+            stallCount = 0;
+            recordFlight('wd:dead', 'len=' + treeLenNow + ' d=' + lastBiDataLen);
+            // 🔴🔴🔴 v3.0.18 自愈：锚点确认死亡（4 帧空转 + 组字串远长于文档）
+            //   → 强制结束死会话（合成 compositionend，绕 ensureSyntheticComposeEnd
+            //   的 syntheticCompose 闸——死会话可能是真 cs 开的）+ 重建
+            //   latestDocRef（机制激活时=peakDoc 落账；未激活时=最新落账模型）。
+            //   下一帧 comp=1 到达时 ed.isComposing()=false → 孤儿分支合成
+            //   compositionstart → 新组字会话走全量插入路径 → 实时流自愈恢复
+            //   （v3.0.12 已真机验证的恢复通道）。ce 的 commit 期间 wdFreeze
+            //   若为 true 则模型不被残串覆盖；机制激活时 timer 保持活着（新会话
+            //   再死可再次检出，组字静默则 wd:sync 到期兜底）。setTimeout：
+            //   脱离当前 update flush 再派发 DOM 事件 / 动树，避免嵌套 flush。
+            setTimeout(() => {
+              recordFlight('wd:reboot', '');
+              clearSyntheticComposeTimer();
+              editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+              syntheticCompose = false;
+              const doc = latestDocRef;
+              if (doc != null) {
+                ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
+              }
+            }, 0);
+          }
+        } else {
+          stallCount = 1;
         }
+      } else {
+        stallCount = 0;
       }
-      armDeferredSync();
-      recordFlight('wd:defer', 'reset len=' + deferTreeLen);
+      stallPrevTreeLen = treeLenNow;
+      if (deferredTreeSyncTimer != null) {
+        // 🔴🔴🔴 v3.0.18：解冻锚 = 会话峰值（deferPeakLen）。树长涨过基线不够——
+        //   合成 cs 重开组字会话的锚点重建副作用能让树长 +1（WD-E2E-05 探针实测
+        //   误解冻 → peakDoc 被残串覆盖）。涨过峰值才是组字恢复写入成功的真证据。
+        if (treeLenNow > deferPeakLen) {
+          wdFreeze = false;
+        }
+        armDeferredSync();
+        recordFlight('wd:defer', 'reset len=' + deferTreeLen);
+      }
     }
     const collapse = composeGuard.observe(newLen, composing);
     if (collapse.restore) {

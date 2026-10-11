@@ -260,3 +260,54 @@ test('WD-E2E-05 🔴🔴 锚点死亡自愈：4 帧空转 ⇒ wd:reboot 结束�
     await page.close();
   }
 });
+
+// ── v3.0.19：空转检测解耦延迟同步机制（真机 v3.0.18 尾段实锤盲区）──────────
+//   v3.0.18 真机：判定帧（gate=30）在 ring 之外更早时段、1200ms 窗口到期
+//   wd:sync 重建收尾（timer=null）之后锚点再死——组字帧全程空转（upd len=23
+//   d=0 冻结、组字串 d=153→169 增长 8.6s+、整段 400 条无任何 wd: 帧）。
+//   v3.0.18 检测挂在 timer!=null 前提下，机制收尾后永远不跑。
+//   ⚠️ 静止判定（v3.0.19）：树长必须**纹丝不动**（连续帧同值）才计数——
+//   撤稿后锚点活着时全量替换逐帧追（树长帧帧在变）绝不 reboot 杀活锚点。
+test('WD-E2E-06 🔴🔴 机制收尾后锚点死亡：空转 4 帧必须仍触发 wd:dead＋wd:reboot（盲区闸）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde06', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 组字会话到峰值 108（分两次 evaluate——形状纪律）
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+    // 撤稿判定后**不喂任何组字帧**：1200ms 窗口到期 → wd:sync 重建 → 机制收尾
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.withdrawTo(13));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:sync'),
+      null,
+      { timeout: 8000 },
+    );
+    await page.waitForTimeout(300); // 让 wd:sync 的重建 flush 落定（timer=null、wdFreeze=false）
+    // 锚点死亡模拟（机制之外）：组字帧（串 200 远长于树 108）持续到达但树长
+    //   纹丝不动。逐帧节拍，第 4 帧应触发 wd:dead + wd:reboot。
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:reboot'),
+      null,
+      { timeout: 5000 },
+    );
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:sync'), '前置：机制必须先收尾（wd:sync 重建后 timer=null）');
+    assert.ok(flight.includes('wd:dead len=108 d=200'), '🔴 机制收尾后的空转必须仍留 wd:dead 取证（盲区检测）');
+    assert.ok(flight.includes('wd:reboot'), '🔴 机制收尾后的死亡确认必须仍触发 wd:reboot 自愈');
+    const tree = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
+    assert.equal(tree, 108, `reboot 必须把落账内容重建上屏（树=108），实得 ${tree}`);
+    const doc = await textLen(page);
+    assert.equal(doc, 108, `真源必须保持 108 不被残串覆盖，实得 ${doc}`);
+  } finally {
+    await page.close();
+  }
+});
