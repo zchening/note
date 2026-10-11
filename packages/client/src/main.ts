@@ -1847,6 +1847,14 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  （连续帧同值）才计数；树长在变（撤稿后锚点活着、全量替换逐帧追）绝不
    *  计——防「串远长于树但正在追上」的追帧场景误 reboot 杀活锚点。 */
   let stallPrevTreeLen = -1;
+  /** 🔴🔴🔴 v3.0.20：上次 wd:reboot 时刻（冷却判定）。真机 v3.0.19 实测：宿主
+   *  InputConnection 视图错位时 reboot 会震荡循环——reboot 重建 111 → 宿主视图
+   *  仍停留 14 字残串 → 下一个组字帧按旧视图把树打回 14（upd len=14 d=-97 每帧
+   *  重复）→ 判定 → 4 帧空转 → 再 reboot，口述不停则每 ~500ms 一轮。冷却期内
+   *  只记 dead 取证不再 reboot（skip cooldown），把风暴频率压到 2s 一轮；重连
+   *  若成功（树长恢复增长）自然不再触发。 */
+  let wdRebootAt = 0;
+  const WD_REBOOT_COOLDOWN_MS = 2000;
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -2499,14 +2507,29 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             //   再死可再次检出，组字静默则 wd:sync 到期兜底）。setTimeout：
             //   脱离当前 update flush 再派发 DOM 事件 / 动树，避免嵌套 flush。
             setTimeout(() => {
-              recordFlight('wd:reboot', '');
-              clearSyntheticComposeTimer();
-              editorHost.dispatchEvent(new CompositionEvent('compositionend'));
-              syntheticCompose = false;
-              const doc = latestDocRef;
-              if (doc != null) {
-                ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
-              }
+            const nowMs = Date.now();
+            if (nowMs - wdRebootAt < WD_REBOOT_COOLDOWN_MS) {
+              recordFlight('wd:reboot', 'skip cooldown');
+              return;
+            }
+            wdRebootAt = nowMs;
+            recordFlight('wd:reboot', 'reconn');
+            clearSyntheticComposeTimer();
+            editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+            syntheticCompose = false;
+            const doc = latestDocRef;
+            if (doc != null) {
+              ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
+            }
+            // 🔴🔴🔴 v3.0.20：宿主 InputConnection 视图错位对齐——真机 v3.0.19
+            //   钉死：docToLexical 是程序化动树，宿主侧文档视图仍停留在 14 字
+            //   残串状态，reboot 重建 111 后每个组字帧都按旧视图操作把树打回
+            //   14（upd len=14 d=-97 每帧重复）。blur/focus 强迫宿主重启输入
+            //   连接、重新 extract 全文（视图对齐重建后的内容），新组字会话
+            //   才有正确基座。间隔 50ms：同步连调会被 WebView 合并成一次无
+            //   效果的状态变化。
+            editorHost.blur();
+            setTimeout(() => { editorHost.focus(); }, 50);
             }, 0);
           }
         } else {

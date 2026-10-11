@@ -311,3 +311,71 @@ test('WD-E2E-06 🔴🔴 机制收尾后锚点死亡：空转 4 帧必须仍触�
     await page.close();
   }
 });
+
+// ── v3.0.20：reboot 重连宿主输入连接＋冷却期 ───────────────────────────────
+//   真机 v3.0.19 日志钉死：reboot 重建 111 后下一个组字帧把树打回 14
+//   （upd len=14 d=-97 每帧重复）——docToLexical 是程序化动树，宿主侧
+//   InputConnection 文档视图仍停留在 14 字残串状态。reboot 后必须
+//   blur/focus 强迫宿主重启输入连接、重新 extract 全文（视图对齐）；
+//   重连若无效则空转循环（~500ms 一轮），冷却 2s 压制风暴。
+test('WD-E2E-07 🔴🔴 reboot 必须重连宿主（blur/focus 真实派发）＋冷却期不重复 reboot', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde07', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 🔴 blur/focus 计数器挂在 editorHost 上（真机宿主=Android InputConnection，
+    //   桌面等价物=contenteditable 焦点变化——DOM 事件真实派发才可断言）
+    await page.evaluate(() => {
+      window.__nsBlurCount = 0;
+      window.__nsFocusCount = 0;
+      const host = document.getElementById('editor-host');
+      host.addEventListener('blur', () => { window.__nsBlurCount += 1; });
+      host.addEventListener('focus', () => { window.__nsFocusCount += 1; });
+    });
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.withdrawTo(13));
+    // 等机制收尾（wd:sync、timer=null）——WD-E2E-06 同款前置
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:sync'),
+      null,
+      { timeout: 8000 },
+    );
+    await page.waitForTimeout(300);
+    // 第一组空转 4 帧 → wd:dead → wd:reboot（带 blur/focus 重连）
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:reboot reconn'),
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(200); // blur 同步派发；focus 在 +50ms
+    const counts = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
+    assert.ok(counts.blur >= 1 && counts.focus >= 1, `🔴🔴 reboot 必须重连宿主输入连接（blur/focus 各至少 1 次），实得 blur=${counts.blur} focus=${counts.focus}`);
+    // 第二组空转（冷却 2s 内）⇒ 第二次 dead 后 reboot 必须被冷却拦下
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('skip cooldown'),
+      null,
+      { timeout: 5000 },
+    );
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:dead len=108 d=200'), '前置：机制外空转必须仍触发 wd:dead');
+    assert.ok(flight.includes('wd:reboot reconn'), '首次死亡确认必须 reboot＋重连');
+    assert.ok(flight.includes('wd:reboot skip cooldown'), '🔴 冷却期内的死亡确认必须拦下 reboot（防震荡风暴）');
+    const tree = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
+    assert.equal(tree, 108, `reboot 重建后树必须=108，实得 ${tree}`);
+  } finally {
+    await page.close();
+  }
+});
