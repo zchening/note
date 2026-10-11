@@ -21,6 +21,8 @@
 - [ ] 涉及动效 / canvas ⇒ 读 `docs/replication-discipline.md` §10（canvas 不解析
       `var()`、emoji 按码元取会断代理对、金点不能带重力 —— 三条都静默失效）
 - [ ] 涉及架构/不变量 ⇒ 读 `ARCH.md` 对应章节（§4 冻结决定、§5 五条红线、§6 安全不变量）
+- [ ] 动 `merge.ts` 的 LCS ⇒ 预算是**两档**且语义不同：TOP 64M 格管顶层全量对齐（调小会把
+      大而合法的合并误杀成冲突，不变量-3 是哨兵），CHUNK 16M 格管两侧相异的簇（这才是 OOM 真凶）
 
 ## 环境
 
@@ -29,7 +31,7 @@
 NODE="C:/Users/zchen/.workbuddy/binaries/node/versions/22.22.2-6/node.exe"
 
 cd D:/Users/zchen/Documents/TraeProject/notesync-bj
-"$NODE" node_modules/typescript/bin/tsc --noEmit -p tsconfig.json   # typecheck
+"$NODE" node_modules/typescript/bin/tsc --noEmit -p tsconfig.json   # typecheck（根配置；mcp/server 另有 tsconfig.mcp/server.json，一键 `npm run typecheck` 三个全跑）
 "$NODE" tools/build.mjs                                              # 产物 → www/
 cd packages/client && "$NODE" --test test/*.test.mjs                 # 单测
 "$NODE" --test --test-concurrency=6 test/e2e/*.test.js               # e2e（约 3 分钟）
@@ -51,7 +53,7 @@ cd D:/Users/zchen/Documents/WorkBuddyProject/NoteSync
 - 🔴🔴 **部署网页只跑 `_bj_deploy_web.py`，绝不再跑 `_bj_deploy3.py`**：deploy3 是 S7-b **初次搭建**的第三步，其第 2/6 步是 `rmdir /s /q C:\Services\NoteSyncBj\data` —— **它会删掉生产数据**（笔记密文、街机档案、`wk-mode.txt` 写入凭据闸档位）。`wk-mode.txt` 一没，凭据闸静默从 `full` 退回 `off`（安全回归，且不报错）。`_bj_deploy_web.py` 只替换 `www/` 与服务端源码，`data/` 一字节不动（2026-10-08 v3.0.0 实跑并自证 `data/notes` 非空）。
 - 服务在 **8090**（不是老项目的 8080），数据目录 `C:\Services\NoteSyncBj\data`
 - 部署后必查：`/healthz` 的 `version` 等于刚 bump 的值；`/api/upsign` **POST** 返 200（它是 POST-only，GET 本就 404，别误判成故障）
-- 🔴 **新增服务端文件必须同步加进上传清单**（`_bj_deploy_web.py` 里 `("server.js","failmap.js","guards.js","upsign.js")`），漏了就是 ESM 找不到模块、服务起不来
+- 🔴 **新增服务端文件必须同步加进上传清单**（`_bj_deploy_web.py` 里 `("server.js","failmap.js","guards.js","upsign.js","net-ip.js")`），漏了就是 ESM 找不到模块、服务起不来
 - 🔴 **新增静态资源子目录**（如 `.well-known/`、`icons/`）要确认两处都放行：`_bj_deploy_web.py` 用 `os.walk` 递归上传；`build.mjs` 的"跳过点文件"过滤器要放行 `.well-known`（否则文件在仓库里、产物里没有、线上 404 而构建日志正常）
 - 凭据：SSH 走 `~/.ssh/notesync_deploy`（ed25519），脚本里不出现密码
 
@@ -60,7 +62,7 @@ cd D:/Users/zchen/Documents/WorkBuddyProject/NoteSync
 APK 不在本机出，全部由 `.github/workflows/build-apk.yml` 完成。手打 `gradlew assembleRelease` 只在本地调试时用，**发版一律走 CI**，否则本地签名/版本号/OTA 元数据三者容易不一致。
 
 - **触发**：`git tag vX.Y.Z && git push origin <tag>`（tag 推送）；或 `gh workflow run build-apk.yml -R zchening/note`（手动，版本号取 `package.json`）。
-- **三作业**：`test`（单测闸，不绿不出包） → `build`（JDK21 + 签名出 `app-release.apk`） → `deploy`（腾讯云 OTA + GitHub Releases）。
+- **三作业**：`test`（单测 + e2e 子集〔01 往返/03 同步〕+ 首屏闸 + 三端版本一致性，不绿不出包） → `build`（JDK21 + 签名出 `app-release.apk`） → `deploy`（腾讯云 OTA + GitHub Releases）。
 - **两发布目标同进同退**：`deploy` 作业先上传腾讯云并线上校验通过，最后才发 GitHub Release —— 两处不会一处新一处旧。
 - 🔴 **版本号唯一真源 = `package.json`**：tag 名 / APK `versionName` / OTA `tag_name` / Release 名全部从它派生；`build.mjs` 删静态资源必须同步删 `STATIC_REQUIRED` 清单，否则 CI 的 build 直接 `exit 1`（v1.13.1 曾因此红过一次）。
 - 🔴 **发版前必须写 `releases/<tag>.md`**（第三个同步点，漏了 CI 直接红）：App「检查更新」弹窗里那几行更新要点**只**来自这份文件（经 `latest_app.json` 的 `summary`），它同时是 GitHub Release 页正文。上限 **4 条 / 每条 24 字**、项目符号只能 `-`、不许出现链接或 `compare/` 行。规则权威在 `tools/release-notes.mjs`，CI `test` 作业跑 `tools/check-release-notes.mjs`，`push_bj_apk.py` 里还有一道硬失败（它可能被单独手动调用）。格式见 `releases/README.md`。
