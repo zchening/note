@@ -174,6 +174,10 @@ declare global {
       growTo: (n: number) => void;
       /** v3.0.14 回归钩子：模拟撤稿帧（comp=0 替换到 n 字，组字态转假）。 */
       withdrawTo: (n: number) => void;
+      /** v3.0.15 回归钩子：读**编辑器树**的文本长度（区别于真源 latestDoc）。
+       *  撤稿恢复的「树延迟同步」只能靠它钉住：模型落账是即时的，树有没有被
+       *  重建 / 有没有被杀锚点，只有读树才知道。 */
+      treeTextLen: () => number;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1740,6 +1744,35 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   单帧灾难性模型全盲（collapse 不增、drop 低于阈值、最终只剩第一句）。
   //   见 compose-guard.ts WithdrawGuard 注释。与 composeGuard 同一调用点喂帧。
   const withdrawGuard = new WithdrawGuard();
+  // 🔴🔴🔴 v3.0.15：撤稿恢复的「模型先落账、树延迟同步」。
+  //   v3.0.14 真机日志（第二份）实测钉死：撤稿判定后浏览器侧组字常常还活着
+  //   （synthed=0、comp=1 每帧都来 —— Lexical 内部组字态整场未断），立即
+  //   docToLexical 重建会**杀死组字锚点**：锚点节点被销毁后，后续每帧
+  //   insertCompositionText 全部模型空转（upd len=9 d=0 冻结、组字串
+  //   d=77→93 持续增长 3.5s+），用户继续口述的内容一个字都进不了文档。
+  //   改为：撤稿帧只写模型（peakDoc），树同步延迟 600ms ——
+  //     - 期间任何 comp=1 组字帧 ⇒ cancelDeferredTreeSync()：锚点从未被
+  //       破坏，输入法的全量串替换会让文档自动追上组字串，口述继续落地；
+  //     - 超时仍无组字帧 ⇒ 组字真死了，此时重建安全（峰值内容上屏兜底）。
+  //   ⚠️ 这是同一闭包内的局部 timer：换笔记重挂载后旧 timer 随旧闭包废弃，
+  //   不会跨笔记触发（回调里捕获的 ed/最新引用都是旧闭包自己的）。
+  let deferredTreeSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancelDeferredTreeSync = (): void => {
+    if (deferredTreeSyncTimer == null) return;
+    clearTimeout(deferredTreeSyncTimer);
+    deferredTreeSyncTimer = null;
+    recordFlight('wd:cancel', '');
+  };
+  const scheduleDeferredTreeSync = (info: string): void => {
+    if (deferredTreeSyncTimer != null) clearTimeout(deferredTreeSyncTimer);
+    recordFlight('wd:defer', info);
+    deferredTreeSyncTimer = setTimeout(() => {
+      deferredTreeSyncTimer = null;
+      const doc = latestDocRef;
+      recordFlight('wd:sync', doc == null ? 'no-doc' : '');
+      if (doc != null) ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG });
+    }, 600);
+  };
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -1762,6 +1795,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (ie.inputType === 'insertCompositionText') {
       lastBiIsComposing = !!ie.isComposing;
       if (lastBiIsComposing) {
+        // 🔴🔴🔴 v3.0.15：comp=1 组字帧到达 = 组字会话还活着（锚点未被破坏）。
+        //   撤稿恢复的延迟树同步必须取消 —— 此时重建就是 v3.0.14 的杀锚点病灶。
+        cancelDeferredTreeSync();
         // 🔴🔴 v3.0.12 治本：DOM 正在组字但 Lexical 内部未进入组字态（豆包只发
         //   insertCompositionText、不稳定发 compositionstart）⇒ 合成 compositionstart，
         //   让 Lexical 走全量插入路径，绕过孤儿 composition 分支（逐帧只读单锚点节点吞字）。
@@ -1823,6 +1859,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   （豆包整理=全选替换 ⇒ 跨段），并把当前正文本长度作为基准。compositionend
   //   清空 active，避免之后正常编辑被误判。两个都是 capture 被动监听，不拦截事件。
   const onComposeStartGuard = (): void => {
+    // 🔴🔴🔴 v3.0.15：真实组字会话开始 = 锚点活着（或刚建立新锚点）。
+    //   撤稿恢复的延迟树同步必须取消 —— 否则「cs 先于第一帧 comp=1 到达」的
+    //   间隙里定时器触发重建，会杀掉新组字锚点（同 v3.0.14 病灶）。
+    cancelDeferredTreeSync();
     syntheticCompose = false; // 真实 compositionstart 到了，交还，不再由我们维护
     const multi = ed.getEditorState().read(() => {
       const sel = $getSelection();
@@ -2370,9 +2410,15 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       const peakDoc = wd.doc as Doc;
       latestDoc = peakDoc;
       latestDocRef = peakDoc;
-      ed.update(() => {
-        docToLexical(peakDoc);
-      }, { tag: EGG_NOFX_TAG });
+      // 🔴🔴🔴 v3.0.15：**绝不能在这里立即 docToLexical 重建**。v3.0.14 真机日志
+      //   （wd=2 + 尾段 len=9 d=0 冻结、组字串 d=192→208 仍在增长）实测：撤稿后
+      //   浏览器侧组字常常还活着（comp=1 每帧都来），立即重建会**杀死组字锚点**
+      //   —— Lexical 组字键指向已销毁节点，后续每帧组字变成模型空转，用户继续
+      //   口述的字一个都进不了文档。改为「模型先落账、树延迟同步」：
+      //     600ms 内 comp=1 帧恢复 ⇒ 取消树同步（锚点从未被破坏，输入法的全量
+      //       串替换会让文档自动追上组字串，口述继续落地）；
+      //     超时仍无组字帧 ⇒ 组字真死了，此时重建安全（回写峰值内容上屏）。
+      scheduleDeferredTreeSync('peak=' + wd.peakLen + ' cur=' + wd.currentLen);
       return;
     }
 
@@ -2605,6 +2651,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     },
     flightLines: (): string[] => flightLines(),
     guardActive: (): boolean => composeGuard.isActive,
+    treeTextLen: (): number => ed.getEditorState().read(() => $getRoot().getTextContent().length),
   };
   window.__NOTESYNC_INSERT_FOLD__ = () => {
     if (ed) insertFoldAtCaret(ed);
