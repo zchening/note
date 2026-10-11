@@ -221,9 +221,32 @@ export function registerLinkify(editor: LexicalEditor, deps: LinkifyDeps): Linki
     schedule(FIRST_DELAY_MS);
   };
 
+  /**
+   * 🔴🔴 组字中**失焦即复位**（照抄 egg/word-trigger.ts:262 的 `onBlur`）。
+   *
+   * 为什么必须有这一条：组字过程中点走 / 切窗 / 切进程 ⇒ 浏览器**不派发**
+   * `compositionend`（组字目标节点被 detach 时尤其如此 —— word-trigger.ts:246
+   * 的注释记的是同一个故障）。只靠 compositionend 复位的话，`isComposing`
+   * 会**永久卡在 true** ⇒ `run()` 开头那行 `if (isComposing) return` 从此
+   * 每次都命中 ⇒ **整会话任何网址都不再变链接**，而且零报错 ——
+   * 识别确实"跑过"了，只是每一轮都在第一行退出，日志里什么都看不出来。
+   *
+   * 复位之外还要**重新调度**：组字期间被拦掉的那一次 linkify 是"欠着"的
+   * （输入法刚上屏的那串文字里可能就有网址），不补跑的话用户得再敲一个字
+   * 才看得到链接。
+   */
+  const onBlur = (): void => {
+    // 🔴 只在**真的组字中**时才动作：blur 是高频事件，无条件 schedule 会让
+    //   每次点走编辑器都白跑一轮 linkify（而那是真动树的）。
+    if (!isComposing) return;
+    isComposing = false;
+    schedule(FIRST_DELAY_MS);
+  };
+
   const root = editor.getRootElement();
   root?.addEventListener('beforeinput', onBeforeInput);
   root?.addEventListener('compositionend', onCompositionEnd);
+  root?.addEventListener('blur', onBlur);
 
   return {
     runNow: () => {
@@ -234,9 +257,12 @@ export function registerLinkify(editor: LexicalEditor, deps: LinkifyDeps): Linki
       run();
     },
     dispose: () => {
+      // 🔴 解绑必须与注册**逐条对应**：漏掉 blur 就是一次监听泄漏 ——
+      //   编辑器被卸载后 root 还挂着闭包，blur 一来就在已死的编辑器上排定时器。
       clearTimer();
       root?.removeEventListener('beforeinput', onBeforeInput);
       root?.removeEventListener('compositionend', onCompositionEnd);
+      root?.removeEventListener('blur', onBlur);
     },
   };
 }

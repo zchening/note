@@ -43,6 +43,34 @@ export interface MergeResult {
 
 const DELETED = '（删除）';
 
+/**
+ * P0-5 LCS 规模守卫。
+ *
+ * 字符级 / 块级三方合并底层都是 O(n·m) 的经典 LCS（DP 表 (n+1)×(m+1) 个 Uint32）。
+ * 一份单段上千字、且两侧都与 base 完全不同的输入，会让 DP 表冲到数亿格、
+ * 分配上百 MB 乃至 OOM（老项目就栽在这）。守卫原则：
+ *   · 预算内的输入照常真合并（阈值内仍要"真正合并"，不许一律判冲突）；
+ *   · 超预算 / 分配失败 / 任何 LCS 层异常 ⇒ 一律**认怂**：上报冲突 + 采纳 left，
+ *     绝不许冒泡、也绝不许给出被截断 / 错乱的"半合并"结果。
+ *
+ * 两档预算，分别钉在不同层级：
+ *   · TOP：顶层"全量对齐"（用来找公共锚点）。只有极端规模（~8000×8000 以上）
+ *     才需要拦，否则会把"很大但大部分相同"的合法长文也误杀成冲突。
+ *   · CHUNK：簇内对齐（两侧都改的局部）。这才是 OOM 的真凶——两侧完全相异的
+ *     大段会让簇内 LCS 冲到数亿格。5000×5000（25M，测试超阈值档）以上即拦。
+ * 两档都按"格数"估算，4 字节 / 格。
+ */
+const LCS_CELL_BUDGET_TOP = 64_000_000;
+const LCS_CELL_BUDGET_CHUNK = 16_000_000;
+
+/** LCS 层"算不动 / 分配失败"的统一信号：上层捕获后降级为冲突 + 采纳 left。 */
+class LcsFailedError extends Error {
+  constructor(reason: string) {
+    super(`LCS computation failed: ${reason}`);
+    this.name = 'LcsFailedError';
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * LCS 对齐
  * ------------------------------------------------------------------ */
@@ -70,7 +98,14 @@ function lcsAlign(base: string[], other: string[], eq?: (a: string, b: string) =
     return ops;
   }
   const w = m + 1;
-  const dp = new Uint32Array((n + 1) * w);
+  const cells = (n + 1) * w;
+  if (cells > LCS_CELL_BUDGET_TOP) throw new LcsFailedError(`budget ${cells} > ${LCS_CELL_BUDGET_TOP}`);
+  let dp: Uint32Array;
+  try {
+    dp = new Uint32Array(cells);
+  } catch (e) {
+    throw new LcsFailedError('allocation');
+  }
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
       dp[i * w + j] = same(base[i]!, other[j]!)
@@ -209,6 +244,15 @@ function mergeChunk<T>(
   if (br) return lSeg.slice(); // right 未动 → 采纳 left
   if (segEq(lSeg, rSeg, sig)) return lSeg.slice();
 
+  // 两侧都动了且规模超限：簇内 LCS 会爆内存 / OOM（真凶是两侧完全相异的大段），
+  // 认怂降级（冲突 + 采纳 left），绝不硬算。阈值内（小簇）仍走下面的真合并。
+  if (
+    lSeg.length * bSeg.length > LCS_CELL_BUDGET_CHUNK ||
+    lSeg.length * rSeg.length > LCS_CELL_BUDGET_CHUNK
+  ) {
+    throw new LcsFailedError('chunk budget exceeded');
+  }
+
   // 两侧都动了：把 lSeg 与 rSeg 对齐，逐块合并
   // pairable 工作在元素上；没给就用签名相等
   const canPair: (a: T, b: T) => boolean = pairable ?? ((a, b) => sig(a) === sig(b));
@@ -306,7 +350,14 @@ function lcsAlignPairs<T>(
     return ops;
   }
   const w = m + 1;
-  const dp = new Uint32Array((n + 1) * w);
+  const cells = (n + 1) * w;
+  if (cells > LCS_CELL_BUDGET_TOP) throw new LcsFailedError(`budget ${cells} > ${LCS_CELL_BUDGET_TOP}`);
+  let dp: Uint32Array;
+  try {
+    dp = new Uint32Array(cells);
+  } catch (e) {
+    throw new LcsFailedError('allocation');
+  }
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
       dp[i * w + j] = pairable(base[i]!, side[j]!)
@@ -435,24 +486,40 @@ function mergeSpans(b: Span[], l: Span[], r: Span[], at: string, conflicts: Conf
   const bt = spansToToks(b);
   const lt = spansToToks(l);
   const rt = spansToToks(r);
-  const toks = seqDiff3<CharTok>(
-    bt,
-    lt,
-    rt,
-    tokSig,
-    // 字符层没有"合并"概念：两侧对同一位置的标记不同，也算改动，
-    // 由 seqDiff3 的 del/ins 通道处理（结果里两个标记的字符都在，不丢字）
-    (_b, ll) => ll,
-    (bs, ls, rs) => {
+  let toks: CharTok[];
+  try {
+    toks = seqDiff3<CharTok>(
+      bt,
+      lt,
+      rt,
+      tokSig,
+      // 字符层没有"合并"概念：两侧对同一位置的标记不同，也算改动，
+      // 由 seqDiff3 的 del/ins 通道处理（结果里两个标记的字符都在，不丢字）
+      (_b, ll) => ll,
+      (bs, ls, rs) => {
+        conflicts.push({
+          at,
+          kind: 'text',
+          base: JSON.stringify(bs),
+          left: JSON.stringify(ls),
+          right: JSON.stringify(rs),
+        });
+      },
+    );
+  } catch (e) {
+    if (e instanceof LcsFailedError) {
+      // 超预算 / 分配失败 ⇒ 认怂：整段报冲突 + 采纳 left，两侧原文都留得下
       conflicts.push({
         at,
         kind: 'text',
-        base: JSON.stringify(bs),
-        left: JSON.stringify(ls),
-        right: JSON.stringify(rs),
+        base: JSON.stringify(bt),
+        left: JSON.stringify(lt),
+        right: JSON.stringify(rt),
       });
-    },
-  );
+      return toksToSpans(lt);
+    }
+    throw e;
+  }
   return toksToSpans(toks);
 }
 
@@ -489,22 +556,38 @@ function mergeBlock(
   const out: Block = { t: l.t };
 
   if (l.t === 'code') {
-    const m = seqDiff3<string>(
-      (b.text ?? '').split(''),
-      (l.text ?? '').split(''),
-      (r.text ?? '').split(''),
-      charSig,
-      (_bb, ll) => ll,
-      (bs, ls, rs) => {
+    let m: string[];
+    try {
+      m = seqDiff3<string>(
+        (b.text ?? '').split(''),
+        (l.text ?? '').split(''),
+        (r.text ?? '').split(''),
+        charSig,
+        (_bb, ll) => ll,
+        (bs, ls, rs) => {
+          conflicts.push({
+            at: at + '.text',
+            kind: 'text',
+            base: bs.join(''),
+            left: ls.join(''),
+            right: rs.join(''),
+          });
+        },
+      );
+    } catch (e) {
+      if (e instanceof LcsFailedError) {
         conflicts.push({
           at: at + '.text',
           kind: 'text',
-          base: bs.join(''),
-          left: ls.join(''),
-          right: rs.join(''),
+          base: b.text ?? '',
+          left: l.text ?? '',
+          right: r.text ?? '',
         });
-      },
-    );
+        m = (l.text ?? '').split('');
+      } else {
+        throw e;
+      }
+    }
     out.text = m.join('');
     const lang = l.lang !== undefined ? l.lang : r.lang;
     if (lang !== undefined) out.lang = lang;
@@ -565,25 +648,42 @@ function mergeBlockList(
   at: string,
   conflicts: Conflict[],
 ): Block[] {
-  return seqDiff3<Block>(
-    b,
-    l,
-    r,
-    blockSigFn,
-    (bb, ll, rr) => mergeBlock(bb, ll, rr, at, conflicts),
-    (bs, ls, rs) => {
+  let out: Block[];
+  try {
+    out = seqDiff3<Block>(
+      b,
+      l,
+      r,
+      blockSigFn,
+      (bb, ll, rr) => mergeBlock(bb, ll, rr, at, conflicts),
+      (bs, ls, rs) => {
+        conflicts.push({
+          at,
+          kind: 'block',
+          base: bs.map(blockSigFn).join(' | ') || DELETED,
+          left: ls.map(blockSigFn).join(' | ') || DELETED,
+          right: rs.map(blockSigFn).join(' | ') || DELETED,
+        });
+      },
+      // 簇内放宽：同类型即视为"同一块的两个版本"，让 mergeOne 有机会跑字符级合并。
+      // 只放宽配对，不放宽"是否改动"的判定（那仍走 sig 比较），所以不会引入假合并。
+      (ll, rr) => ll.t === rr.t,
+    );
+  } catch (e) {
+    if (e instanceof LcsFailedError) {
+      // 块级超预算：整段块列表报冲突 + 采纳 left（mergeBlock 内部已对字符级兜底）
       conflicts.push({
         at,
         kind: 'block',
-        base: bs.map(blockSigFn).join(' | ') || DELETED,
-        left: ls.map(blockSigFn).join(' | ') || DELETED,
-        right: rs.map(blockSigFn).join(' | ') || DELETED,
+        base: b.map(blockSigFn).join(' | ') || DELETED,
+        left: l.map(blockSigFn).join(' | ') || DELETED,
+        right: r.map(blockSigFn).join(' | ') || DELETED,
       });
-    },
-    // 簇内放宽：同类型即视为"同一块的两个版本"，让 mergeOne 有机会跑字符级合并。
-    // 只放宽配对，不放宽"是否改动"的判定（那仍走 sig 比较），所以不会引入假合并。
-    (ll, rr) => ll.t === rr.t,
-  );
+      return l.slice();
+    }
+    throw e;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *

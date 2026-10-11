@@ -292,16 +292,27 @@ test('MJS-11 未知通知方法静默但留痕；有 id 的未知方法回 -3260
 
 /* ---------------- 服务端契约对齐 ---------------- */
 
-test('MJS-12 🔴 写入必须用 POST（服务端没有 PUT），且不得带 x-note-key/baseV', () => {
+test('MJS-12 🔴 写入必须用 POST（服务端没有 PUT），必须注入 x-note-key，不得带 baseV', () => {
   const rc = code('remote.ts');
   assert.ok(rc.includes("method: 'POST'"), '写笔记必须是 POST');
   assert.ok(!/method:\s*'PUT'/.test(rc), '新服务端没有 PUT');
-  // 🔴 用 code() 而不是 read()：这三个词在文件头的说明里必须留着
-  //   （"新服务端没有 x-note-key"这句话本身就是文档），剥了注释才查得动。
-  assert.ok(!rc.includes('x-note-key'), '新服务端无写入凭据机制，实现里不得出现该头');
+  // 🔴 用 code() 而不是 read()：文件头说明里也提 x-note-key（那是文档），剥了注释才查得动。
+  // 🔴🔴 P0-1 订正（audit 2026-10-10）：guards.js 的写入凭据闸**真实存在**（WK_HEADER =
+  //   'x-note-key'，full 档对无凭据写一律 403）。旧的"新服务端无 x-note-key"结论是错的——
+  //   按它删掉注入，MCP 线上写工具会全线 403。所以这里反向钉：**必须有**注入。
+  assert.ok(
+    rc.includes("headers['x-note-key'] = writeKey"),
+    'put 必须注入写入凭据头（full 档无凭据 403）',
+  );
   assert.ok(!rc.includes('baseV'), '新服务端 last-write-wins，实现里不得带 baseV');
+  // vault 派生凭据必须复用信封**同一份** salt/iter：每次重生成 salt ⇒ wk 漂移 ⇒ 第二次保存起 403。
   const vc = code('vault.ts');
-  assert.ok(!vc.includes('x-note-key'), 'vault 也不得凭空造写入凭据');
+  assert.ok(vc.includes('deriveWriteKey('), 'vault 必须经 write-key.ts 派生写入凭据');
+  assert.ok(vc.includes('dk.saltB64'), '派生必须用信封同一份 salt（禁止每次重生成）');
+  assert.ok(vc.includes('dk.iter'), '派生必须用信封同一份 iter');
+  // 派生域与网页端同串：服务端只认 sha256(wk)，域不同则 wkHash 永不匹配。
+  const wkc = code('write-key.ts');
+  assert.ok(wkc.includes('notesync-write-v1'), '凭据派生域必须与网页端 write-key.ts 同串');
 });
 
 test('MJS-13 🔴 读笔记返回 null 表示"不存在"（服务端对空笔记回 200+空体）', async () => {

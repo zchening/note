@@ -80,7 +80,8 @@ async function addImage(ctx: ImageCtx, args: ImageArgs): Promise<unknown> {
     } else {
       const hits: number[] = [];
       for (let i = 0; i < blocks.length; i += 1) {
-        if (blockText(blocks[i]).includes(anchor)) hits.push(i);
+        // `!`：`i < blocks.length` 保证存在（noUncheckedIndexedAccess 只认下标不认循环条件）
+        if (blockText(blocks[i]!).includes(anchor)) hits.push(i);
       }
       if (hits.length === 0) throw new Error(`锚点未命中任何一行：${JSON.stringify(anchor)}`);
       if (hits.length > 1) {
@@ -88,7 +89,8 @@ async function addImage(ctx: ImageCtx, args: ImageArgs): Promise<unknown> {
           `锚点在 ${hits.length} 行里都出现（块序号 ${hits.join(', ')}），无法确定插哪一处。`,
         );
       }
-      const i = hits[0];
+      // `!`：hits.length === 0 已在上面抛错；用 `!` 把类型收敛成 number 往下传
+      const i = hits[0]!;
       blocks.splice(args.where === 'before' ? i : i + 1, 0, block);
       inserted = 'inline';
     }
@@ -111,7 +113,8 @@ async function removeImage(ctx: ImageCtx, args: ImageArgs): Promise<unknown> {
   const blocks = [...(note.doc.blocks ?? [])];
   const hits: Array<{ i: number; src: string }> = [];
   for (let i = 0; i < blocks.length; i += 1) {
-    const b = blocks[i];
+    // `!`：`i < blocks.length` 保证存在，且下面的 b.t / b.src 都要往下传
+    const b = blocks[i]!;
     if (b.t === 'img' && typeof b.src === 'string' && b.src.includes(target)) {
       hits.push({ i, src: b.src });
     }
@@ -127,9 +130,11 @@ async function removeImage(ctx: ImageCtx, args: ImageArgs): Promise<unknown> {
   if (hits.length > 1) {
     throw new Error(`匹配到 ${hits.length} 张图片，删哪一张？请给更长的 URL 片段。`);
   }
-  blocks.splice(hits[0].i, 1);
+  // `!`：hits.length === 0 / > 1 都已在上面抛错，hits[0] 必然存在
+  const hit = hits[0]!;
+  blocks.splice(hit.i, 1);
   const r = await ctx.vault.save(name, { ...note.doc, blocks });
-  return { ok: true, name, op: 'remove', removed: hits[0].src, chars: r.chars };
+  return { ok: true, name, op: 'remove', removed: hit.src, chars: r.chars };
 }
 
 async function cloudUpload(buf: Buffer, filePath: string, sign: UpsignResult): Promise<string> {

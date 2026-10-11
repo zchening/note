@@ -7,9 +7,17 @@ name: build-apk
 #   手滑或换机就能把红版推到手机上。
 #   现在 test 作业不绿 → build 作业不执行 → 不出包、不打 Release。
 #
-# 🔴 e2e 为什么不在 CI：它需要真浏览器（Playwright 装 Chromium 约 300MB）
-#   且要起本地 HTTP 服务，CI 上慢且脆。e2e 留在本地闸内跑
-#   （npm run test:e2e 与 npm run test:e2e:live），推 tag 前必须已绿。
+# 🔴 e2e **现在进 CI 了**（2026-10-11）。此前不进的理由是"要真浏览器、CI 上慢且脆"，
+#   但 ARCH.md 自己写着：「漏注册 registerRichText 只有 e2e 能抓，纯逻辑单测完全无感」，
+#   E2E-02（编辑器往返）是**全项目最重要的一条闸** —— 把唯一能抓它的闸留在"本机手动跑"，
+#   等于把最重要的一条防线外包给记忆。代价约 1 分钟 + 一次 Chromium 下载，值得。
+#
+#   🔴 只跑**子集**（01 编辑器往返 + 03 同步），不跑全套 28 个文件：
+#     全套里有若干依赖本机环境/时钟的用例，全套进 CI 会把"偶发环境红"变成常态噪音，
+#     而噪音闸的下场就是被无视 —— 那比没有闸更糟。子集挑的是**最能代表主链路**的两支。
+#
+#   🔴 e2e 跑的是 **www/ 产物**，所以**必须先 build**：少了 build 这一步，
+#     e2e 会拿上一份（或空）产物跑，绿得毫无意义。顺序见 test 作业末尾。
 on:
   push:
     tags:
@@ -22,7 +30,7 @@ permissions:
 
 jobs:
   test:
-    name: 单元测试闸
+    name: 测试闸（单测 + e2e 子集 + 首屏）
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -51,8 +59,9 @@ jobs:
           node tools/check-release-notes.mjs "$VER"
 
       - name: Install
-        # 🔴 --ignore-scripts：跳过 playwright 的浏览器下载（单测只要 jsdom 那层，
-        #   e2e 不在 CI 跑）。不省这一步每次 CI 多下 300MB。
+        # 🔴 --ignore-scripts：跳过 playwright 的**浏览器**下载（Chromium 约 300MB），
+        #   由下面单独一步按需装 —— 这样"要不要付这 300MB"是一个显式决定，
+        #   而不是被 npm 的 postinstall 悄悄做了。
         run: npm ci --no-audit --no-fund --ignore-scripts
 
       - name: 类型检查
@@ -80,7 +89,34 @@ jobs:
           done
 
       - name: 构建（顺带验证 esbuild 产物能出）
+        # 🔴 必须排在 e2e 与首屏闸**之前**：那两条闸读的是 www/ 产物，
+        #   不 build 就等于拿空气（或上一份产物）跑，绿了也是假的。
         run: npm run build
+
+      - name: 版本一致性（package.json ↔ www 产物）
+        # 🔴🔴 仓库里 android/app/build.gradle 的 versionName 恒为旧值（由 build 作业
+        #   sed 注入），所以**本作业只能查到 www 为止**，android 那一端由 build 作业的
+        #   「三端版本一致性」在注入之后查。写成一份脚本两个模式，不复制两份逻辑。
+        run: node tools/check-versions.mjs --skip-android
+
+      - name: 装 Chromium（e2e 与首屏闸要真浏览器）
+        # 🔴 --with-deps：Linux runner 上缺系统库时 Chromium 起不来，
+        #   报错是 "Host system is missing dependencies"，而不是"浏览器没装"，极易误判。
+        run: npx playwright install chromium --with-deps
+
+      - name: e2e 子集（真浏览器：编辑器往返 + 同步）
+        # 🔴 --test-concurrency=6：**串行会超时**。每个文件都要起一次
+        #   Chromium + 静态服务，串行跑两个文件就要 1 分钟以上，
+        #   而 node --test 的文件级计时包含全部子用例的墙钟时间
+        #   （见 packages/client/test/e2e/harness.mjs 文件头）。
+        # 🔴 只挑 01/03：主链路（编辑器往返 + 同步）的代表，见文件头注释。
+        working-directory: packages/client
+        run: node --test --test-concurrency=6 test/e2e/01-editor-roundtrip.test.js test/e2e/03-sync.test.js
+
+      - name: 首屏闸（defer + CSS 外链，真浏览器读 computedStyle）
+        # 🔴 这条是给 www/index.html 的：它是产物，改错了单测一条都不会红，
+        #   只有真打开页面才看得见"整站没样式"，而 CI 日志一片绿。
+        run: node tools/check-firstpaint.mjs www
 
   build:
     name: 构建并签名 APK
@@ -159,6 +195,18 @@ jobs:
           CODE=$((VER_MAJOR * 10000 + VER_MINOR * 100 + VER_PATCH))
           sed -i "s/versionCode [0-9]\+/versionCode $CODE/; s/versionName \"[^\"]*\"/versionName \"$VER\"/" android/app/build.gradle
           grep -n "versionCode\|versionName" android/app/build.gradle
+
+      - name: 三端版本一致性（package.json ↔ www ↔ android）
+        # 🔴🔴 必须排在「构建前端并同步进壳」与「从 tag 注入安卓版本号」**两步之后**：
+        #   它比的是 ① package.json 版本 ② www/ 产物里注入的版本
+        #   ③ android/app/build.gradle 的 versionName/versionCode
+        #   **加上** www/ 与 assets/public 下 index.html / app.js 的逐字节 sha256。
+        #   排在任何一步之前都会红（gradle 那时还是仓库里的旧 1.0）—— 那不是误报，
+        #   是"壳与产物确实还没对齐"。
+        #   🔴 最后那条 sha256 比对就是 ARCH.md 声称存在、实测根本不存在的闸：
+        #     cap sync 拷完不比对，2026-10-11 实测 assets/app.js 是 v1.0.0、
+        #     www/app.js 是 v3.0.20，两者大小都不同，而全程零报错。
+        run: node tools/check-versions.mjs
 
       - name: 解码签名密钥库
         env:

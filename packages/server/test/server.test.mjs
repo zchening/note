@@ -192,24 +192,32 @@ test('超大 body 被拒（413），不能拿它当文件服务器', async () =>
   assert.ok(r.status === 413 || r.status === 0, `实际 ${r.status}`);
 });
 
-test('连续失败上报触发锁定，之后 GET/POST 都是 429 + Retry-After', async () => {
+test('连续失败自报只锁写桶（P1-11 读写分桶）：写 429 + Retry-After，读绝不牵连', async () => {
   const id = 'locknote1';
   // 先正常写一次（建立 key）
   await fetch(`${base}/api/note/${id}`, { method: 'POST', body: '{"v":1}' });
 
+  // 自报 25 次（阈值 FAIL_LIMIT=20）→ 末次响应即写桶锁定
+  let last = null;
   for (let i = 0; i < 25; i++) {
-    await fetch(`${base}/api/fail/${id}`, { method: 'POST' });
+    last = await fetch(`${base}/api/fail/${id}`, { method: 'POST' });
   }
-  const st = await (await fetch(`${base}/api/fail/${id}`)).json();
-  assert.equal(st.locked, true, '25 次失败后必须锁定');
+  assert.equal(last.status, 429, '写桶必须被自报锁定（阈值 20，25 次必锁）');
+  const ra = last.headers.get('retry-after');
+  assert.ok(ra && Number(ra) > 0, '锁定响应必须带 Retry-After');
 
-  const g = await fetch(`${base}/api/note/${id}`);
-  assert.equal(g.status, 429, '锁定后 GET 必须 429');
-  const ra = g.headers.get('retry-after');
-  assert.ok(ra && Number(ra) > 0, '必须带 Retry-After');
-
+  // 写桶确实锁死：POST 笔记 429
   const p = await fetch(`${base}/api/note/${id}`, { method: 'POST', body: '{}' });
-  assert.equal(p.status, 429, '锁定后 POST 也必须 429');
+  assert.equal(p.status, 429, '写桶锁定后 POST 必须 429');
+
+  // 🔴🔴 P1-11 的本体判据：匿名自报**不许**牵连读 —— 读桶只由服务端真实读失败路径累加。
+  //   （旧判据"GET 也 429"钉的是读写共桶时代的行为；分桶后那正是要修掉的低代价 DoS。）
+  const g = await fetch(`${base}/api/note/${id}`);
+  assert.equal(g.status, 200, `匿名自报不许锁死读（P1-11 分桶），实际 ${g.status}`);
+
+  // GET /api/fail 查询的是读桶 → 未锁
+  const st = await (await fetch(`${base}/api/fail/${id}`)).json();
+  assert.equal(st.locked, false, '读桶不应被写桶自报牵连（P1-11）');
 });
 
 test('锁定状态已落盘（重启不丢 —— 老项目这里是内存 Map）', async () => {

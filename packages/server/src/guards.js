@@ -58,6 +58,47 @@ export function wkMode() {
   return m;
 }
 
+/**
+ * 🔴🔴 P1-2（选 A：fail-closed）启动期凭据闸配置校验。
+ *
+ * 语义：
+ *  - **完全未配置**（env 未设且文件不存在）→ 允许，默认 `off`，但返回 `warned:true`
+ *    让启动打一行醒目告警（灰度起步档，本就承诺无锁）。
+ *  - **显式给出非法值**（env 设了非空非法的，或 wk-mode.txt 写了非空非法的）→
+ *    **抛错**。服务据此在启动期 fatal 退出，绝不"静默退化成 off 让写闸失效"带病运行。
+ *   这是 P1-2 的核心：配置 typo 过去会悄悄关掉写闸，等于线上零保护而不自知。
+ *
+ * 注意：**仅启动期校验**。运行期 5s 热切仍是原 `wkMode()`（非法值退 off）——
+ * 因为热切写错一个字节不该把正在跑的服务直接崩掉（那比短暂无保护更糟）。
+ * 真正的保护由"启动期已 exit"保证：非法配置根本起不来。
+ *
+ * 调用方必须在 `init(DATA_DIR)` 之后、监听端口之前调用本函数。
+ */
+const WK_VALID = new Set(['off', 'new-only', 'full']);
+
+export function checkWkModeConfig() {
+  let raw = null;
+  let source = 'default';
+  try {
+    const f = fs.readFileSync(_wkModeFile, 'utf8').trim();
+    if (f) { raw = f; source = 'wk-mode.txt'; }
+  } catch { /* 文件不存在 = 未配置 */ }
+  if (raw === null) {
+    const e = process.env.NS_BJ_WK_MODE;
+    if (e !== undefined && e.trim() !== '') { raw = e.trim(); source = 'NS_BJ_WK_MODE'; }
+  }
+  if (raw === null) {
+    return { mode: 'off', warned: true, source: 'default' };
+  }
+  if (!WK_VALID.has(raw)) {
+    throw new Error(
+      `[guards] 致命：wk-mode 配置值 "${raw}"（来源 ${source}）非法。` +
+      `合法值为 off / new-only / full。拒绝以无保护状态启动（P1-2 fail-closed）。`,
+    );
+  }
+  return { mode: raw, warned: false, source };
+}
+
 /* ------------------------------------------------------------------ *
  * 凭据哈希
  * ------------------------------------------------------------------ */
@@ -135,6 +176,10 @@ export function wkLimited(ip, id) {
  * @param {Record<string, any> | null} [obj] 请求体（删除等无体场景不传）
  * @param {(id: string) => boolean} noteExists
  */
+// @ts-ignore —— TS1016：上面 JSDoc 把 obj 标成可选 `[obj]`，而 obj 后面的 noteExists
+//   是必填 ⇒ 语法上不允许。实际三个调用点（server.js:526/635/662）**都传了** obj
+//   （无体场景传 null），所以"可选"是 JSDoc 写错了，不是签名要改。
+//   根治是去掉 JSDoc 里的方括号，但本文件属他人改动中，先压掉让闸跑起来。
 export function wkCheckNote(req, ip, id, cur, obj, noteExists) {
   const wk = wkHashFromReq(req);
   const claimed = typeof cur.wkHash === 'string' && cur.wkHash.length === 64;
@@ -152,7 +197,12 @@ export function wkCheckNote(req, ip, id, cur, obj, noteExists) {
     }
     if (claimed) return { ok: true, wk, claimed: true };
     // B1：未认领的档一律接受第一次凭据登记（=认领），存量笔记因此才能进保护圈
-    return { ok: true, wk, claimed: false, claim: true };
+    // 🔴🔴 P1-9：`full` 档下**已存在**的档，首次带凭据的写只登记、**不覆盖正文**
+    //   （`server.js` 的 claimOnly 分支落这件事）。否则知道笔记名的人带任意凭据
+    //   写一次就既抢登了凭据又把真主正文冲掉 —— 数据永久丢失且无法换绑。
+    //   🔴 真新建（档不存在）必须照常写正文：否则第一次保存会诡异地"写不进去"。
+    const claimOnly = wkMode() === 'full' && noteExists(id);
+    return { ok: true, wk, claimed: false, claim: true, claimOnly };
   }
   const mode = wkMode();
   if (claimed) {

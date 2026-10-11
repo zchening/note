@@ -3,7 +3,8 @@
  *
  * 产出：
  *   www/app.js      —— JS+依赖 全打成一个文件（inline，不留import）
- *   www/index.html  —— 引用上面那一个文件，无其他外部依赖
+ *   www/app.css     —— 样式（外链，见 indexHtml 的注释）
+ *   www/index.html  —— 引用上面两个文件 + 静态资源
  *
  * 🔴 三个必须守住的设计（ARCH.md §4.6）：
  *  1. **单文件**。单文件是 OTA 原子性与离线兜底的根基：APK 里的页面是壳，
@@ -24,6 +25,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, readdir, copyFile, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertWrittenEqual } from './lib/write-verify.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WWW = join(ROOT, 'www');
@@ -154,13 +156,30 @@ async function materializeStatic() {
 /**
  * 生成 index.html。
  *
- * 🔴 CSS **inline 进 HTML 而不是引app.css** —— 单文件原子性是 OTA 的根基（文件头），
- *   多一个外链就多一个"发了一半"的中间态。
+ * 🔴 CSS 走**外链 app.css**（曾经是 inline 进 HTML）。当时内联的理由是
+ *   "单文件原子性：多一个外链就多一个'发了一半'的中间态"。这个理由**站不住**：
+ *   index.html 与 app.js 本来就是两个文件，sw.js / jsQR.js / html2canvas.min.js /
+ *   图标等静态资源本来就是十几个文件 —— "单文件"从来没成立过。
+ *   真正防漂移的是另外两条**机械**的东西：
+ *     ① SW 的缓存名带 APP_VERSION（packages/client/static/sw.js 的
+ *        `notesync-bj-${VER}`，VER 取自注册 URL 的 ?v=），换版本自动换缓存；
+ *     ② CI 在 `cap sync` 之后逐文件 sha256 比对 www/ 与 assets/
+ *        （tools/check-versions.mjs，落盘不比对正是它存在的理由）。
+ *   而内联的代价是实的：162KB CSS 压在每个 HTML 响应里，首屏必须先下载完
+ *   这段才能渲染，且它无法被单独缓存 —— 每次发版都要重下一遍。
+ *
+ * 🔴 外链必须**同时**给 preload 与 stylesheet：
+ *   只给 preload 不引 stylesheet ⇒ 样式永远不生效（preload 只是提前下载）；
+ *   只给 stylesheet 不 preload ⇒ 要等 HTML 解析到那一行才开始下。
  *
  * 🔴 主题色取浅色底`#FBFBF8`（老项目色板的值，不是随手写的 #FAFAF8），
  *   它决定移动端地址栏/启动屏的颜色，是"用户一眼看到的第一个颜色"。
  */
-function indexHtml(version, date, sha, css) {
+function indexHtml(version, date, sha) {
+  // 🔴 CSS 的 URL **不带** ?v= 查询串：SW 的预缓存清单（sw.js 的 SHELL）里写的是
+  //   './app.css'，带查询串会变成另一个 URL、预缓存落空。防旧样式靠的是
+  //   **缓存名里的版本号**（换版即换缓存），不是查询串。
+  const cssHref = 'app.css';
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -201,14 +220,17 @@ function indexHtml(version, date, sha, css) {
 <meta name="apple-mobile-web-app-title" content="NoteSyncX">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>NoteSync</title>
-<style>
-${css}
-</style>
+<link rel="preload" as="style" href="${cssHref}">
+<link rel="stylesheet" href="${cssHref}">
 </head>
 <body>
 <div id="boot">载入中…</div>
 <div id="app"></div>
-<script src="app.js"></script>
+<!-- 🔴 defer：不阻塞 HTML 解析，且**在 DOMContentLoaded 之前**执行完，
+     所以放在它后面的内联脚本（window.__NOTESYNC_BUILD__）会**先**跑 ——
+     这正好修掉一个潜在的顺序坑：不加 defer 时 app.js 先于那段内联执行，
+     任何在模块初始化时读 __NOTESYNC_BUILD__ 的代码都只能读到 undefined。 -->
+<script src="app.js" defer></script>
 <script>
 /* 产物指纹：用于"服务器上的壳与本地产物是否同一份"的快速肉眼比对。
    真源版本号仍由 app.js 里的 APP_VERSION 提供（见 packages/client/src/version.ts）。
@@ -260,13 +282,19 @@ async function run() {
   const js = await readFile(join(WWW, 'app.js'));
   const sha = createHash('sha256').update(js).digest('hex');
   const css = await readFile(CSS, 'utf8');
-  await writeFile(HTML, indexHtml(version, date, sha, css), 'utf8');
+  const CSS_OUT = join(WWW, 'app.css');
+  await writeFile(CSS_OUT, css, 'utf8');
+  // 🔴 写完读回来比对（与 tools/port-android.mjs 同一条纪律）：
+  //   writeFileSync 不抛异常 ≠ 盘上内容一致；样式文件被写坏/写空时，
+  //   页面不报错、只是**整站没样式**，是最难查的一类。
+  assertWrittenEqual(CSS_OUT, 'www/app.css', css);
+  await writeFile(HTML, indexHtml(version, date, sha), 'utf8');
 
   const statics = await materializeStatic();
 
   const kb = (n) => (n / 1024).toFixed(1) + ' KB';
   console.log(`[build] app.js ${kb(js.length)}  sha256:${sha.slice(0, 16)}`);
-  console.log(`[build] index.html 就绪（CSS inline ${kb(css.length)}）  版本 v${version}  ${date}`);
+  console.log(`[build] index.html 就绪（CSS 外链 app.css ${kb(css.length)}）  版本 v${version}  ${date}`);
   console.log(`[build] 静态资源已物化：${statics.join(', ') || '(空)'}`);
   // 🔴 逐个点名：缺文件时这里要能一眼看出来，而不是"构建成功"然后线上 404
   for (const must of STATIC_REQUIRED) {

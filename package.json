@@ -1,6 +1,6 @@
 {
   "name": "notesync-bj",
-  "version": "3.0.20",
+  "version": "3.1.0",
   "private": true,
   "description": "NoteSync bj — 端到端加密笔记 PWA（模型 JSON 真源 + Lexical）",
   "license": "UNLICENSED",
@@ -14,7 +14,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.mcp.json && tsc --noEmit -p tsconfig.server.json",
+    "typecheck:mcp": "tsc --noEmit -p tsconfig.mcp.json",
+    "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "test:schema": "npm run test --workspace @bj/shared-schema",
     "test:client": "npm run test --workspace @bj/client",
     "test:server": "npm run test --workspace @bj/server",

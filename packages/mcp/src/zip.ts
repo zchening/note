@@ -22,7 +22,9 @@ const CRC_TABLE = (() => {
 
 export function crc32(buf: Buffer): number {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  // `!`：CRC_TABLE 是 256 项定长表、下标已被 `& 0xff` 夹到 0..255；
+  //   buf[i] 受 `i < buf.length` 约束。两者都不会越界（noUncheckedIndexedAccess 只认下标）。
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]!) & 0xff]! ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 

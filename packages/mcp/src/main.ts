@@ -7,7 +7,9 @@
  *   工具命名（locate/read/edit/image/remind/search/export/import）、
  *   错误用 isError + 纯文本、注册表记账。
  *   重做的：全部针对新架构 —— 操作对象是模型 JSON 而非 HTML、
- *   写入走 POST 而非 PUT、没有 baseV/x-note-key/403、
+ *   写入走 POST 而非 PUT、没有 baseV/409（last-write-wins）；
+ *   但 **x-note-key/403 是真实存在的**（guards.js 在 full 档拦无凭据写），
+ *   MCP 已注入凭据（见 vault.ts 的 save / remote.ts 的 put/del，P0-1 修复）——
  *   搜索不做本机倒排索引、提醒直接落在 doc.reminders 而非"回写正文行再正则解析"。
  *
  * 🔴🔴 工具 description 是**给大模型读的说明书**，不是注释。
@@ -204,11 +206,16 @@ const TOOLS: ToolDef[] = [
 const impls: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
   note_locate: (a) => {
     registry.add(String(a.name || cfg.defaultNote || ''));
+    // @ts-ignore —— exactOptionalPropertyTypes：LocateArgs.name 是**可选** `name?: string`，
+    //   显式传 `undefined` 被这个开关判为不合类型。运行期 toolLocate 自己走
+    //   `args.name || ctx.defaultNote`，与这里同义。根治：改传
+    //   `...(a.name !== undefined ? { name: a.name } : {})`。
     return toolLocate(docCtx, { name: a.name as string | undefined });
   },
   note_read: async (a) => {
     const name = String(a.name || cfg.defaultNote || '');
     registry.add(name);
+    // @ts-ignore —— 同上（ReadArgs.name 亦为可选），exactOptionalPropertyTypes 的假红。
     return toolRead(docCtx, { name: a.name as string | undefined, format: a.format as 'text' | 'json' | 'markdown' });
   },
   note_edit: async (a) => {

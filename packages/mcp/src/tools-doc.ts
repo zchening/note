@@ -188,7 +188,7 @@ export async function toolEdit(ctx: ToolCtx, args: EditArgs): Promise<unknown> {
       const flat = blocks.map((b) => blockText(b));
       const hits: number[] = [];
       for (let i = 0; i < flat.length; i += 1) {
-        if (flat[i].includes(anchor)) hits.push(i);
+        if (flat[i]!.includes(anchor)) hits.push(i);
       }
       if (hits.length === 0) {
         throw new Error(`锚点未命中任何一行：${JSON.stringify(anchor)}`);
@@ -200,7 +200,10 @@ export async function toolEdit(ctx: ToolCtx, args: EditArgs): Promise<unknown> {
             '请给更长的锚点文本，或先用 note_read 看清结构。',
         );
       }
-      const i = hits[0];
+      // 🔴 `!` 而不是 @ts-ignore：上面 `hits.length === 0` 已抛错，hits[0] 必然存在。
+      //   用 `!` 把类型**收敛成 number** 往下传；@ts-ignore 只是藏掉这一行的报错，
+      //   i 仍是 `number | undefined`，下一次用它（splice）会再红一次。
+      const i = hits[0]!;
       if (args.op === 'delete') blocks.splice(i, 1);
       else {
         const text = String(args.text ?? '').replace(/\r/g, '');

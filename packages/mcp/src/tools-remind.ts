@@ -74,7 +74,8 @@ export function resolveAt(text: string, now: number): number {
     const words = m.map((x) => JSON.stringify(s.slice(x.index, x.index + x.length))).join(' / ');
     throw new Error(`这句话里认出 ${m.length} 个时间（${words}），请只保留要提醒的那一个。`);
   }
-  return m[0].at;
+  // `!`：m.length > 1 与 === 0 都已在上面抛错，m[0] 必然存在
+  return m[0]!.at;
 }
 
 export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknown> {
@@ -106,7 +107,8 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
       //   （留多条同刻是历史数据可能有的形态，不在这里合并 ——
       //     合并会静默删掉用户可能有意义的"同一时刻两件事"。）
       const sameAt = future.filter((r) => atOf(r.at) === at);
-      const id = sameAt.length > 0 ? sameAt[0].id : makeRemId(at, text);
+      // `!`：`sameAt.length > 0` 已保证 sameAt[0] 存在
+      const id = sameAt.length > 0 ? sameAt[0]!.id : makeRemId(at, text);
       if (sameAt.length > 0) {
         //🔴🔴 取消"已完成"必须**删掉 done 这个键**，不能写 done: undefined。
         //   canonical 规则 2 是"省略默认值"，而 done: undefined 并不等于省略：

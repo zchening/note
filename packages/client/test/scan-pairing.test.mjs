@@ -410,14 +410,17 @@ test('PAIR-15 🔴 配对链接不得有任何 location.assign / href 跳转落�
 
 test('PAIR-16 🔴 会话口令只在内存，锁定与改口令必须同步维护', () => {
   const main = read('src/main.ts');
-  // 锁定时清
+  // 🔴🔴 锁定时清 —— 切片必须**有右界**（见 bodyOf 的注释）。
+  //   此前这里是 `main.slice(main.indexOf('onLock: () =>'))`，一路切到文件尾：
+  //   只要在 onLock 之后的任何地方出现 `sessionPass = ''`（比如别的功能的清理
+  //   逻辑），这条钉就会绿在一个**与 onLock 无关**的位置上，判据形同虚设。
   assert.match(
-    main.slice(main.indexOf('onLock: () =>')),
+    bodyOf(main, 'onLock: () =>'),
     /sessionPass\s*=\s*''/,
     '锁定时必须清会话口令（否则"退出锁定"是假的，配对码还能出）',
   );
-  // 改口令后换新
-  const chg = main.slice(main.indexOf('async function doChangePassphrase'));
+  // 改口令后换新（同样必须有右界）
+  const chg = bodyOf(main, 'async function doChangePassphrase');
   assert.match(
     chg,
     /sessionPass\s*=\s*next/,

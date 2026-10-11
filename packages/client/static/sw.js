@@ -51,6 +51,10 @@ const SHELL = [
   './',
   './index.html',
   './app.js',
+  // 🔴 样式外链（v3.0.21 起 CSS 从 index.html 内联改为 www/app.css）：
+  //   不进安装期预缓存 ⇒ 发版后**首次**离线打开是**无样式**的页面
+  //   （运行时 fetch 会缓存它，但那要等联网时先取过一次）。
+  './app.css',
   './manifest.json',
   './favicon.svg',
   './apple-touch-icon.png',

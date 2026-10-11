@@ -156,7 +156,7 @@ type FingerprintNode = {
  *
  * 🔴🔴🔴 **但子树内容必须聚合进那一格，否则"感知变化"这一半就瞎了** ——
  *   这是一个真实回归（复核独立发现，判据 REMLOCAL-09~12 钉住）：
- *   只取顶层时，`fold` 的顶层纯文本 = `title`（`reconcile.blockText` 对 fold
+ *   只取顶层时，`fold` 的顶层纯文本 = `title`（`reconcile.blockOwnText` 对 fold
  *   走 `b.title` 分支）⇒ 子块里任何 rem 变化都不改变顶层指纹；
  *   `ul/ol` 既无 text 也无 spans 也无 title ⇒ 兜底成 `{text:'',rems:[]}`
  *   ⇒ 对列表项完全盲。两者都让 `chooseRewritePath` 返回 `'none'` ⇒ 零写
@@ -165,7 +165,7 @@ type FingerprintNode = {
  *
  *   ⇒ 两件事必须分开做：**下标只到顶层，内容要递归聚合**。
  *
- * 🔴 块的纯文本口径必须与 `reconcile.blockText` 一致（text / spans / title 三选一），
+ * 🔴 块的纯文本口径必须与 `reconcile.blockOwnText` 一致（text / spans / title 三选一），
  *   否则两边算出的 `text` 对不上，`sameFingerprint` 会把"没变的块"判成"变了"。
  *
  * 🔴 聚合用 '\n' 连接（与 `reconcile.flatten` 的块间换行同款），

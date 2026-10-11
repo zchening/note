@@ -58,6 +58,8 @@ import {
 import type { SyncState } from './sync/fsm.ts';
 import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { readCache, writeCache, envelopeOf } from './sync/local-cache.ts';
+import { installKdfWorker } from './sync/kdf-worker.ts';
+import { pushInternalError } from './diag/internal-ring.ts';
 import { deriveWriteKey } from './sync/write-key.ts';
 import { buildChangePass, buildHome, buildLanding, buildPass } from './ui/pages.ts';
 import { buildShell, type Shell, type TopbarAction } from './ui/shell.ts';
@@ -646,6 +648,17 @@ let linkifyNowRef: (() => void) | undefined;
 let mountDocSnapshot: Doc | undefined;
 let imeGateRef: ImeGate | undefined;
 let detachImeRef: (() => void) | undefined;
+/**
+ * 补铺调度器的模块级引用。
+ *
+ * 🔴 为什么要有它：`scheduleStrayMarkFlush` 活在 `mountEditor` 闭包里（它要读本次
+ *   挂载的 `latestDoc` 与 `imeGate`），但 `startSyncFor` 的 `setDoc` 在**模块级**，
+ *   够不到那个闭包。换笔记重建编辑器时，新挂载会把它重新指向新闭包
+ *   （旧闭包随旧挂载一起废弃）。
+ * 🔴 第二参是"待回灌真源的存活提醒 id 集合"，只有 `setDoc` 那条路径会传
+ *   （见 `strayPendingLive` 的注释）。
+ */
+let strayFlushRef: ((delay: number, pendingLive?: ReadonlySet<string>) => void) | undefined;
 /** 外壳根节点。同步状态回调要往它身上写 dataset，作用域必须在 mountEditor 之外。 */
 let root: HTMLElement | undefined;
 let setFootStatus: ((s: 'connecting' | 'synced' | 'offline', d?: string) => void) | undefined;
@@ -2316,19 +2329,51 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *   绝不硬做（推迟一小会儿，标记迟早会铺上）。
    */
   const STRAY_FLUSH_RETRY_MS = 800;
-  const scheduleStrayMarkFlush = (delay: number): void => {
+
+  /**
+   * 待回灌真源的**存活提醒 id 集合**（`setDoc` 被 IME 门控拦下时才非空）。
+   *
+   * 🔴🔴🔴 为什么补铺要认它、而不是只认 `latestDoc`：
+   *   setDoc 承载「远端/合并结果」写回，被门控拦下时**回灌没落地** ⇒ 树里那条
+   *   已被远端删掉的提醒下划线会一直挂着（用户看到的就是"提醒没删掉"）。
+   *   而补铺的判死集合若取 `latestDoc.reminders`，那份还是**旧真源**（含该提醒）
+   *   ⇒ 判定"还活着" ⇒ 一个都不摘 ⇒ 补铺空跑。**这正是残留缺口的本体。**
+   *
+   * 🔴🔴 为什么**不**顺手把 `latestDoc` 也改成待回灌的 `d`：
+   *   树还是旧内容（含被远端删掉的那段正文）。一旦 latestDoc 先落账而树没跟上，
+   *   用户下一次按键触发的 updateListener 会从**树**导出（把已删正文带回来）
+   *   ⇒ 已删内容复活 —— 那是比"下划线残留"严重得多的数据分叉。
+   *   所以：文本类的回灌**整轮推迟**（下一轮 poll/SSE 再落，base 也不推进，
+   *   见 `imeCanEditTree` 的 P0-3 纪律），**只有"摘标记"这一件纯视觉的事**
+   *   可以拿待回灌真源先做 —— 因为 unwrap 标记**不改变任何文本**。
+   */
+  let strayPendingLive: ReadonlySet<string> | undefined = undefined;
+
+  const scheduleStrayMarkFlush = (delay: number, pendingLive?: ReadonlySet<string>): void => {
+    // 🔴 后到的待回灌真源覆盖先到的：补铺要以**最新**那份远端事实为准，
+    //   否则可能拿一份更旧的集合去摘，把刚被重新加回来的提醒又摘掉。
+    if (pendingLive) strayPendingLive = pendingLive;
     if (strayMarkFlushTimer !== undefined) window.clearTimeout(strayMarkFlushTimer);
     strayMarkFlushTimer = window.setTimeout(() => {
       strayMarkFlushTimer = undefined;
+      // 🔴 有"待回灌真源"时以它为准（见 strayPendingLive 的注释）；
+      //   否则退回 latestDoc（既有 update 分支补铺路径，语义不变）。
+      //   🔴 取完即清：这一次补铺落地后，该事实已兑现，不能让它污染后续轮次
+      //   （后续轮次要么 setDoc 真落地了、latestDoc 已是新真源，要么又会有新的待回灌）。
+      //   🔴 必须在门控检查**之前**取：顺延重试的那一轮也要带着它继续走。
+      const pending = strayPendingLive;
+      strayPendingLive = undefined;
       // 🔴 门控不开 ⇒ 顺延重试。用局部 imeGate（本次挂载那一个），
       //   不用模块级 imeGateRef —— 换笔记后旧挂载的门控不该影响新挂载。
       //   🔴🔴 v3.0.8：判 canEditTree()（补铺是树手术，还要躲整段改写窗口）。
       if (imeGate && !imeGate.canEditTree()) {
         recordFlight('gate:stray', 'retry');
-        scheduleStrayMarkFlush(STRAY_FLUSH_RETRY_MS);
+        // 🔴 重试必须把待回灌真源**继续带下去**：上面已把它从 strayPendingLive
+        //   取出并清空，这里不回传的话重试轮会退回 latestDoc（旧真源）⇒ 一个都摘不掉。
+        scheduleStrayMarkFlush(STRAY_FLUSH_RETRY_MS, pending);
         return;
       }
-      const live = new Set((latestDoc.reminders ?? []).map((r) => r.id));
+      const live = pending ?? new Set((latestDoc.reminders ?? []).map((r) => r.id));
       const doomed: string[] = [];
       ed.update(() => {
         const walk = (n: LexicalNode): void => {
@@ -2352,10 +2397,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     }, delay);
   };
 
+  // 🔴 挂到模块级：`startSyncFor` 的 `setDoc` 要走这条补铺通道（见 strayFlushRef 的注释）。
+  //   换笔记重建编辑器时这里会被重新指向新闭包（旧闭包随旧挂载一起废弃）。
+  strayFlushRef = scheduleStrayMarkFlush;
+
   // 🔴 必须在 docToLexical 之前挂监听：initial 那一次 update 也要留下快照，
   //   否则首次 commit 之前 latestDoc 停在空文档，e2e 读到的是"从未提交过"的假象。
   /** 上一次扫描时的正文文本 —— 彩蛋「文本真变」那道闸的基准。 */
   let lastEggText = '';
+  /** P1-13：`lastDocBytes` 的节流时间戳（见下面那处的注释）。 */
+  let lastDocBytesAt = 0;
   ed.registerUpdateListener(({ editorState, tags }: { editorState: EditorState; tags?: Set<string> }) => {
     // 🔴 state.read() 回调外节点句柄失效 —— 整段导出必须在回调内部完成
     const before = latestDoc;
@@ -2607,7 +2658,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //   对账可能增删提醒，赋早了会让诊断第 8 组的 rem/future 少算刚变动的那几条。
       latestDocRef = rec.doc;
     }
-    shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);
+    // 🔴🔴 P1-13：这一行是**纯诊断**（全仓无消费方，只留给人工排查），却每个
+    //   update 都跑一次 `JSON.stringify` 全文档 —— 5000 字约 0.3ms/键，
+    //   中端安卓 ×5 就吃掉按键预算的一大块，而它**对生产没有任何作用**。
+    //   节流到 250ms：语义不变（它本来就是"最近一次文档字节数"，不是逐帧值），
+    //   热路径这笔序列化税直接省掉。
+    const bytesNow = Date.now();
+    if (bytesNow - lastDocBytesAt >= 250) {
+      lastDocBytesAt = bytesNow;
+      shellRoot.dataset.lastDocBytes = String(new TextEncoder().encode(JSON.stringify(latestDoc)).length);
+    }
 
     // 对账可能改了 rem 标记（正文没变但标记变了）→ 此时必须把结果写回编辑器，
     //   否则下划线永远不显示。判据是 canonical 不等：写回自身不会引起无限循环，
@@ -3029,6 +3089,22 @@ async function startSyncFor(name: string): Promise<void> {
       //   内同样必须让路（豆包智能整理大段删除后分批插入，间隙超时窗，canApply 会开门）。
       if (imeGateRef && !imeGateRef.canEditTree()) {
         recordFlight('gate:setdoc', 'len=' + docTextLen(d));
+        // 🔴🔴🔴 补铺（残留缺口：远端删除路径此前是**裸 return**）。
+        //
+        //   场景：另一台设备删掉一条提醒 ⇒ 合并结果从这条路径写回 ⇒ 恰好用户在
+        //   打字/组字 ⇒ 门控拦下整篇重建。回灌推迟没关系（下一轮 poll/SSE 会再送，
+        //   且 base 不推进，见 imeCanEditTree），**但屏幕上那条下划线会一直挂着** ——
+        //   用户看到的就是「另一台删了，这台还显示着提醒」，而且**零报错**。
+        //
+        //   补铺只做点状摘除（unwrap 已死标记节点），**不改变任何文本**，
+        //   所以拿"待回灌真源"先做这件纯视觉的事是安全的；文本回灌仍整轮推迟。
+        //   判死集合必须来自 `d.reminders`（待回灌的那份），不能是 latestDoc
+        //   —— 后者此时还是旧真源，会把该提醒判成"还活着"，补铺空跑。
+        //
+        //   🔴 走 scheduleStrayMarkFlush（内部过 IME 门控、不开就顺延），
+        //   **不要**在这里直接 setTimeout —— 补铺是树手术，输入法还在工作时下刀
+        //   会让 InputConnection 的文本视图与真实 DOM 错位 ⇒ 整段正文被替换。
+        strayFlushRef?.(TYPE_ACTIVE_MS + 150, new Set((d.reminders ?? []).map((r) => r.id)));
         return;
       }
       recordFlight('tree:setdoc', 'len=' + docTextLen(d));
@@ -3078,6 +3154,11 @@ async function startSyncFor(name: string): Promise<void> {
     onInternalError: (msg, err) => {
       // eslint-disable-next-line no-console
       console.warn('[notesync] 内部错误（不影响用户）：' + msg, err);
+      // 🔴🔴 P1-8：console.warn 是**唯一出口**就等于黑洞 —— 真机 APK 上
+      //   "同步静默死"时用户零感知、开发者零线索（没人能在手机上开 devtools）。
+      //   落进固定容量环形缓冲：诊断面板可读（?diag，长效）、飞行记录器可读
+      //   （短效、随机身日志一起被用户贴过来），**且绝不上报服务器**（守零知识）。
+      pushInternalError({ msg, err });
     },
     // 🔴 自动快照：每次推送成功后把"刚被覆盖的那一版"存进快照环。
     //   节流在 pushAutoHistory 里（60s，老项目 :8469 同值同理由）。
@@ -3245,7 +3326,9 @@ async function loadHistIntoMenu(name: string): Promise<void> {
 async function pushAutoHistory(name: string, prev: Doc): Promise<void> {
   const dk = currentDk;
   if (!dk) return;
-  if (!autoSnapshotThrottled(Date.now())) return;
+  // 🔴 P1-3：节流**必须带 noteId**。此前是模块级单值 ⇒ A 笔记刚自动存一版，
+  //   60s 内切到 B 编辑，B 的自动快照一律被吞（B 永远收不到自动版本）。
+  if (!autoSnapshotThrottled(Date.now(), name)) return;
   await pushHistory(name, prev, dk.key, dk, false);
 }
 
@@ -4982,6 +5065,11 @@ function route(): void {
 }
 
 function boot(): void {
+  // 🔴🔴 P0-4：600k 次 PBKDF2 挪进 Worker（换机恢复 100 篇曾把主线程冻 13~26 秒）。
+  //   必须**最早**装：解锁/恢复的任何派生都要走它。装不上（无 Worker / CSP 拦
+  //   blob: / 老 WebView）只是回到原来的慢，`deriveKey` 内部会回落主线程，
+  //   **绝不会变成解锁失败** —— 所以这里不判返回值、不弹错。
+  installKdfWorker();
   applyTheme();
   // 🔴 隐藏的 file input 必须在启动时就建好（见 ensureUploadInput 的注释）：
   //   懒创建会让"第一次点击"成为唯一能走通的机会，一旦那次失败按钮就永久是死的。

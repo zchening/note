@@ -173,7 +173,16 @@ export async function unlock(deps: UnlockDeps): Promise<UnlockResult> {
 
   /* --- 情况一：远端有信封 --- */
   if (remote.kind === 'env') {
-    const iter = remote.env.kdf.iter;
+    // 🔴 这里**刻意不读** `remote.env.kdf.iter`。
+    //   实测（2026-10 审计）：`const iter = remote.env.kdf.iter;` 自声明起
+    //   **从未被读取** —— 本分支用的迭代次数一律来自 `deriveKey` 返回的 `dk.iter`，
+    //   远端信封里的 iter 不参与派生（deriveKey 只吃 salt）。
+    //   它原本想做的"迭代次数校验"**已经在下游生效**：`decryptString()` 会对
+    //   **同一个** env 判 `!Number.isInteger(kdf.iter) || kdf.iter < 100_000`
+    //   并抛 CryptoError（shared-schema/src/crypto.ts:165），下面那次
+    //   decryptString 调用必然走到它，异常在此处归入 PASS_ERROR。
+    //   ⇒ 在本文件里补一份同样的判据只会让阈值有两处可改（漂移零报错），
+    //     所以删掉这个未读变量，而不是留着"看起来校验过"的死代码。
     let dk: DerivedKey;
     try {
       // 🔴 用**远端信封里的 salt** 派生。换了 salt 就是另一把钥匙，必然失败。

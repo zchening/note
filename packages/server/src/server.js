@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import * as failmap from './failmap.js';
 import { upsignSign } from './upsign.js';
 import * as guards from './guards.js';
+import { clientIpFrom } from './net-ip.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +56,25 @@ for (const d of [DATA_DIR, NOTES_DIR, META_DIR, ARCADE_DIR]) {
 
 guards.init(DATA_DIR); // wk-mode.txt 档位文件定位（热切用，见 guards.js）
 
+/* 🔴🔴 P1-2（选 A：fail-closed）启动期凭据闸配置校验。
+ * 显式给出非法 wk-mode ⇒ 直接 fatal 退出，绝不带病运行；
+ * 完全未配置 ⇒ 默认 off 并打醒目告警。必须在监听端口之前执行。 */
+try {
+  const wk = guards.checkWkModeConfig();
+  if (wk.warned) {
+    console.warn(
+      `[guards] ⚠️  wk-mode 未显式配置，按默认 'off' 启动（写闸完全关闭，任何人可写）。` +
+      `生产环境请在 wk-mode.txt 或 NS_BJ_WK_MODE 写入 full / new-only。`,
+    );
+  } else {
+    console.log(`[guards] wk-mode = ${wk.mode}（来源 ${wk.source}）`);
+  }
+} catch (e) {
+  console.error(String(e && e.message ? e.message : e));
+  console.error('[guards] 凭据闸配置非法，服务拒绝启动。');
+  process.exit(1);
+}
+
 /* ------------------------------------------------------------------ *
  * 安全不变量（从老项目继承，不许放宽）
  * ------------------------------------------------------------------ */
@@ -73,13 +93,34 @@ function validId(id) {
  * 取首段等于任何人都能靠轮换 XFF 头绕过失败锁定，必须取末段。
  * （老项目 v5.52 踩过这个坑，注释留着，别改回去。）
  */
+/**
+ * 取客户端 IP。
+ *
+ * Caddy 反代把真实 IP 追加在 XFF **末尾**，首段是客户端可伪造的。
+ * 取首段等于任何人都能靠轮换 XFF 头绕过失败锁定，必须取末段。
+ * （老项目 v5.52 踩过这个坑，注释留着，别改回去。）
+ *
+ * 🔴🔴 P1-10：XFF **只有在请求确实来自可信前置时才认**。判定与取值都在
+ *   `net-ip.js`（抽出来是为了能单测 —— server.js 一 import 就会 listen）。
+ *   8090 若直曝或代理透传 XFF，攻击者每次换一个 XFF 就换一个限流桶 ⇒
+ *   `failmap` / `guards.wkLimited` / `guards.scanMap` 全部形同虚设。
+ */
 function clientIp(req) {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    const parts = xff.split(',').map((s) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.socket.remoteAddress || 'unknown';
+  return clientIpFrom(req.headers, req.socket.remoteAddress, process.env.NS_BJ_TRUSTED_PROXY);
+}
+
+/**
+ * 失败计数桶的键（P1-11：读写分桶）。
+ *
+ * 🔴🔴 为什么必须分：`failmap` 的锁会同时挡读和写，而 `/api/fail` 的 POST
+ *   **无鉴权**（任何匿名者都能打）。共用一把 key 时，二十次匿名 POST 就能把
+ *   某个 IP × 某笔记的**读**锁死 10 分钟 —— 受害者连自己的笔记都读不到。
+ *   分桶后：自报只进写桶，读桶由服务端真实失败路径（探测不存在的笔记）累加。
+ *
+ * @param {'r'|'w'} kind 'r'=读桶 'w'=写桶
+ */
+function failKey(ip, id, kind) {
+  return `${ip}:${id}:${kind}`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -132,6 +173,8 @@ let sseActive = 0;
 
 function sseAdd(id, res) {
   if (!sseClients.has(id)) sseClients.set(id, new Set());
+  // @ts-ignore —— 上一行刚保证过这个 key 一定存在，TS 的 Map.get 返回 `V | undefined`
+  //   无法知道；这不是缺陷（真为 undefined 时下一行就抛了，不会静默）。
   sseClients.get(id).add(res);
   sseActive++;
 }
@@ -373,13 +416,19 @@ async function route(req, res) {
   if (p === '/api/fail' || p.startsWith('/api/fail/')) {
     const id = p === '/api/fail' ? url.searchParams.get('id') || '' : p.slice('/api/fail/'.length);
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
-    const key = `${clientIp(req)}:${id}`;
     if (method === 'GET') {
-      const st = failmap.checkLimit(key);
+      const st = failmap.checkLimit(failKey(clientIp(req), id, 'r'));
       return sendJson(res, 200, st);
     }
     if (method === 'POST') {
-      const st = failmap.recordFail(key);
+      // 🔴🔴 P1-11：读写**分桶**。
+      //   此前 GET 查询与 POST 自报共用同一个 key `${ip}:${id}` ⇒ 任何匿名者
+      //   POST 二十次就能把"某 IP × 某笔记"的 **GET 读**锁死 10 分钟
+      //   （低代价 DoS / 误伤：受害者连自己的笔记都读不到，且零日志可查）。
+      //   现在：POST 只进**写桶** `'w'`（爆破锁定照旧生效），GET 只查**读桶** `'r'`
+      //   （读桶由服务端在真实读失败路径累加 —— 见 scanRecordMiss 那处）。
+      //   ⇒ 匿名自报最多锁住自己的写，再也无法牵连读。
+      const st = failmap.recordFail(failKey(clientIp(req), id, 'w'));
       return sendJson(res, st.locked ? 429 : 200, st, st.locked ? { 'Retry-After': String(st.retryAfter) } : {});
     }
     return sendJson(res, 405, { error: 'method not allowed' });
@@ -400,7 +449,7 @@ async function route(req, res) {
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
     req.resume(); // POST 带体：先抽干，任何分支都不留悬挂请求体
     const ip = clientIp(req);
-    const key = `${ip}:${id}`;
+    const key = failKey(ip, id, 'w');
     const st = failmap.checkLimit(key);
     if (st.locked) {
       return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
@@ -447,7 +496,8 @@ async function route(req, res) {
     if (hm) {
       const id = hm[1];
       if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
-      const key = `${clientIp(req)}:${id}`;
+      // 🔴 P1-11 分桶：history 的 GET 是读、PUT 是写，按方法分流。
+      const key = failKey(clientIp(req), id, method === 'GET' ? 'r' : 'w');
       const st = failmap.checkLimit(key);
       if (st.locked) {
         return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
@@ -504,6 +554,8 @@ async function route(req, res) {
         // 老项目 server.js:524-526 同一注释）。
         const wkLockH = guards.wkLimited(clientIp(req), id);
         if (wkLockH) return sendJson(res, 429, { error: 'locked', retryAfter: wkLockH });
+        // @ts-ignore —— id 来自路由正则的捕获组（上面 `const id = hm[1]`），
+        //   noUncheckedIndexedAccess 把它算成 `string | undefined`，但正则已保证有捕获。
         const wkcH = guards.wkCheckNote(req, clientIp(req), id, await readNoteParsed(id), obj, noteExists);
         if (!wkcH.ok) return sendJson(res, wkcH.code, wkcH.mode ? { error: wkcH.error, mode: wkcH.mode } : { error: wkcH.error });
         const hist = await readHist(id);
@@ -532,7 +584,9 @@ async function route(req, res) {
           try {
             await writeHist(id, hist);
           } catch (e) {
-            return sendJson(res, 500, { error: 'write failed', detail: String(e && e.message) });
+            // 🔴 P1-13：fs 错误带服务器绝对路径，绝不回显（详见下方写路径的同款注释）。
+            console.error('[hist write failed] ' + id + ': ' + String(e && e.message ? e.message : e));
+            return sendJson(res, 500, { error: 'write failed' });
           }
           failmap.recordOk(key);
           // 🔴 写后广播与 POST 笔记同款，让另一台设备的快照环也跟着更新。
@@ -551,7 +605,7 @@ async function route(req, res) {
     const id = p.slice('/api/note/'.length);
     if (!validId(id)) return sendJson(res, 400, { error: 'bad id' });
     const ip = clientIp(req);
-    const key = `${ip}:${id}`;
+    const key = failKey(ip, id, 'r');
     const st = failmap.checkLimit(key);
     if (st.locked) {
       return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
@@ -567,15 +621,27 @@ async function route(req, res) {
       // 凭据哈希不出门：「是否已认领」本身就是探测者想要的信号（老项目 server.js:560-563）。
       // JSON.parse 每次产出新对象，delete 即安全剥除，其余键与序逐字不变。
       const obj = JSON.parse(txt);
-      if (obj && typeof obj === 'object' && 'wkHash' in obj) {
-        delete obj.wkHash;
-        return send(res, 200, JSON.stringify(obj));
+      const out = obj && typeof obj === 'object' && 'wkHash' in obj
+        ? (delete obj.wkHash, JSON.stringify(obj))
+        : txt;
+      // 🔴🔴 P1-14：轮询短路。客户端每 2s 无条件 GET 全文（解密 + parse +
+      //   多次 canonicalize），后台长期做无用功、移动端耗电。服务端给强 ETag，
+      //   客户端带 If-None-Match ⇒ 未变则 304 空体，一次全量拉取全省掉。
+      //   🔴 ETag 必须基于**真正要发出去的字节**（wkHash 已剥除后的 out），
+      //   否则客户端算出的 etag 与服务端永远不等 ⇒ 304 永不命中（比没做还糟）。
+      const etag = '"' + crypto.createHash('sha256').update(out, 'utf8').digest('hex').slice(0, 32) + '"';
+      const inm = req.headers['if-none-match'];
+      if (typeof inm === 'string' && inm === etag) {
+        return send(res, 304, '', { ETag: etag, 'Cache-Control': 'no-store' });
       }
-      return send(res, 200, txt);
+      return send(res, 200, out, { ETag: etag, 'Cache-Control': 'no-store' });
     } catch {
       // 解密失败/没有这篇也要给 200 + 空体：客户端据此判定"此处无笔记"，
       // 给 4xx 会让它当成网络错误重试（老项目这个坑踩过）
       guards.scanRecordMiss(ip);
+      // 🔴 P1-11：读桶只由**服务端真实失败路径**累加（探测不存在的笔记）。
+      //   外部自报再也碰不到它 ⇒ 匿名 DoS 锁读这条路被彻底关掉。
+      failmap.recordFail(failKey(ip, id, 'r'));
       return send(res, 200, '');
     }
   }
@@ -589,7 +655,7 @@ async function route(req, res) {
       return sendJson(res, 400, { error: 'reserved name' });
     }
     const ip = clientIp(req);
-    const key = `${ip}:${id}`;
+    const key = failKey(ip, id, 'w');
     const st = failmap.checkLimit(key);
     if (st.locked) {
       return sendJson(res, 429, { error: 'locked' }, { 'Retry-After': String(st.retryAfter) });
@@ -622,6 +688,27 @@ async function route(req, res) {
       if (wkc.swap || wkc.claim) obj.wkHash = wkc.wk;
       else if (wkc.claimed && typeof cur.wkHash === 'string') obj.wkHash = cur.wkHash;
       toWrite = JSON.stringify(obj);
+      // 🔴🔴 P1-9：已存在但未认领的档，**首次带凭据的写只登记、不覆盖正文**。
+      //   原语义（guards B1）是"第一次凭据即认领"且**同时写正文** ⇒ 知道笔记名的
+      //   人带任意凭据写一次就既登记了自己的凭据、又把正文冲掉 —— 真主的正文
+      //   永久丢失，且此后 403 无法换绑。
+      //   现在：只把 wkHash 落进**原有档**，正文一字不动，返回 claimOnly 让调用方
+      //   知道"这次只登记了"（合法客户端下一轮同步自然会把正文写上去）。
+      //   残余风险（如实记录）：抢注**凭据本身**仍未堵（堵它需要 claim 端点做
+      //   正文信封自证，属协议级改动，本版不做）—— 但"正文被覆盖"这条最致命的
+      //   数据丢失路径已经被切断。
+      if (wkc.claimOnly) {
+        const merged = { ...cur, wkHash: wkc.wk };
+        const only = JSON.stringify(merged);
+        try {
+          await writeAtomic(notePath(id), only);
+          sseBroadcast(id, { t: 'note', id, v: Date.now() });
+          return sendJson(res, 200, { ok: true, size: only.length, claimOnly: true });
+        } catch (e) {
+          console.error('[claim write failed] ' + id + ': ' + String(e && e.message ? e.message : e));
+          return sendJson(res, 500, { error: 'write failed' });
+        }
+      }
     }
     try {
       await writeAtomic(notePath(id), toWrite);
@@ -629,7 +716,11 @@ async function route(req, res) {
       sseBroadcast(id, { t: 'note', id, v: Date.now() });
       return sendJson(res, 200, { ok: true, size: toWrite.length });
     } catch (e) {
-      return sendJson(res, 500, { error: 'write failed', detail: String(e && e.message) });
+      // 🔴🔴 P1-13：fs 错误里带**服务器绝对路径**（盘符 + 目录），回显给客户端
+      //   等于把部署结构送出去。详细原因只进服务端日志；对外一律固定文案
+      //   （与既有"错口令与篡改同一话术"的安全口径一致）。
+      console.error('[write failed] ' + id + ': ' + String(e && e.message ? e.message : e));
+      return sendJson(res, 500, { error: 'write failed' });
     }
   }
 
@@ -883,7 +974,10 @@ async function route(req, res) {
     };
     const rm = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
     if (rm) {
+      // @ts-ignore —— rm[1]/rm[2] 是 `/^bytes=(\d*)-(\d*)$/` 的两个捕获组，
+      //   正则保证匹配成功时二者都存在（空串也是存在）；noUncheckedIndexedAccess 只认下标。
       let start = rm[1] === '' ? null : parseInt(rm[1], 10);
+      // @ts-ignore —— 同上，rm[2]
       let end = rm[2] === '' ? null : parseInt(rm[2], 10);
       // bytes=-N  = 末尾 N 字节（后缀区间）
       if (start === null && end !== null) { start = Math.max(0, total - end); end = total - 1; }
@@ -922,6 +1016,38 @@ async function route(req, res) {
   return sendJson(res, 404, { error: 'not found' });
 }
 
+/**
+ * P1-12：全站 Content-Security-Policy（响应头，覆盖所有 HTML 文档响应）。
+ *
+ * 🔴 为什么必须加：全仓此前**零 CSP**，而 `validateSpan` 对 `href` 只校验
+ *   `typeof === 'string'` ⇒ 经同步或 MCP 写入的文档可带 `javascript:` / `data:`
+ *   链接，用户一点就在同源上下文里执行。CSP 是最后一道兜底。
+ *
+ * 🔴 取值依据（都是**真实用到**的，不是拍脑袋）：
+ *   - `'unsafe-inline'`（style）：`www/index.html` 内联了 162KB CSS；UI 还写 style 属性。
+ *   - `img-src data:`：笔记内图片就是 data URL；`blob:`：导出长图用 canvas.toBlob。
+ *   - `worker-src blob:`：P0-4 的 PBKDF2 Worker 是 Blob URL 起的。
+ *   - `connect-src 'self'`：SSE（`/api/stream/`）与全部 `/api/*` 都同源；
+ *     额外给 `https:` 是因为 App 内 WebView 可能走 https 直连（不是放宽，是防误伤）。
+ *   - `object-src 'none'` / `base-uri 'none'` / `frame-ancestors 'none'`：老三样。
+ *
+ * 🔴 不加 `'unsafe-eval'`：全仓无 eval / new Function（零依赖打包，无需运行时求值）。
+ *   若将来某个 vendor 库需要它，那是要**换库**，不是放宽这条策略。
+ */
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' https:",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+].join('; ');
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -954,17 +1080,21 @@ async function serveStatic(p, res, headOnly) {
         'Content-Length': buf.length,
         'Cache-Control': 'no-cache',
         'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': CSP,
       });
       return res.end(headOnly ? undefined : buf);
     }
     const buf = await fsp.readFile(target);
     const ext = path.extname(target).toLowerCase();
+    const isHtml = ext === '.html';
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': buf.length,
       // index.html 不缓存（保证发版即时生效），带 hash 的资源可以长缓存
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300',
+      'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=300',
       'X-Content-Type-Options': 'nosniff',
+      // 🔴 CSP 只给 HTML 文档：API 响应带 CSP 毫无意义（还会让某些客户端困惑）。
+      ...(isHtml ? { 'Content-Security-Policy': CSP } : {}),
     });
     return res.end(headOnly ? undefined : buf);
   } catch {
@@ -976,6 +1106,7 @@ async function serveStatic(p, res, headOnly) {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Length': buf.length,
           'Cache-Control': 'no-cache',
+          'Content-Security-Policy': CSP,
         });
         return res.end(headOnly ? undefined : buf);
       } catch {

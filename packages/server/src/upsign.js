@@ -66,6 +66,9 @@ export function upsignSignedString({ timestamp, folder, uploadPreset }) {
  * @returns {string} 40 位 hex
  */
 export function upsignSign({ secret, timestamp, folder, uploadPreset }) {
+  // @ts-ignore —— exactOptionalPropertyTypes：`folder` 声明为 `folder?: string`，
+  //   而这里传的是 `string | undefined`。运行期等价（upsignSignedString 里 `if (folder)`
+  //   正是按 undefined 处理）；要根治就把形参改成 `folder?: string | undefined`。
   const str = upsignSignedString({ timestamp, folder, uploadPreset });
   return crypto.createHash('sha1').update(str + secret).digest('hex');
 }

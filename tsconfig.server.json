@@ -1,0 +1,50 @@
+{
+  // 🔴🔴 为什么这份配置单独存在：根 tsconfig.json 的 include 只有
+  //   packages/shared-schema/src 与 packages/client/src，packages/server/src/*.js
+  //   **压根不在程序内** —— 那几处 `// @ts-check` 从来没被执行过一次
+  //   （P0-1 那类 MCP 缺陷正是从这个洞里漏过去的）。本文件把它拉进类型检查。
+  //
+  // 🔴 两处**刻意的**放宽，都只针对「给没有类型标注的既有 JS 开 checkJs」这件事，
+  //   **不动** strict / strictNullChecks / noUncheckedIndexedAccess /
+  //   exactOptionalPropertyTypes 任何一项（那才是真正能抓出缺陷的开关）：
+  //   1. noImplicitAny:false —— 见下方 compilerOptions 里的说明。
+  //   2. useUnknownInCatchVariables:false —— 见下方说明。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "types": ["node"],
+
+    // 🔴 放宽 1：server.js 是 45KB 的零依赖手写 JS，函数参数全无标注。
+    //   开 noImplicitAny 会一次报 47 条 TS7006（"Parameter 'x' implicitly has an 'any' type"），
+    //   而**这 47 条全是同一件事的重复**：JS 本来就没写类型。
+    //   它们会把真正有价值的发现（TS2339/TS2345/TS1016…）彻底淹没 ——
+    //   一条噪音闸 = 没人看 = 等于没闸。先让闸跑起来、报出真问题，
+    //   再逐步补 JSDoc 把这个开关拧回去。
+    "noImplicitAny": false,
+
+    // 🔴 放宽 2：server 里 11 处 `catch (e) { ... e.code / e.message ... }`。
+    //   strict 下 catch 变量是 unknown，被 `if (e && ...)` 窄化成 `{}` 之后
+    //   取属性就报 TS2339 —— 这是 **TS 对 JS 惯用写法**的冲突，不是缺陷
+    //   （运行期 e 一定是 Error 或我们抛的带 code 的对象）。
+    //   关掉它让 catch 变量回到 any，与 JS 运行期语义一致；
+    //   strictNullChecks 仍然生效，所以"e 可能是 null"这类判断依然会被查。
+    "useUnknownInCatchVariables": false
+  },
+  "include": [
+    "packages/server/src/**/*.js"
+  ],
+  "exclude": ["node_modules", "www", "android", "**/dist/**"]
+}

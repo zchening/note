@@ -89,6 +89,64 @@ export interface DerivedKey {
   iter: number;
 }
 
+/* ---------------- P0-4：派生卸载（Web Worker）+ 同盐记忆化 ---------------- */
+
+/**
+ * PBKDF2 卸载器的形状：给定口令/salt/迭代，返回 **32 字节原始密钥位**。
+ *
+ * 🔴🔴 返回原始位而不是 `CryptoKey`：最终的 AES-GCM `CryptoKey` 仍然在主线程
+ *   `importKey` 出来并维持 `extractable:false`，与既有安全语义**逐字一致**
+ *   （raw key 依旧永不出 WebCrypto）。传位不传钥匙也避免了跨线程传递
+ *   CryptoKey 在不同 WebView 上的实现差异。
+ */
+export type Pbkdf2Offload = (
+  passphrase: string,
+  saltB64: string,
+  iter: number,
+) => Promise<Uint8Array>;
+
+/**
+ * 由宿主（client）注入的卸载器；未注入 ⇒ 走主线程同一套 WebCrypto。
+ * 🔴 卸载器**抛错一律回落**主线程路径（见 deriveKey）：Worker 不可用 /
+ *   CSP 拦 blob: / 老 WebView 不支持，都只是变慢，**绝不能变成解锁失败**。
+ */
+let pbkdf2Offload: Pbkdf2Offload | undefined = undefined;
+
+/** 装卸载器；返回 true 表示已装上。传 undefined 表示摘除（测试用）。 */
+export function setPbkdf2Offload(fn: Pbkdf2Offload | undefined): boolean {
+  pbkdf2Offload = fn;
+  return fn !== undefined;
+}
+
+/**
+ * 同 (口令, salt, 迭代) 的派生记忆化。
+ *
+ * 🔴🔴 为什么必须有：换机恢复 / 收藏批量导入会对**同一篇**反复派生
+ *   （自证一次、开信封一次、失败再回落一次 —— 实测同一 salt 会被算 2~3 遍）。
+ *   600k 次 PBKDF2 单次 ~130ms，白算两遍就是 0.26s 的纯浪费，而且是**串行**
+ *   堆在主线程上。缓存把第二次及以后降到 ~0。
+ *
+ * 🔴 存的是 Promise 而不是结果：并发调用同一 key 时共享同一次计算
+ *   （否则 N 个并发仍会算 N 遍，缓存形同虚设）。
+ * 🔴 有上限（防无界增长）：换机扫 100 篇会产生 100 个条目，不设上限就是泄漏。
+ */
+const DERIVE_CACHE_MAX = 64;
+const deriveCache = new Map<string, Promise<DerivedKey>>();
+
+/** 缓存键。口令原文进键是不可避免的（要区分不同口令）——与 `sessionPass`
+ *  常驻内存同一风险级别，且提供 `clearDerivedKeyCache()` 供锁屏/换笔记调用。 */
+const cacheKeyOf = (p: string, s: string, i: number): string => `${i}:${s}:${p}`;
+
+/** 清空派生缓存（锁屏 / 换笔记 / 退出时调）。 */
+export function clearDerivedKeyCache(): void {
+  deriveCache.clear();
+}
+
+/** 当前缓存条目数（测试用）。 */
+export function derivedKeyCacheSize(): number {
+  return deriveCache.size;
+}
+
 /**
  * 口令派生密钥。注意：salt 必须随每次加密重新生成并写进 envelope，
  * 固定 salt 会让"同一口令 + 同一明文"产生同一密钥，丧失 GCM 的语义安全。
@@ -97,8 +155,58 @@ export async function deriveKey(passphrase: string, saltB64?: string): Promise<D
   if (typeof passphrase !== 'string' || passphrase.length === 0) {
     throw new CryptoError('口令为空');
   }
-  const salt = saltB64 !== undefined ? b64ToBytes(saltB64) : randomBytes(SALT_LEN);
+  // 🔴 salt 未给 ⇒ 现生成，**绝不进缓存**（每次都是新钥匙，缓存只会白白占坑）。
+  const fresh = saltB64 === undefined;
+  const salt = fresh ? randomBytes(SALT_LEN) : b64ToBytes(saltB64);
   if (salt.length < 8) throw new CryptoError('salt 长度异常');
+  const saltKey = bytesToB64(salt);
+  if (!fresh) {
+    const hit = deriveCache.get(cacheKeyOf(passphrase, saltKey, KDF_ITER));
+    if (hit) return hit;
+  }
+  const task = deriveKeyUncached(passphrase, salt, saltKey);
+  if (!fresh) {
+    deriveCache.set(cacheKeyOf(passphrase, saltKey, KDF_ITER), task);
+    // 🔴 失败了别把 rejected promise 留在缓存里（否则同一错误会被永久缓存，
+    //   换口令重试也永远失败）。
+    task.catch(() => {
+      deriveCache.delete(cacheKeyOf(passphrase, saltKey, KDF_ITER));
+    });
+    // 超限丢最旧（Map 的插入顺序即访问顺序的近似，够用且零成本）。
+    while (deriveCache.size > DERIVE_CACHE_MAX) {
+      const oldest = deriveCache.keys().next();
+      if (oldest.done) break;
+      deriveCache.delete(oldest.value);
+    }
+  }
+  return task;
+}
+
+async function deriveKeyUncached(
+  passphrase: string,
+  salt: Uint8Array,
+  saltKey: string,
+): Promise<DerivedKey> {
+  // 🔴🔴 P0-4：能卸载就卸载 —— 600k 次 PBKDF2 在主线程是 ~130ms 的硬冻结
+  //   （换机恢复 100 篇 = 13~26 秒主线程全冻，低端安卓直接 ANR）。
+  //   Worker 里算完只把 32 字节送回来，主线程 importKey 得到同一把钥匙。
+  // 🔴 卸载失败**一律回落**：CSP 拦 blob: / WebView 不支持 / Worker 崩，
+  //   都只是"回到原来的慢"，绝不能变成"解锁失败"。
+  const off = pbkdf2Offload;
+  if (off) {
+    try {
+      const bits = await off(passphrase, saltKey, KDF_ITER);
+      if (bits && bits.length * 8 === KEY_LEN_BITS) {
+        const key = await subtle().importKey('raw', bits as unknown as BufferSource, 'AES-GCM', false, [
+          'encrypt',
+          'decrypt',
+        ]);
+        return { key, saltB64: saltKey, iter: KDF_ITER };
+      }
+    } catch {
+      /* 回落主线程 */
+    }
+  }
   const base = await subtle().importKey('raw', enc.encode(passphrase), 'PBKDF2', false, [
     'deriveKey',
   ]);
@@ -115,7 +223,7 @@ export async function deriveKey(passphrase: string, saltB64?: string): Promise<D
     false, // extractable=false —— 派生出的就是最终密钥，不许再导出
     ['encrypt', 'decrypt'],
   );
-  return { key, saltB64: bytesToB64(salt), iter: KDF_ITER };
+  return { key, saltB64: saltKey, iter: KDF_ITER };
 }
 
 /* ---------------- 加解密 ---------------- */

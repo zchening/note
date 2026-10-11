@@ -161,26 +161,107 @@ export async function pushHistory(
 }
 
 /**
- * 自动快照节流器。
+ * 自动快照节流器 —— **按 noteId 分桶**。
  *
  * 🔴 为什么要节流：自动快照每次保存都打一次，而保存是去抖 700ms 一轮。
  *   不节流的话连续打字 30 秒能把 10 条的环全冲掉，只剩最后几十秒的内容 ——
  *   而用户想找回的恰恰是"一小时前那段"。
  *
- * 老项目用模块级 `lastAutoSnap` 单值（本项目同一时刻只服务一篇笔记，等价）。
- * `manual=true`（菜单里显式点「新增历史版本」）**不过节流**：那是用户明确要的。
+ * 🔴🔴 为什么必须**按 noteId 分桶**（P1-3 的病因）：
+ *   老项目用模块级 `lastAutoSnap` **单值**，那句"本项目同一时刻只服务一篇笔记"
+ *   在老项目里成立，在本项目**不成立** —— 本项目支持多 mountEditor / 中途换笔记。
+ *   单值的症状：A 笔记刚自动存了一版，60 秒内切到 B 编辑 ⇒ B 的自动快照
+ *   **一律被吞**，B 收不到任何自动版本，而界面零报错（节流返回 false 是"合法"的）。
+ *   `manual=true`（菜单里显式点「新增历史版本」）**不过节流**：那是用户明确要的。
+ *
+ * 🔴🔴 为什么必须**有上限**（分桶带来的新风险：内存无界）：
+ *   Map 的 key 是 noteId，用户每新建一篇笔记就多一个 key，且 key **永不过期**
+ *   （60 秒窗口只决定"这一桶要不要存"，不决定"这一桶要不要留"）。
+ *   长会话 + 大量笔记 ⇒ Map 随笔记数无限增长。这比单值那个 bug 更隐蔽：
+ *   它不报错、不丢功能，只是内存一路涨到被系统回收（APK 上就是闪退）。
+ *   ⇒ 超过 `MAX_TRACKED_NOTES` 个 key 时丢**最久没被快照过**的那些桶。
+ *   丢桶的代价只是"那篇笔记的下一次自动快照可以立刻存"（节流被重置），
+ *   而节流本来就是保险不是主链路 —— 这是唯一可以安全丢弃的东西。
  */
-let lastAutoSnap = 0;
 
-export function autoSnapshotThrottled(now: number): boolean {
-  if (now - lastAutoSnap < AUTO_SNAPSHOT_THROTTLE_MS) return false;
-  lastAutoSnap = now;
+/** 桶数上限。超过即丢最旧的桶（理由见上）。 */
+export const MAX_TRACKED_NOTES = 200;
+
+/**
+ * noteId → 上次自动快照时刻。
+ *
+ * 🔴 用 Map 而不是对象字面量：noteId 是**用户输入**的（笔记名/url 片段），
+ *   拿它当对象 key 会撞上 `__proto__` / `constructor` 这类原型属性。
+ */
+const lastAutoSnap = new Map<string, number>();
+
+/**
+ * 老调用方式（不传 noteId）走的桶。
+ *
+ * 🔴 留它是为了**向后兼容**：既有 `autoSnapshotThrottled(now)` 的调用点在改完
+ *   之前仍是单值语义，行为不变（同一时刻只服务一篇笔记）。
+ *   新调用点请一律传 noteId。
+ */
+const LEGACY_KEY = '';
+
+/**
+ * 裁到 `max` 个桶，返回丢掉的桶数。
+ *
+ * 🔴 丢的是**迭代序最前**的桶：下面的写入路径是"先 delete 再 set"，
+ *   于是 Map 的迭代序 = 「最近快照过」从旧到新 —— 头部正是最久没动的笔记。
+ */
+function trimBuckets(max: number): number {
+  const over = lastAutoSnap.size - max;
+  if (over <= 0) return 0;
+  let dropped = 0;
+  // 🔴 边迭代边删是安全的：Map 迭代器允许删除**已经走过**的条目。
+  const it = lastAutoSnap.keys();
+  for (let i = 0; i < over; i += 1) {
+    const n = it.next();
+    if (n.done) break;
+    lastAutoSnap.delete(n.value);
+    dropped += 1;
+  }
+  return dropped;
+}
+
+/**
+ * 手动裁剪（供"换笔记 / 退出编辑器"这类时刻显式收口）。
+ * @returns 丢掉的桶数
+ */
+export function pruneAutoSnapshot(max: number = MAX_TRACKED_NOTES): number {
+  return trimBuckets(max);
+}
+
+/**
+ * 这一刻**该**为 `noteId` 存一版自动快照吗？是则同时把时刻记进桶里。
+ *
+ * 🔴 是"问 + 记"合一（不是纯查询）：分桶之后就没有"只问不记"的调用方了，
+ *   拆成两个函数反而会让"问了没记"这种漏记成为可能。
+ *
+ * @param now `Date.now()`
+ * @param noteId 当前笔记 id。不传 = 老的单桶语义（向后兼容，见 LEGACY_KEY）
+ */
+export function autoSnapshotThrottled(now: number, noteId?: string): boolean {
+  const key = noteId === undefined || noteId === '' ? LEGACY_KEY : noteId;
+  const last = lastAutoSnap.get(key) ?? 0;
+  if (now - last < AUTO_SNAPSHOT_THROTTLE_MS) return false;
+  // 🔴 先 delete 再 set：**刷新插入序**，把这一桶挪到末尾（= 最近用过）。
+  //   只 set 不 delete 的话，老桶的插入序原地不动，裁剪时会被当成最旧的先丢。
+  lastAutoSnap.delete(key);
+  lastAutoSnap.set(key, now);
+  trimBuckets(MAX_TRACKED_NOTES);
   return true;
+}
+
+/** 当前记了几个桶（测试钉内存上界用；生产不读）。 */
+export function _autoSnapshotBucketCount(): number {
+  return lastAutoSnap.size;
 }
 
 /** 供测试复位节流器（不导出到生产路径）。 */
 export function _resetAutoSnapshot(): void {
-  lastAutoSnap = 0;
+  lastAutoSnap.clear();
 }
 
 /**

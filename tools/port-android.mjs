@@ -26,6 +26,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertWrittenEqual } from './lib/write-verify.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OLD_ROOT = 'D:/Users/zchen/Documents/TraeProject/notesync/android';
@@ -39,6 +40,8 @@ const PKG_NEW = 'cn.xuyinji.bj';
 
 const log = (...a) => console.log(...a);
 let copied = 0;
+/** 落盘后**读回来**比对通过的文件数（与 copied 必须相等，见汇总处的自检） */
+let verified = 0;
 let replaced = 0;
 const skipped = [];
 
@@ -188,6 +191,11 @@ function copyOne(dstRel, srcRel, force) {
   if (TEXT_EXT.has(ext)) {
     const text = substitute(readFileSync(src, 'utf8'));
     writeFileSync(dst, text, 'utf8');
+    // 🔴🔴 落盘后**立刻读回来**逐字节比对（见 tools/lib/write-verify.mjs 的文件头）。
+    //   文本分支比对的是**替换后**的文本（不是 src 原文）：src 里是老包名/老域名，
+    //   dst 里必须是替换后的版本 —— 拿 src 原文去比会必然不等，那是恒红，等于没有校验。
+    assertWrittenEqual(dst, dstRel, text);
+    verified++;
     // 🔴 替换后自检：源码/资源里绝不该再出现老包名或老域名。留着就是漏改，
     //   而症状是"编译过了但某个功能静默失灵"，属于最难查的一类。
     if (/\.(kt|java|xml)$/.test(srcRel) && text.includes(PKG_OLD)) {
@@ -198,6 +206,10 @@ function copyOne(dstRel, srcRel, force) {
     }
   } else {
     copyFileSync(src, dst);
+    // 🔴🔴 二进制分支同样要"写完读回来"：copyFileSync 不抛异常 ≠ 盘上内容与源一致
+    //   （PNG 被截断、盘满、杀软拦截都能静默过）。比的是 **src 原文**（二进制不做替换）。
+    assertWrittenEqual(dst, dstRel, readFileSync(src));
+    verified++;
   }
   copied++;
 }
@@ -279,6 +291,14 @@ if (CHECK_ONLY) {
   log('[check-only] 未搬任何文件（只读自检模式）');
 } else {
   log('✅ 已移植 ' + copied + ' 个文件，文本替换生效于 ' + replaced + ' 个文件');
+  // 🔴🔴 verified 必须等于 copied：**每个**落盘的文件都要读过回来。
+  //   少一个就说明有写入分支没接校验 —— 而那正是"校验形同虚设"的由来：
+  //   9 个文件里 8 个比了、1 个没比，输出照样是 ✅。
+  if (verified !== copied) {
+    console.error(`\n❌ 落盘校验数 ${verified} ≠ 拷贝数 ${copied}（有写入分支漏接 assertWrittenEqual）`);
+    process.exit(1);
+  }
+  log('✅ 落盘校验：' + verified + ' 个文件逐个 sha256 比对通过（写完读回来，不是写完就算）');
 }
 if (skipped.length) {
   log('\n有意识跳过 ' + skipped.length + ' 项：');
