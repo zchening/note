@@ -168,3 +168,150 @@ export class ComposeGuard {
     return dec;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * v3.0.14 —— 组字会话水位线（撤稿吞字守卫）
+ *
+ * ── 真因（v3.0.13 真机日志钉死的新形状）─────────────────────────────────
+ *   塌方守卫盯的是「单帧灾难性掉幅」（≥30 字且 ≥50%）。v3.0.13 真机两份日志：
+ *   collapse=17 全在早期、组字中缩水（compose:drop）2→6 次**全部低于阈值**、
+ *   最终文档只剩第一句 13 字 —— 豆包语音的丢字走了另一条路：
+ *   组字会话内渐进放血（语音重识别修订，每步 -20 左右，碰不到阈值）+
+ *   会话收尾时整段撤稿（compositionend 后组字内容被宿主整体撤掉）。
+ *   单帧模型对这两类**全盲**。
+ *
+ * ── 修法：盯会话水位线，不盯单帧 ────────────────────────────────────────
+ *   一段组字会话（composing 连续为真）内记**峰值长度**与**峰值帧文档**；
+ *   会话结束（composing 转假的那帧）时若真源比峰值掉了超过
+ *   max(floorAbs, peak × floorRel) ⇒ 判「撤稿吞字」⇒ 把峰值帧文档回写真源。
+ *   此时组字已结束，重建不再杀活组字，与输入法无对抗：
+ *     - 会话内修订缩水：不触发（只看会话结束帧），峰值随增长更新；
+ *     - 收尾去填充词（呃/那个，掉十几字）：floorRel=15% 容差内不误伤；
+ *     - 撤稿（掉到只剩开头一句）：掉幅远超容差 ⇒ 救回整段口述。
+ *
+ * ── 判据 ────────────────────────────────────────────────────────────────
+ *   WD-01~07（compose-guard.test.mjs）先红后改；e2e 28 钉真实 update 监听
+ *   全链路（组字增长 → 撤稿帧 → 真源回到峰值）。
+ * ───────────────────────────────────────────────────────────────────────── */
+
+export interface WithdrawGuardConfig {
+  /** 会话结束帧：掉幅超过 max(floorAbs, peak×floorRel) 才判撤稿。 */
+  floorAbs: number;
+  floorRel: number;
+}
+
+export const DEFAULT_WITHDRAW_GUARD: WithdrawGuardConfig = {
+  floorAbs: 12,
+  floorRel: 0.15,
+};
+
+export interface WithdrawDecision {
+  restore: boolean;
+  /** 判撤稿时回写的峰值帧文档（守卫不解释内容，只存引用）。 */
+  doc: unknown;
+  peakLen: number;
+  currentLen: number;
+  reason: string;
+}
+
+export class WithdrawGuard {
+  /** active=组字会话进行中；ending=组字态已转假、撤稿宽限窗口（见下）；idle=无会话。 */
+  private phase: 'idle' | 'active' | 'ending' = 'idle';
+  private peakLen = 0;
+  private peakDoc: unknown = null;
+  /** ending 相位剩余判定次数：ce 的 flush update 常在真源被啃短**之前**到达
+   *  （e2e 探针实测：in:ce → upd len=108 d=0 → upd len=13 d=-95），会话结束
+   *  帧看到的还是峰值长度 ⇒ 判定必须再宽限 2 帧，等撤稿落地。 */
+  private evalsLeft = 0;
+  private readonly cfg: WithdrawGuardConfig;
+
+  constructor(cfg: WithdrawGuardConfig = DEFAULT_WITHDRAW_GUARD) {
+    this.cfg = cfg;
+  }
+
+  get isSessionActive(): boolean {
+    return this.phase !== 'idle';
+  }
+
+  get peak(): number {
+    return this.peakLen;
+  }
+
+  private evaluate(currentLen: number): WithdrawDecision {
+    const peak = this.peakLen;
+    const peakDoc = this.peakDoc;
+    const drop = peak - currentLen;
+    const threshold = Math.max(this.cfg.floorAbs, peak * this.cfg.floorRel);
+    if (drop > threshold && peakDoc != null) {
+      // 撤稿实锤：消费掉 pending（恢复帧自身 composing=false 且 phase=idle ⇒ 幂等）
+      this.phase = 'idle';
+      this.peakLen = 0;
+      this.peakDoc = null;
+      this.evalsLeft = 0;
+      return {
+        restore: true,
+        doc: peakDoc,
+        peakLen: peak,
+        currentLen,
+        reason: `withdraw ${peak}->${currentLen} drop=${drop}>${threshold.toFixed(1)}`,
+      };
+    }
+    return { restore: false, doc: null, peakLen: peak, currentLen, reason: 'within-tolerance' };
+  }
+
+  /**
+   * 每次 update 调一次（与 ComposeGuard.observe 同一调用点，同一 composing 口径）。
+   * @param currentLen 本帧导出文档的正文本长度
+   * @param composing 本帧是否组字中（输入事件流 isComposing ∨ editor.isComposing()）
+   * @param prevLen 上一帧长度（仅日志/未来扩展用；会话起点基准不需要单独存）
+   * @param exported 本帧导出文档（守卫只存引用，用于撤稿时回写峰值帧）
+   */
+  observe(
+    currentLen: number,
+    composing: boolean,
+    prevLen: number,
+    exported: unknown,
+  ): WithdrawDecision {
+    if (composing) {
+      if (this.phase === 'ending') {
+        // 组字还在继续（comp=1 帧又来了）⇒ 刚才的缩水是**修订**不是撤稿：
+        // 中止 pending，峰值以当前帧为基准重续（继续对抗历史峰值会与输入法打架）。
+        this.phase = 'active';
+        this.peakLen = currentLen;
+        this.peakDoc = exported;
+        this.evalsLeft = 0;
+        return { restore: false, doc: null, peakLen: this.peakLen, currentLen, reason: 'resumed' };
+      }
+      if (this.phase === 'idle') {
+        this.phase = 'active';
+        this.peakLen = currentLen;
+        this.peakDoc = exported;
+        return { restore: false, doc: null, peakLen: this.peakLen, currentLen, reason: '' };
+      }
+      if (currentLen > this.peakLen) {
+        this.peakLen = currentLen;
+        this.peakDoc = exported;
+      }
+      return { restore: false, doc: null, peakLen: this.peakLen, currentLen, reason: '' };
+    }
+    // composing=false：
+    if (this.phase === 'active') {
+      // 组字态转假的第一帧：立即判定（撤稿已在同一帧落地时这里直接命中），
+      // 同时进入 ending 宽限（ce 的 flush 先到、撤稿后到的情况靠这两帧兜住）。
+      this.phase = 'ending';
+      this.evalsLeft = 2;
+      return this.evaluate(currentLen);
+    }
+    if (this.phase === 'ending') {
+      this.evalsLeft -= 1;
+      if (this.evalsLeft <= 0) {
+        this.phase = 'idle';
+        this.peakLen = 0;
+        this.peakDoc = null;
+        return { restore: false, doc: null, peakLen: 0, currentLen, reason: 'pending-expired' };
+      }
+      return this.evaluate(currentLen);
+    }
+    return { restore: false, doc: null, peakLen: 0, currentLen, reason: '' };
+  }
+}

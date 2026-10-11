@@ -155,8 +155,10 @@ export function flightLines(): string[] {
   const head =
     `flight ${buf.length} 条（起点 ${startWall || 'n/a'}，t=相对毫秒）` +
     `｜全程 upd=${c['upd'] ?? 0} synthed=${c['cmp:synthed'] ?? 0}` +
-    ` orphan=${c['sel:orphaned'] ?? 0} cs=${c['in:cs'] ?? 0} ce=${c['in:ce'] ?? 0}` +
-    ` collapse=${c['gate:collapse'] ?? 0} drop=${c['compose:drop'] ?? 0}` +
+    ` orphan=${c['sel:orphaned'] ?? 0} o0=${c['orphan0'] ?? 0}` +
+    ` cs=${c['in:cs'] ?? 0} ce=${c['in:ce'] ?? 0}` +
+    ` collapse=${c['gate:collapse'] ?? 0} wd=${c['gate:withdraw'] ?? 0}` +
+    ` drop=${c['compose:drop'] ?? 0}` +
     ` bulk=${c['bulk'] ?? 0} gate=${sum('gate:')} tree=${sum('tree:')}`;
   return [head, ...buf.map((e) => `${String(e.t).padStart(8, ' ')} ${e.type} ${e.d}`)];
 }

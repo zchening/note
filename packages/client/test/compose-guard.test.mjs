@@ -99,3 +99,138 @@ test('COMPOSE-08 🔴 单块 + 阈值边界（current 恰好 = prev*(1-relDrop) 
   const d = decideCollapseRestore({ currentLen: 58, prevLen: 116, multiBlock: true, cfg: CFG });
   assert.equal(d.restore, false, '恰好等于相对阈值边界不算灾难性');
 });
+
+/* ============ WD 系列（v3.0.14）：组字会话水位线 —— 撤稿吞字守卫 ============ */
+/*
+ * v3.0.13 真机日志钉死的新丢字形状：collapse=17 全在早期、drop=2→6（4 次组字中
+ * 缩水全部低于塌方阈值）、最终文档只剩第一句 13 字 —— 渐进放血 + 收尾撤稿对
+ * 「单帧灾难性塌方」模型全盲。守卫改为盯**会话水位线**：一段组字会话
+ * （composing 连续为真）内记峰值长度与峰值帧文档；会话结束（composing 转假）
+ * 时若真源比峰值掉了超过 max(floorAbs, peak*floorRel) ⇒ 撤稿吞字 ⇒ 回写峰值帧。
+ * 此时组字已结束，重建不再杀活组字，无对抗。
+ */
+
+import { WithdrawGuard, DEFAULT_WITHDRAW_GUARD } from '../src/sync/compose-guard.ts';
+
+const WCFG = DEFAULT_WITHDRAW_GUARD;
+/** 假文档：长度即内容（纯对象，守卫只存引用不解释）。 */
+const fakeDoc = (n) => ({ tag: 'doc' + n });
+
+test('WD-01 🔴 撤稿吞字：会话内涨到峰值，结束时真源被啃短 ⇒ 必须回写峰值帧', () => {
+  const g = new WithdrawGuard(WCFG);
+  const peakDoc = fakeDoc(108); // 持引用：断言的是同一帧的 exported 对象
+  // 会话：组字帧 1→108（每帧 composing=true，长度递增）
+  for (let n = 1; n <= 108; n += 1) {
+    const d = g.observe(n, true, n - 1, n === 108 ? peakDoc : fakeDoc(n));
+    assert.equal(d.restore, false, '会话进行中绝不触发');
+  }
+  // 会话结束帧：composing=false，真源被啃到 13（豆包撤稿形状）
+  const end = g.observe(13, false, 108, fakeDoc(13));
+  assert.equal(end.restore, true, '🔴 峰值 108 → 结束 13，掉幅 95 远超阈值，必须判撤稿');
+  assert.equal(end.doc, peakDoc, '🔴 必须回写峰值那帧的文档（第 108 帧的 exported）');
+  assert.ok(end.reason.includes('108'), 'reason 必须带峰值与当前长度便于取证');
+});
+
+test('WD-02 会话内修订缩水不触发（只在会话结束帧判定）', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  // 语音重识别修订：组字继续，串变短（composing 仍 true）
+  assert.equal(g.observe(88, true, 108, fakeDoc(88)).restore, false);
+  assert.equal(g.observe(70, true, 88, fakeDoc(70)).restore, false);
+  // 修订后又涨回并超过旧峰值 ⇒ 峰值随行进更新
+  const d2 = g.observe(120, true, 70, fakeDoc(120));
+  assert.equal(d2.restore, false);
+  // 正常收尾：结束时长度 ≈ 峰值 ⇒ 不回写
+  const end = g.observe(119, false, 120, fakeDoc(119));
+  assert.equal(end.restore, false, '掉幅 1 在容差内，是正常收尾不是撤稿');
+});
+
+test('WD-03 容差：结束时掉幅在 max(floorAbs, peak*floorRel) 内不回写', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  // 豆包收尾去填充词（呃/那个）：掉 13 字 < max(12, 108*0.15=16.2) ⇒ 保留
+  const end = g.observe(95, false, 108, fakeDoc(95));
+  assert.equal(end.restore, false, '掉幅 13 ≤ 容差 16.2，是正常润色不是撤稿');
+});
+
+test('WD-04 小会话也保护：peak=20，结束时被啃到 6（掉 14 > max(12, 3)）⇒ 回写', () => {
+  const g = new WithdrawGuard(WCFG);
+  const peakDoc = fakeDoc(20);
+  for (let n = 1; n <= 20; n += 1) g.observe(n, true, n - 1, n === 20 ? peakDoc : fakeDoc(n));
+  const end = g.observe(6, false, 20, fakeDoc(6));
+  assert.equal(end.restore, true, '短口述被撤稿同样要救（floorAbs=12 兜住小会话）');
+  assert.equal(end.doc, peakDoc);
+});
+
+test('WD-05 会话结束后重新武装：新会话的 base/peak 全部重置', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  g.observe(13, false, 108, fakeDoc(13)); // 会话1 结束（撤稿）
+  // 新会话：从 14 涨到 40，正常结束
+  for (let n = 14; n <= 40; n += 1) {
+    const d = g.observe(n, true, n - 1, fakeDoc(n));
+    assert.equal(d.restore, false, '新会话不得被旧会话的峰值污染');
+  }
+  const end = g.observe(40, false, 40, fakeDoc(40));
+  assert.equal(end.restore, false, '新会话正常收尾');
+  // 新会话被撤稿：峰值必须是新会话的 40，不是旧会话的 108
+  const peakDoc2 = fakeDoc(40);
+  for (let n = 1; n <= 40; n += 1) g.observe(n, true, n - 1, n === 40 ? peakDoc2 : fakeDoc(n));
+  const end2 = g.observe(5, false, 40, fakeDoc(5));
+  assert.equal(end2.restore, true, '第二次撤稿同样要救');
+  assert.equal(end2.doc, peakDoc2, '回写的必须是**本会话**峰值帧（40），不是上会话的 108');
+});
+
+test('WD-06 无会话时 composing=false 是 no-op', () => {
+  const g = new WithdrawGuard(WCFG);
+  const d = g.observe(10, false, 12, fakeDoc(10));
+  assert.equal(d.restore, false, '没进过组字会话，普通编辑永不触发');
+});
+
+test('WD-07 🔴 撤稿恢复后本帧不得再触发（幂等：守卫状态已复位）', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 50; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  const end = g.observe(5, false, 50, fakeDoc(5));
+  assert.equal(end.restore, true);
+  // 恢复动作本身也是一次 update（长度跳回 50）：composing 仍 false，无会话 ⇒ no-op
+  const again = g.observe(50, false, 5, fakeDoc(50));
+  assert.equal(again.restore, false, '恢复帧自身不得再触发（否则无限循环）');
+});
+
+test('WD-08 🔴 ce 的 flush 先到（长度未变）、撤稿下一帧才落地 ⇒ 宽限窗内必须救', () => {
+  // e2e 探针实测的真机时序：in:ce → upd len=108 d=0 → upd len=13 d=-95。
+  const g = new WithdrawGuard(WCFG);
+  const peakDoc = fakeDoc(108);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, n === 108 ? peakDoc : fakeDoc(n));
+  // ce flush 帧：composing=false 但长度还是 108 ⇒ 不触发，但进入宽限
+  const flush = g.observe(108, false, 108, fakeDoc(108));
+  assert.equal(flush.restore, false, 'flush 帧长度未变，不得触发');
+  assert.equal(g.isSessionActive, true, '🔴 必须处于 ending 宽限态，不能就此收场');
+  // 撤稿落地帧：真源被啃到 13
+  const end = g.observe(13, false, 108, fakeDoc(13));
+  assert.equal(end.restore, true, '🔴 撤稿落地时必须救回峰值');
+  assert.equal(end.doc, peakDoc);
+});
+
+test('WD-09 宽限窗只有 2 帧：过期后不再回写（不与用户后续编辑对抗）', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  g.observe(108, false, 108, fakeDoc(108)); // flush 帧（宽限 2 帧）
+  g.observe(107, false, 108, fakeDoc(107)); // 第 1 帧：掉 1 容差内
+  const late = g.observe(13, false, 107, fakeDoc(13)); // 第 2 帧：宽限耗尽
+  assert.equal(late.restore, false, '🔴 宽限耗尽后不得再回写（用户可能已在手动编辑）');
+  assert.equal(g.isSessionActive, false, '会话必须已收场');
+});
+
+test('WD-10 宽限期内组字恢复 ⇒ pending 中止，峰值以当前帧重续（修订不是撤稿）', () => {
+  const g = new WithdrawGuard(WCFG);
+  for (let n = 1; n <= 108; n += 1) g.observe(n, true, n - 1, fakeDoc(n));
+  g.observe(108, false, 108, fakeDoc(108)); // flush 帧
+  // 组字恢复（comp=1 帧又来了，当前 60）：缩水是修订，撤稿判定必须中止
+  const r = g.observe(60, true, 108, fakeDoc(60));
+  assert.equal(r.restore, false);
+  assert.equal(g.peak, 60, '峰值以恢复帧为基准重续，不背历史 108');
+  // 新会话正常收尾：不得回写 108
+  const end = g.observe(59, false, 60, fakeDoc(59));
+  assert.equal(end.restore, false, '掉幅 1 容差内；历史峰值 108 不得复活');
+});

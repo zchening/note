@@ -47,7 +47,7 @@ import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
 import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
 import { SyncClient, fetchTextWithTimeout, FETCH_TIMEOUT_GET_MS, type TimedResponse } from './sync/client.ts';
-import { ComposeGuard } from './sync/compose-guard.ts';
+import { ComposeGuard, WithdrawGuard } from './sync/compose-guard.ts';
 import {
   autoSnapshotThrottled,
   fetchHistoryDoc,
@@ -170,6 +170,10 @@ declare global {
       guardActive: () => boolean;
       /** v3.0.12 回归钩子：只 insertCompositionText(isComposing=true) 不发真实 compositionstart 时，返回 ed.isComposing() 是否被合成置位。 */
       probeSynthCompose: () => boolean;
+      /** v3.0.14 回归钩子：模拟豆包语音组字增长帧（comp=1 全量替换到 n 字）。 */
+      growTo: (n: number) => void;
+      /** v3.0.14 回归钩子：模拟撤稿帧（comp=0 替换到 n 字，组字态转假）。 */
+      withdrawTo: (n: number) => void;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1731,6 +1735,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   compositionstart 处理器设置），不读 editor.isComposing() —— 因为塌方发生时
   //   Lexical 原生合成回灌已经把正文吞了，isComposing 真假都不影响判定。
   const composeGuard = new ComposeGuard();
+  // 🔴🔴 v3.0.14：组字会话水位线（撤稿吞字守卫）。v3.0.13 真机日志钉死：丢字
+  //   走的是「会话内渐进放血（重识别修订每步低于塌方阈值）+ 会话收尾撤稿」，
+  //   单帧灾难性模型全盲（collapse 不增、drop 低于阈值、最终只剩第一句）。
+  //   见 compose-guard.ts WithdrawGuard 注释。与 composeGuard 同一调用点喂帧。
+  const withdrawGuard = new WithdrawGuard();
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -1773,6 +1782,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
           composeGuard.noteComposingInput(multi);
         }
       } else {
+        // 🔴🔴 v3.0.14：comp=0 的 insertCompositionText = 孤儿组字帧（宿主报了
+        //   组字输入类型却说不在组字态）。v3.0.13 真机日志里丢字发生在所有标记
+        //   的盲区 —— 这类帧此前**零痕迹**。先留痕，再走退出组字态的老路。
+        recordFlight('orphan0', 'd=' + (ie.data == null ? '-' : String(ie.data.length)));
         composeGuard.noteComposingInput(false);
         ensureSyntheticComposeEnd();
       }
@@ -2346,6 +2359,22 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (composing && prevLen - newLen > 0) {
       recordFlight('compose:drop', 'd=' + (prevLen - newLen) + ' newLen=' + newLen);
     }
+    // 🔴🔴🔴 v3.0.14：组字会话水位线（撤稿吞字守卫）。同一 composing 口径喂帧；
+    //   会话结束帧（composing 转假）判撤稿：真源比会话峰值掉超 max(12, 15%) ⇒
+    //   回写峰值帧文档。与塌方守卫互斥：collapse 已恢复的本帧走不到这里
+    //   （上面 return 了）；恢复帧自身 composing=false 且无会话 ⇒ 幂等不循环。
+    //   此时组字已结束，重建不再杀活组字，与输入法无对抗。
+    const wd = withdrawGuard.observe(newLen, composing, prevLen, exported);
+    if (wd.restore) {
+      recordFlight('gate:withdraw', wd.reason);
+      const peakDoc = wd.doc as Doc;
+      latestDoc = peakDoc;
+      latestDocRef = peakDoc;
+      ed.update(() => {
+        docToLexical(peakDoc);
+      }, { tag: EGG_NOFX_TAG });
+      return;
+    }
 
     const rec = reconcileReminders(exported);
     latestDoc = rec.doc;
@@ -2511,6 +2540,45 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         root.clear();
         const p = $createParagraphNode();
         p.append($createTextNode(short));
+        root.append(p);
+      });
+    },
+    // 🔴🔴 v3.0.14 回归钩子：模拟豆包语音的**组字增长帧**——comp=1 的
+    //   beforeinput（全量组字串替换）+ 真源整串替换到 n 字。喂水位线会话。
+    growTo: (n: number): void => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: 'x'.repeat(n),
+          isComposing: true,
+          bubbles: true,
+        } as InputEventInit),
+      );
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode('x'.repeat(n)));
+        root.append(p);
+      });
+    },
+    // 🔴🔴 v3.0.14 回归钩子：模拟**撤稿帧**——comp=0 的 insertCompositionText
+    //   （宿主撤稿形状：组字输入类型但 isComposing=false）+ 真源被啃到 n 字。
+    //   组字态转假 ⇒ 水位线会话结束 ⇒ 守卫应判撤稿并回写峰值帧。
+    withdrawTo: (n: number): void => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: 'x'.repeat(n),
+          isComposing: false,
+          bubbles: true,
+        } as InputEventInit),
+      );
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode('x'.repeat(n)));
         root.append(p);
       });
     },

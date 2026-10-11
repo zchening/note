@@ -131,6 +131,8 @@ test('FLIGHT-08 🔴 会话级累计计数：不随 ring 淘汰、跨重载存�
   for (let i = 0; i < 450; i += 1) recordFlight('upd', 'len=' + i); // ring 挤掉 50 条
   recordFlight('cmp:synthed', 'start');
   recordFlight('sel:orphaned', 'i');
+  recordFlight('orphan0', 'd=3');
+  recordFlight('gate:withdraw', 'withdraw 40->5 drop=35>12.0');
   let c = flightCounts();
   assert.equal(c['upd'], 450, '🔴 ring 只剩 400 条，全程计数必须是 450（诊断靠它钉①是否触发过）');
   assert.equal(c['cmp:synthed'], 1, '① 合成 compositionstart 计数');
@@ -147,6 +149,8 @@ test('FLIGHT-08 🔴 会话级累计计数：不随 ring 淘汰、跨重载存�
   const head = flightLines()[0];
   assert.ok(head.includes('synthed=1'), '表头摘要必须含 synthed=N，实际=' + head);
   assert.ok(head.includes('upd=450'), '表头摘要必须含 upd=N，实际=' + head);
+  assert.ok(head.includes('o0=1'), '表头摘要必须含 o0=N（comp=0 孤儿帧计数，v3.0.14）');
+  assert.ok(head.includes('wd=1'), '表头摘要必须含 wd=N（撤稿恢复计数，v3.0.14）');
   assert.ok(head.startsWith('flight '), '表头仍以 flight 开头（兼容既有判据/复制格式）');
   // 清空 = 归零
   clearFlight();
