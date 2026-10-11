@@ -1744,7 +1744,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   记录器本身不许成为新的"程序化动树"。与门控同生共死（同一个 detach）。
   const onFlightBI = (e: Event): void => {
     const ie = e as InputEvent;
-    recordFlight('in:bi', (ie.inputType ?? '?') + ' d=' + (ie.data == null ? '-' : String(ie.data.length)));
+    // 🔴 v3.0.13：bi 也记 comp= —— Android 宿主的 beforeinput.isComposing 是否
+    //   可靠是从日志反推 ① 触发链的前提，没有这一位就只能靠猜（v3.0.12 栽过）。
+    recordFlight('in:bi', (ie.inputType ?? '?') + ' comp=' + (ie.isComposing ? 1 : 0) + ' d=' + (ie.data == null ? '-' : String(ie.data.length)));
     // 🔴🔴 v3.0.11：从组字输入事件抽 isComposing，喂守卫激活（兜底 compositionstart 不发的情况）。
     //   insertCompositionText 且 isComposing=true ⇒ 正处组字中；其余类型 ⇒ 退出组字态。
     //   一旦捕获到跨段选区（全选替换），记进 multiBlock，极端塌方兜底之外的主判据路径才生效。

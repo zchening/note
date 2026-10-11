@@ -233,8 +233,9 @@ export function renderDiagLines(r: DiagReadings, now: number): string[] {
       `  rects=${n(r.rects)}  bcr=${n(r.bcr)}  block=${n(r.block)}`,
   );
 
-  // 4 编辑器 HTML（老项目 :1960，截断到 70）
-  L.push(`editor=${n(r.editorHtml === null ? null : cut(r.editorHtml, 70))}`);
+  // 4 编辑器 HTML（老项目 :1960；v3.0.13 截断 70→160 —— 70 字符只剩第一个字，
+  //   "帮" 这种单字快照让"编辑器到底有没有内容"无法判定）
+  L.push(`editor=${n(r.editorHtml === null ? null : cut(r.editorHtml, 160))}`);
 
   // 5 原生桥 + 闹钟（老项目 :1965-1969）
   L.push(

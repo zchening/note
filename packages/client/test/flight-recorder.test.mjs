@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import {
   recordFlight,
   flightLines,
+  flightCounts,
   clearFlight,
   flightHash,
   _flightTestReset,
@@ -120,4 +121,35 @@ test('FLIGHT-07 clearFlight 清空内存与存储', () => {
   clearFlight();
   assert.equal(flightLines().length - 1, 0, '清空后无事件');
   assert.equal(store._map.get('notesync_bj_flight') ?? null, null, '存储键必须被移除');
+});
+
+test('FLIGHT-08 🔴 会话级累计计数：不随 ring 淘汰、跨重载存活、表头带摘要（v3.0.13 取证）', () => {
+  // 🔴 为什么必须有：v3.0.12 真机日志只贴出 ring 末尾健康段，① 是否触发过
+  //   无法判定 —— ring 会滚动，但"全程计数"不许滚动。
+  const store = memStore();
+  _flightTestReset(store);
+  for (let i = 0; i < 450; i += 1) recordFlight('upd', 'len=' + i); // ring 挤掉 50 条
+  recordFlight('cmp:synthed', 'start');
+  recordFlight('sel:orphaned', 'i');
+  let c = flightCounts();
+  assert.equal(c['upd'], 450, '🔴 ring 只剩 400 条，全程计数必须是 450（诊断靠它钉①是否触发过）');
+  assert.equal(c['cmp:synthed'], 1, '① 合成 compositionstart 计数');
+  assert.equal(c['sel:orphaned'], 1, '孤儿组字计数');
+  // 跨"重载"存活（页面被杀重开，计数从存储读回）。
+  // 🔴 先 flush 再重载：节流窗口内未落盘的尾巴本来就会随页面被杀而丢
+  //   （生产由 pagehide 的 flush 补上，FLIGHT-03/04 已钉），这里模拟同一语义。
+  recordFlight('vis', 'pagehide-flush', true);
+  _flightTestReset(store);
+  c = flightCounts();
+  assert.equal(c['upd'], 450, '🔴 重载后全程计数必须从存储读回');
+  assert.equal(c['cmp:synthed'], 1, '重载后①计数仍在');
+  // 表头摘要：用户贴日志的**任何一段**都必须能看到全程计数
+  const head = flightLines()[0];
+  assert.ok(head.includes('synthed=1'), '表头摘要必须含 synthed=N，实际=' + head);
+  assert.ok(head.includes('upd=450'), '表头摘要必须含 upd=N，实际=' + head);
+  assert.ok(head.startsWith('flight '), '表头仍以 flight 开头（兼容既有判据/复制格式）');
+  // 清空 = 归零
+  clearFlight();
+  c = flightCounts();
+  assert.ok(!c['upd'] && !c['cmp:synthed'], '清空后计数必须归零');
 });

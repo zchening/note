@@ -50,6 +50,10 @@ let startedAt = 0;
 let startWall = '';
 let loaded = false;
 let lastSaveAt = 0;
+/** 🔴 v3.0.13 会话级累计计数：按 type 计数，**不随 ring 滚动淘汰**、随存储跨重载。
+ *   ring 只留最后 400 条，①（cmp:synthed）触发在几分钟后就被挤掉 —— 真机诊断
+ *   贴日志常只贴末尾，没有全程计数就无法判定"① 到底触发过没有"。 */
+let counts: Record<string, number> = {};
 
 /** 存储句柄注入点（判据里换内存实现；生产默认 localStorage）。 */
 export interface FlightStore {
@@ -66,6 +70,7 @@ function st(): FlightStore | undefined {
 /** 判据专用：换存储 + 清空内存态（生产不调用）。 */
 export function _flightTestReset(s?: FlightStore): void {
   buf = [];
+  counts = {};
   startedAt = 0;
   startWall = '';
   loaded = false;
@@ -79,9 +84,11 @@ function ensureLoaded(): void {
   try {
     const raw = st()?.getItem(LS_KEY);
     if (raw) {
-      const j = JSON.parse(raw) as { startWall?: string; buf?: FlightEvent[] };
+      const j = JSON.parse(raw) as { startWall?: string; buf?: FlightEvent[]; counts?: Record<string, number> };
       if (Array.isArray(j.buf)) buf = j.buf.slice(-CAP);
       if (typeof j.startWall === 'string') startWall = j.startWall;
+      // v3.0.13：counts 向后兼容 —— 旧存档没有这个键就当空表
+      if (j.counts && typeof j.counts === 'object') counts = j.counts;
     }
   } catch {
     /* 损坏的存档：当没有，不阻塞记录 */
@@ -90,7 +97,7 @@ function ensureLoaded(): void {
 
 function persist(): void {
   try {
-    st()?.setItem(LS_KEY, JSON.stringify({ startWall, buf }));
+    st()?.setItem(LS_KEY, JSON.stringify({ startWall, buf, counts }));
   } catch {
     /* 隐私模式/满：丢日志不丢功能 */
   }
@@ -122,6 +129,7 @@ export function recordFlight(type: string, d: string, flush = false): void {
   }
   buf.push({ t: now - startedAt, type, d: d.slice(0, 140) });
   if (buf.length > CAP) buf.splice(0, buf.length - CAP);
+  counts[type] = (counts[type] ?? 0) + 1;
   if (flush) {
     lastSaveAt = now;
     persist();
@@ -133,16 +141,36 @@ export function recordFlight(type: string, d: string, flush = false): void {
   }
 }
 
-/** 诊断面板用：格式化全部事件（含表头：墙钟起点 + 条数）。 */
+/** 诊断面板用：格式化全部事件（含表头：墙钟起点 + 条数 + **全程计数摘要**）。 */
 export function flightLines(): string[] {
   ensureLoaded();
-  const head = `flight ${buf.length} 条（起点 ${startWall || 'n/a'}，t=相对毫秒）`;
+  const c = counts;
+  const sum = (prefix: string): number => {
+    let n = 0;
+    for (const k of Object.keys(c)) if (k.startsWith(prefix)) n += c[k] ?? 0;
+    return n;
+  };
+  // 🔴 v3.0.13：表头带全程计数摘要 —— 用户贴日志常只贴末尾，ring 滚动后
+  //   ① 是否触发过、守卫有没有拦过，只有这里的计数能钉死（不随 ring 淘汰）。
+  const head =
+    `flight ${buf.length} 条（起点 ${startWall || 'n/a'}，t=相对毫秒）` +
+    `｜全程 upd=${c['upd'] ?? 0} synthed=${c['cmp:synthed'] ?? 0}` +
+    ` orphan=${c['sel:orphaned'] ?? 0} cs=${c['in:cs'] ?? 0} ce=${c['in:ce'] ?? 0}` +
+    ` collapse=${c['gate:collapse'] ?? 0} drop=${c['compose:drop'] ?? 0}` +
+    ` bulk=${c['bulk'] ?? 0} gate=${sum('gate:')} tree=${sum('tree:')}`;
   return [head, ...buf.map((e) => `${String(e.t).padStart(8, ' ')} ${e.type} ${e.d}`)];
+}
+
+/** 全程计数（type → 次数）。不随 ring 淘汰；clearFlight 归零；跨重载从存储读回。 */
+export function flightCounts(): Record<string, number> {
+  ensureLoaded();
+  return counts;
 }
 
 /** 清空（诊断面板"清空日志"按钮 / 判据用）。 */
 export function clearFlight(): void {
   buf = [];
+  counts = {};
   startedAt = 0;
   startWall = '';
   try {

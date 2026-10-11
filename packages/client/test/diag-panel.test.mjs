@@ -643,3 +643,14 @@ test('DIAG-12 连点状态机独立成 tap.ts（ota-ui 只该问一声）', () =
   assert.doesNotMatch(OTA, /from \.\.\/diag\/panel\.ts/,
     "ota-ui 不得 import 整个 panel.ts —— 那会让 update/ 拖进模态 DOM + 250ms 浮层 + 复制降级链");
 });
+
+/* ============ DIAG-13 editor= 截断放宽（v3.0.13 取证加固） ============ */
+
+test('DIAG-13 🔴 editor= 截断 70→160：70 字符看不全第一段，取证瞎', () => {
+  // v3.0.12 真机日志 editor=<p>…帮</span></p>… 只剩第一个字 —— 截断太紧。
+  const r = zeros();
+  r.editorHtml = '<p>' + 'x'.repeat(150) + '</p>';
+  const line = renderDiagLines(r, 1000).find((l) => l.startsWith('editor='));
+  assert.ok(line, 'editor= 行必须存在');
+  assert.ok(line.includes('x'.repeat(150)), '🔴 150 字符内容必须完整出现（70 截断会把它砍没）');
+});
