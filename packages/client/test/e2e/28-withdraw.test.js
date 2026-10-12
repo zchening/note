@@ -402,3 +402,102 @@ test('WD-E2E-07 🔴🔴 reboot 本身不得 blur（拆会话＝掐断用户语�
     await page.close();
   }
 });
+
+// ── v3.1.7：wd:sync skip 判据改为「树长 >= 会话峰值」（手动打字例外）──────────
+//   真机 v3.1.6 日志（18:55 那份）钉死旧判据「树长 > 基线就 skip」的坑：
+//   knock-back＋懒重连后，blur 取消组字把当前串 commit 进树，残串从 11 涨到
+//   13——13 > 11 命中 skip ⇒ 峰值 21 永远上不了屏；更严重的是冻结解除后模型
+//   被 13 字残串覆盖并 push 上行＝内容真丢。树没涨过会话峰值＝屏幕上还不是
+//   最完整的内容，必须按模型（峰值）重建。唯一例外：窗口内用户手动敲的字
+//   （v3.0.17 立的最新中国意图规矩），绝不能重建抹掉。
+test('WD-E2E-08 🔴🔴 残串涨过基线但没过峰值必须重建上屏；手动打字是唯一 skip 例外', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde08', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+
+    // ── 第一相：非组字通道把树抬起（超过基线 13、低于峰值 108）⇒ 必须重建 ──
+    //   collapse() 探针是纯 ed.update（无 beforeinput）——等价于真机上 blur
+    //   取消组字时浏览器把当前串 commit 进树的那条通道（不置手动标志）。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.withdrawTo(13));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:defer peak=108'),
+      null,
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end()); // ce ⇒ 组字态转假（不再重摆观察窗）
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapse('x'.repeat(20)));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 20,
+      null,
+      { timeout: 5000 },
+    );
+    // 等 1200ms 观察窗到期：旧判据 20 > 13 ⇒ skip（峰值上不了屏，红）；
+    // 新判据 20 < 108 且非手动 ⇒ 按模型重建（绿）
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:sync'),
+      null,
+      { timeout: 5000 },
+    );
+    const flight1 = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(!flight1.includes('wd:sync skip'),
+      '🔴🔴 树长没过会话峰值时不得 skip——残串涨过基线只是部分落地，峰值才是最完整内容');
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      108,
+      '到期必须把峰值 108 重建上屏（旧判据在此 skip，屏幕停在 20）',
+    );
+    assert.equal(await textLen(page), 108, '真源保持峰值 108');
+  } finally {
+    await page.close();
+  }
+});
+
+test('WD-E2E-09 🔴 窗口内用户手动打字 ⇒ wd:sync 必须 skip（手敲是最新意图，不许重建抹掉）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde09', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.withdrawTo(13));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:defer peak=108'),
+      null,
+      { timeout: 5000 },
+    );
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
+    // 用户切键盘手动敲两个字（真实 CDP 管线 ⇒ beforeinput insertText comp=0）
+    await page.keyboard.type('甲乙', { delay: 5 });
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 15,
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:sync'),
+      null,
+      { timeout: 5000 },
+    );
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:sync skip len=15'),
+      '🔴 窗口内手动打字是唯一 skip 例外——手敲的字是最新意图，按峰值重建会抹掉它（v3.0.17 规矩）');
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      15,
+      '手动敲的字必须留在树上（不得被峰值重建覆盖）',
+    );
+  } finally {
+    await page.close();
+  }
+});

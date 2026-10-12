@@ -1823,6 +1823,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  到不了峰值 ⇒ peakDoc 绝不被覆盖。wd:sync 的 skip 判据仍用 deferTreeLen
    *  （保手动打字，两层判据各司其职）。 */
   let deferPeakLen = 0;
+  /** 🔴 v3.1.7：延迟同步窗口内是否发生过**用户手动编辑**（非组字的 beforeinput：
+   *   insertText/退格等——用户切键盘自己敲字）。wd:sync 到期时的 skip 例外：
+   *   手动敲的是最新意图，不能按峰值重建抹掉。组字帧落地不算手动。 */
+  let wdWindowManual = false;
   const armDeferredSync = (): void => {
     if (deferredTreeSyncTimer != null) clearTimeout(deferredTreeSyncTimer);
     deferTreeLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
@@ -1838,7 +1842,15 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       }
       wdFreeze = false;
       const nowLen = ed.getEditorState().read(() => $getRoot().getTextContent().length);
-      if (nowLen > deferTreeLen) {
+      // 🔴🔴🔴 v3.1.7：skip 判据从「树长 > 基线」改为「树长 >= 会话峰值」或
+      //   「窗口内有用户手动打字且树长 > 基线」。真机 v3.1.6 日志钉死旧判据的坑：
+      //   knock-back（懒重连形状）后残串从 11 涨到 13——2 个组字字符落地即
+      //   13 > 11 命中 skip ⇒ 峰值 21 永远上不了屏；更严重的是冻结解除后模型
+      //   被 13 字残串覆盖并 push 上行＝内容真丢。树没涨过会话峰值＝屏幕上的
+      //   还不是最完整的内容，必须按模型重建（峰值才最完整）。
+      //   手动打字是唯一例外：用户切键盘敲的字是最新意图，绝不能重建抹掉
+      //   （v3.0.17 立的规矩，用 wdWindowManual 标志保留）。
+      if (nowLen >= deferPeakLen || (wdWindowManual && nowLen > deferTreeLen)) {
         recordFlight('wd:sync', 'skip len=' + nowLen);
         return;
       }
@@ -1862,6 +1874,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     wdFreeze = true;
     stallCount = 0;
     stallPrevTreeLen = -1;
+    // v3.1.7：新观察窗开账，手动编辑标志归零（该标志只保护**本窗口内**的手动输入）
+    wdWindowManual = false;
     // 🔴🔴🔴 v3.1.5：解冻锚（deferPeakLen）在延迟同步**已激活**时只涨不跌。
     //   塌方路径传的是「会话峰值」（见下方调用点的 sessionPeak），而渐进放血
     //   形状下模型长可能远低于会话峰值——任何把锚写低的调用都会让残串提前
@@ -1966,6 +1980,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       }
     } else {
       lastBiIsComposing = false;
+      // 🔴 v3.1.7：非组字的 beforeinput = 用户手动编辑（切键盘敲字/退格）。
+      //   记进窗口标志——wd:sync 到期时若树长还没过峰值，这个标志是唯一允许
+      //   skip 不重建的例外（手敲的是最新意图，峰值重建会抹掉它）。
+      wdWindowManual = true;
       // 非组字输入（insertText / 回车 / 删除…）⇒ 收掉可能残留的合成态
       ensureSyntheticComposeEnd();
     }

@@ -107,6 +107,7 @@ git push origin main
 - 🔴 **桌面 e2e 的 Backspace/逐字符删除走 contenteditable 原生路径**，焦点稍偏就 DOM/树分叉（DOM 删了、editorState 没动，判死不触发）——与真机 beforeinput 不同构。删字符类判据用 `Control+a + 重打` 的树替换形状（REM-05/REM-19），细节见 `docs/replication-checklist.md` 判据纪律的 e2e 四坑。
 - 🔴🔴 **撤稿守卫两个机制按形状分工，不许互相踩踏**（v3.1.5 实锤）：composing-mismatch 只拦「**树真在掉**（currentLen<prevLen）＋组字串远长于文档」的帧（拦+冻结保模型）；「树**纹丝不动**＋串远长于树」是锚点死亡空转形状，归空转检测（4 帧 ⇒ wd:dead＋wd:reboot 救屏幕）。mismatch 若也拦空转帧，每个空转帧都会走 collapse restore ⇒ `scheduleDeferredTreeSync` 把 stall 计数清零 ⇒ reboot 永远数不到 4（WD-E2E-05/06/07 红过）。改判定顺序/条件后必须同轮跑 26+28 两个文件。
 - 🔴🔴🔴 **`editorHost.blur()` 会拆掉 Android 输入法连接＝当场掐断用户语音**（v3.1.6 真机实锤）：reboot 自愈里曾无条件 blur/focus（v3.0.20 为对齐宿主视图加的），用户没点键盘停止键也被掐断——reboot 之后再无一条 composition 帧、说完的话一句不进。现在 reboot 只做 ce＋重建；**懒重连**：重建后组字帧真把树打回（knock-back）才补 blur/focus（WD_RECONNECT_WINDOW_MS=2000 窗口，解冻/过期双清除）。**任何"为对齐宿主而动焦点"的方案落地前必须掂量这条**——拆焦点的代价是用户的录音会话，不是界面副作用。
+- 🔴🔴 **wd:sync 到期 skip 判据看「会话峰值」不看「基线」**（v3.1.7 真机实锤）：旧判据「树长 > deferTreeLen 就 skip」在 knock-back＋懒重连形状下误判——blur 取消组字把当前串 commit 进树，残串涨过基线几个字就 skip ⇒ 峰值永远上不了屏，且冻结解除后模型被残串覆盖 push 上行＝内容真丢。现判据：`nowLen >= deferPeakLen` 才 skip；唯一例外＝窗口内用户手动打字（`wdWindowManual`，非组字 beforeinput 置位）且树长 > 基线——手敲字是最新意图（v3.0.17 规矩），绝不能按峰值重建抹掉。
 - 🔴 **调用点传锚要传会话峰值，不传模型长**：update 监听里的 `prevLen` 是 `docTextLen(before)`（**模型相对**），渐进放血形状下模型已被残串覆盖、远低于水位线会话峰值——塌方路径锚取 `max(prevLen, withdrawGuard.peak)`，`scheduleDeferredTreeSync` 里再来一道 max 闸（延迟同步已激活时只涨不跌）。
 
 ## 深入文档
