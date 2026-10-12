@@ -537,6 +537,28 @@ test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真�
     '滚动目标在模态内（pre.diag-pre 滑日志）必须忽略——只有模态之外的滚动（滚笔记正文）才关');
 });
 
+/* ============ DIAG-14 导出 .txt 文件（v3.1.3：剪贴板复制不全） ============ */
+
+test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮（真机剪贴板复制不全，用户要求存文件传电脑）', () => {
+  const c = cleanKeepStr(PANEL_SRC);
+  const COPY = cleanKeepStr(readFileSync(new URL('../src/ui/copy.ts', import.meta.url), 'utf8'));
+  // 按钮与文案（🔴 keepStrings 去引号 ⇒ id = diagExport 是裸的）
+  assert.match(c, /exportBtn\.id = diagExport/, '必须挂 diagExport 按钮');
+  assert.match(COPY, /exportFile:/, 'COPY.diag 必须有 exportFile 文案');
+  assert.match(c, /COPY\.diag\.exportFile/, '按钮文案必须来自 COPY.diag.exportFile');
+  // 导出链：Web Share（Android 分享面板 → 微信/文件管理器）优先
+  assert.match(c, /new File\(\[txt\]/, '必须构造 File 对象');
+  assert.match(c, /canShare/, '必须探测 canShare（分享面板可用性）');
+  assert.match(c, /nav\.share\(/, '必须优先走 navigator.share');
+  // 降级：Blob + a[download]（分享不可用时落下载）
+  assert.match(c, /createObjectURL/, '必须有 Blob URL 降级');
+  assert.match(c, /a\.download = name/, '降级必须用 a[download]');
+  // 文件名带日期时间（多份日志不互相覆盖）
+  assert.match(c, /notesync-diag-/, '文件名必须带 notesync-diag- 前缀');
+  // 按钮必须挂进弹窗
+  assert.match(c, /box\.append\([^)]*exportBtn/, '导出按钮必须加入弹窗');
+});
+
 /* ============ DIAG-09 埋点与彩蛋门牌 ============ */
 
 test('DIAG-09 打开模态即打 diag 埋点，且在取读数之前', () => {

@@ -66,14 +66,20 @@ export interface CollapseDecision {
  *   - 把极端塌方分支删掉 ⇒ 没捕获到 compositionstart 时整篇被吞无兜底
  *     （COMPOSE-03 红）；
  *   - 把 `minPrev` 判据删掉 ⇒ 短文档正常编辑误伤（COMPOSE-04 红）。
+ *   - 把 composing-mismatch 分支删掉 ⇒ 单段宿主替换错位漏拦（COMPOSE-10 红）。
  */
 export function decideCollapseRestore(opts: {
   currentLen: number;
   prevLen: number;
   multiBlock: boolean;
   cfg: ComposeGuardConfig;
+  /** 🔴🔴 v3.1.3：组字串长度（beforeinput 的 data 长度，可选）。语义：组字中
+   *  树长骤降但组字串仍远长于文档（> current + 12）＝宿主替换区域错位把树啃了
+   *  （串还在、树丢了）——不是用户删字（删字会连组字串一起变短）⇒ 必拦。
+   *  不传（旧调用方/旧判据）保持旧行为。 */
+  composingDataLen?: number;
 }): CollapseDecision {
-  const { currentLen, prevLen, multiBlock, cfg } = opts;
+  const { currentLen, prevLen, multiBlock, cfg, composingDataLen } = opts;
   if (prevLen < cfg.minPrev) return { restore: false, reason: 'prev<min' };
   const drop = prevLen - currentLen;
   if (drop < cfg.absDrop) return { restore: false, reason: 'drop<abs' };
@@ -85,6 +91,14 @@ export function decideCollapseRestore(opts: {
   // 极端塌方兜底：单帧丢掉 >70% 且原文很长 —— 正常打字绝不会这样。
   if (currentLen < prevLen * cfg.extremeRel && prevLen > cfg.minPrev * cfg.extremePrevMult) {
     return { restore: true, reason: `extreme collapse ${prevLen}->${currentLen}` };
+  }
+  // 🔴🔴 v3.1.3：单段「宿主替换错位」兜底——真机 v3.1.1/v3.1.2 日志钉死
+  //   （用户报「说着说着自动截断、后面录不进去」）：143→49（掉 66%，extreme
+  //   差 6 字没过）与 49→9（prevLen=49 < 80 下限）两次全部 single-block 放行
+  //   ⇒ 残串写进真源并 push 到云端（内容真丢）。两次的指纹一致：组字串恒定
+  //   （143/140）而树骤降——串仍远长于文档＝串在树丢，必拦。
+  if (composingDataLen != null && composingDataLen > currentLen + 12) {
+    return { restore: true, reason: `composing-mismatch ${prevLen}->${currentLen} d=${composingDataLen}` };
   }
   return { restore: false, reason: 'single-block' };
 }
@@ -147,10 +161,16 @@ export class ComposeGuard {
    * 每帧调一次。
    * @param composing 本次 update 是否处在组字中 —— 由输入事件流的 isComposing 决定，
    *   不再只依赖 compositionstart DOM 事件（豆包智能整理常不发它，v3.0.10 因此漏拦）。
+   * @param composingDataLen 🔴 v3.1.3：组字串长度（beforeinput 的 data 长度），
+   *   喂「宿主替换错位」判定（composing-mismatch）——不传保持旧行为。
    * 🔴 无论是否激活都维护 lastLen，使 prevLen 始终为上一帧真实长度，
    *   漏掉 compositionstart 时也能正确判定单帧塌方。
    */
-  observe(currentLen: number, composing: boolean): CollapseDecision {
+  observe(
+    currentLen: number,
+    composing: boolean,
+    composingDataLen?: number,
+  ): CollapseDecision {
     const prevLen = this.lastLen;
     this.lastLen = currentLen;
     if (!composing) {
@@ -158,11 +178,14 @@ export class ComposeGuard {
       return { restore: false, reason: 'not-composing' };
     }
     this.active = true;
+    // 🔴 exactOptionalPropertyTypes 全开：可选属性不接受显式 undefined，
+    //   用条件展开只在真有值时带上键。
     const dec = decideCollapseRestore({
       currentLen,
       prevLen,
       multiBlock: this.multiBlock,
       cfg: this.cfg,
+      ...(composingDataLen != null ? { composingDataLen } : {}),
     });
     if (dec.restore) this.restored = true;
     return dec;

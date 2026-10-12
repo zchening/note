@@ -2637,7 +2637,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         recordFlight('wd:defer', 'reset len=' + deferTreeLen);
       }
     }
-    const collapse = composeGuard.observe(newLen, composing);
+    const collapse = composeGuard.observe(newLen, composing, lastBiDataLen);
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
       latestDoc = before;

@@ -234,3 +234,42 @@ test('WD-10 宽限期内组字恢复 ⇒ pending 中止，峰值以当前帧重�
   const end = g.observe(59, false, 60, fakeDoc(59));
   assert.equal(end.restore, false, '掉幅 1 容差内；历史峰值 108 不得复活');
 });
+
+/* ── v3.1.3：单段组字中的「宿主替换错位」兜底 ──────────────────────────────
+ * 🔴 真机 v3.1.1/v3.1.2 日志钉死（用户报「说着说着自动截断、后面录不进去」）：
+ *   组字串 d=143 恒定，树 143→49（掉 66%，extreme 兜底差 6 字没过：49 >
+ *   143×0.3=42.9）→ 旧判定 single-block 放行 ⇒ 残串写进真源并 push 到云端
+ *   （push len=96，内容真丢）；随后 49→9（prevLen=49 < extreme 的 80 下限）
+ *   再次放行。指纹：**组字串没变短而树骤降** = 串在树丢（宿主替换区域错位），
+ *   不是用户删字（删字会连组字串一起变短）。
+ * ── 变异说明：把 composing-mismatch 分支删掉 ⇒ COMPOSE-10 红。 */
+test('COMPOSE-10 🔴🔴 单段组字中宿主替换错位（串仍在、树骤降）必须拦（真机钉死）', () => {
+  // 真机第一掉：143→49，组字串 143 恒定（远长于 49+12）
+  const d = decideCollapseRestore({ currentLen: 49, prevLen: 143, multiBlock: false, cfg: CFG, composingDataLen: 143 });
+  assert.equal(d.restore, true, '🔴 组字串仍远长于文档 = 宿主替换错位，必须拦下回写');
+  assert.match(d.reason, /composing-mismatch/);
+  // 真机第二掉：49→9，组字串 140 仍在（extreme 因 prev<80 不会命中）
+  const d2 = decideCollapseRestore({ currentLen: 9, prevLen: 49, multiBlock: false, cfg: CFG, composingDataLen: 140 });
+  assert.equal(d2.restore, true, '🔴 二次掉幅同样必须拦');
+  // 反例：组字串与树一起变短（55 ≈ 树 50）＝真删字/真修订 ⇒ 不得拦
+  //（50 < 71.5 过 rel、50 > 42.9 不过 extreme → 只能靠新分支放行语义钉住）
+  const d3 = decideCollapseRestore({ currentLen: 50, prevLen: 143, multiBlock: false, cfg: CFG, composingDataLen: 55 });
+  assert.equal(d3.restore, false, '组字串同步变短 = 真删字，不得拦（防止对抗合法修订）');
+  // 向后兼容：不传 composingDataLen（旧调用方/旧判据）保持旧行为
+  const d4 = decideCollapseRestore({ currentLen: 49, prevLen: 143, multiBlock: false, cfg: CFG });
+  assert.equal(d4.restore, false, '未喂组字串长度时保持旧行为（COMPOSE-04 兼容）');
+});
+
+test('COMPOSE-11 🔴 守卫 observe 必须把组字串长度喂进判定（main.ts 接线）', () => {
+  // main.ts 的 observe 调用点必须传 lastBiDataLen —— 否则新分支在生产里永远拿不到串长
+  const g = new ComposeGuard(CFG);
+  for (let n = 1; n <= 143; n += 1) g.observe(n, true);
+  const d = g.observe(49, true, 143);
+  assert.equal(d.restore, true, '🔴 observe 第三参（组字串长）必须参与判定');
+  assert.match(d.reason, /composing-mismatch/);
+  // 不传第三参 ⇒ 旧行为
+  const g2 = new ComposeGuard(CFG);
+  for (let n = 1; n <= 143; n += 1) g2.observe(n, true);
+  const d2 = g2.observe(49, true);
+  assert.equal(d2.restore, false, '未传串长时保持旧行为');
+});

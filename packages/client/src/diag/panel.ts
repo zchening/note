@@ -146,7 +146,49 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   copyBtn.id = 'diagCopy';
   copyBtn.textContent = COPY.diag.copy;
 
-  box.append(head, pre, copyBtn);
+  // 🔴🔴 v3.1.3：导出 .txt 文件 —— 真机剪贴板复制不全（400 条日志被截断），
+  //   用户要求"存成文本文件/传电脑"。两条链：
+  //   ① navigator.share（Android 系统分享面板 → 微信/文件管理器/蓝牙，File 对象）
+  //   ② 降级 Blob + a[download]（WebView 下载管理器落下载目录）
+  const exportBtn = document.createElement('button');
+  exportBtn.type = 'button';
+  exportBtn.id = 'diagExport';
+  exportBtn.textContent = COPY.diag.exportFile;
+
+  const onExport = async (): Promise<void> => {
+    const txt = pre.textContent || '';
+    const d = new Date();
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const name =
+      `notesync-diag-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
+      `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.txt`;
+    const nav = navigator as Navigator & {
+      canShare?: (data: { files: File[] }) => boolean;
+      share?: (data: { files: File[]; title?: string }) => Promise<void>;
+    };
+    const file = new File([txt], name, { type: 'text/plain' });
+    if (typeof nav.share === 'function' && typeof nav.canShare === 'function' && nav.canShare({ files: [file] })) {
+      try {
+        await nav.share({ files: [file], title: name });
+        return;
+      } catch {
+        return; // 用户在分享面板点了取消，不算失败
+      }
+    }
+    const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+  exportBtn.onclick = () => {
+    void onExport();
+  };
+
+  box.append(head, pre, exportBtn, copyBtn);
   mask.append(box);
   host.append(mask);
 
