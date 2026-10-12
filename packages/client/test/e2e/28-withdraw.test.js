@@ -501,3 +501,70 @@ test('WD-E2E-09 🔴 窗口内用户手动打字 ⇒ wd:sync 必须 skip（手�
     await page.close();
   }
 });
+
+// ── v3.1.8：reboot 连续救不活必须升级重连（无塌方空转形状）──────────────────
+//   真机 v3.1.7 日志（19:35）钉死：锚点死亡但**没有掉幅**——每帧 upd len=122 d=0
+//   空转，塌方守卫无从拦；reboot 的「按峰值重建」是空操作（树已在峰值）⇒
+//   ce+重建+新 cs 空转 26s，用户的话全在输入法串里没落地（v3.0.18「实时流
+//   断裂」同款）。修法：连续 reboot 失败计数，第 2 次起升级为无条件
+//   blur/focus——此刻会话已事实死亡，拆焦点代价早已付清，赌视图对齐后续口述落地。
+test('WD-E2E-10 🔴🔴 reboot 连续救不活必须升级 blur/focus（无塌方空转，真机 v3.1.7 实锤）', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde10', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    await page.evaluate(() => {
+      window.__nsBlurCount = 0;
+      window.__nsFocusCount = 0;
+      const host = document.getElementById('editor-host');
+      host.addEventListener('blur', () => { window.__nsBlurCount += 1; });
+      host.addEventListener('focus', () => { window.__nsFocusCount += 1; });
+    });
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+      t.growTo(108);
+    });
+    await page.waitForFunction(() => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)), null, { timeout: 5000 });
+    // 无塌方空转形状：stallBi 不动树（markDirty 制造「有 flush 但树长不变」），
+    //   组字串 200 远长于树 108 ⇒ 帧帧空转、无掉幅可拦——正是真机 19:35 的形状。
+    // 第一轮：dead ⇒ reboot（fails=1）——**不得升级**，先给懒重连一次机会
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:reboot reconn'),
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(300);
+    let counts = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
+    assert.equal(counts.blur, 0, '第一次 reboot 不得 blur——懒重连优先，给会话自愈机会');
+    assert.equal(counts.focus, 0, '第一次 reboot 不得 focus');
+    // 第二轮（过 2s 冷却）：dead ⇒ reboot（fails=2）——必须升级 blur/focus
+    await page.waitForTimeout(2200);
+    for (let i = 0; i < 4; i += 1) {
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
+      await page.waitForTimeout(80);
+    }
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:escalate'),
+      null,
+      { timeout: 8000 },
+    );
+    await page.waitForTimeout(300); // blur 同步派发；focus 在 +50ms
+    counts = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
+    assert.ok(counts.blur >= 1 && counts.focus >= 1,
+      `🔴🔴 连续救不活必须升级 blur/focus 重连（无塌方空转只有这一招），实得 blur=${counts.blur} focus=${counts.focus}`);
+    // 升级不等于内容丢：树/真源必须仍是峰值
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      108,
+      '升级重连后树必须仍是峰值 108',
+    );
+    assert.equal(await textLen(page), 108, '真源保持峰值 108');
+  } finally {
+    await page.close();
+  }
+});

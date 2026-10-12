@@ -1909,6 +1909,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   /** v3.1.6：reboot 已重建、正在等「下一个组字帧是否把树打回」的待重连标志。 */
   let wdReconnectPending = false;
   let wdReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 🔴🔴 v3.1.8：连续多少次 reboot 都没把组字帧救活（树长纹丝不动、无塌方可拦）。
+   *  真机 v3.1.7 日志（19:35）钉死的新形状：锚点死亡但**没有掉幅**——每帧
+   *  `upd len=122 d=0` 空转，塌方守卫无从拦；reboot 的「按峰值重建」是空操作
+   *  （树已在峰值）⇒ ce+重建+新 cs 空转 26s，用户的话全在输入法串里没落地。 */
+  let wdRebootFails = 0;
+  /** 连续失败这么多次 ⇒ 懒重连升级为无条件 blur/focus（拆焦点赌视图对齐）。 */
+  const WD_REBOOT_ESCALATE_AT = 2;
+  let wdEscalateAt = 0;
+  /** 升级重连冷却（ms）：拆焦点是重兵器，10s 内只来一次，防焦点风暴。 */
+  const WD_ESCALATE_COOLDOWN_MS = 10000;
   /** 🔴🔴🔴 v3.1.6：懒重连——只有 knock-back 实锤（重建后组字帧真把树打回，
    *  宿主视图确实没对齐）才拆会话。blur 会 tear down 输入法连接、豆包识别
    *   会话当场死（用户 2026-10-12 真机日志实证：没点停止键也被掐断），
@@ -2645,6 +2655,7 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             }
             wdRebootAt = nowMs;
             recordFlight('wd:reboot', 'reconn');
+            wdRebootFails += 1;
             clearSyntheticComposeTimer();
             editorHost.dispatchEvent(new CompositionEvent('compositionend'));
             syntheticCompose = false;
@@ -2668,6 +2679,19 @@ function mountEditor(name: string, initialDoc?: Doc): void {
               wdReconnectPending = false;
               wdReconnectTimer = null;
             }, WD_RECONNECT_WINDOW_MS);
+            // 🔴🔴🔴 v3.1.8：**升级重连**——连续 reboot 救不活（树长纹丝不动、
+            //   无塌方可拦的空转形状，真机 19:35 日志实锤）⇒ 懒重连升级为无条件
+            //   blur/focus。此刻会话已事实死亡（用户的话一句不进），拆焦点的代价
+            //   早就付了；赌的是宿主重新 extract 后视图对齐、后续口述能落地。
+            //   10s 冷却防焦点风暴；已拆过就清掉懒重连 flag（别紧接着再拆一次）。
+            if (wdRebootFails >= WD_REBOOT_ESCALATE_AT && nowMs - wdEscalateAt >= WD_ESCALATE_COOLDOWN_MS) {
+              wdEscalateAt = nowMs;
+              recordFlight('wd:escalate', 'blur/focus');
+              wdReconnectPending = false;
+              if (wdReconnectTimer != null) { clearTimeout(wdReconnectTimer); wdReconnectTimer = null; }
+              editorHost.blur();
+              setTimeout(() => { editorHost.focus(); }, 50);
+            }
             }, 0);
           }
         } else {
@@ -2676,6 +2700,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       } else {
         stallCount = 0;
       }
+      // 🔴 v3.1.8：树长在变 = 组字帧在落地（reboot 救活了）⇒ 失败计数归零。
+      //   纹丝不动才累计——喂给 wd:dead 之后的 reboot 升级判定（无塌方空转形状）。
+      if (treeLenNow !== stallPrevTreeLen) wdRebootFails = 0;
       stallPrevTreeLen = treeLenNow;
       if (deferredTreeSyncTimer != null) {
         // 🔴🔴🔴 v3.0.18：解冻锚 = 会话峰值（deferPeakLen）。树长涨过基线不够——
