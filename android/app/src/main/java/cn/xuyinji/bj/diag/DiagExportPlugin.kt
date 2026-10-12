@@ -3,6 +3,7 @@ package cn.xuyinji.bj.diag
 import android.content.ContentValues
 import android.content.Intent
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -89,7 +90,7 @@ class DiagExportPlugin : Plugin() {
         f.writeBytes(bytes)
         try {
             MediaScannerConnection.scanFile(context, arrayOf(f.absolutePath), arrayOf("text/plain"), null)
-            context.sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.parse("file://" + f.absolutePath)))
+            context.sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(f)))
         } catch (e: Exception) { /* 扫描失败不影响文件已落盘 */ }
         return f.absolutePath
     }
