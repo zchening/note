@@ -1980,33 +1980,54 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  数量/长度＋首文本节点元素**是否与上次同一实例**（same=0 = 两次快照间
    *  DOM 元素被替换 = 浏览器组字区域被打断的机理实锤）。 */
   let lastFragFirstTextEl: Text | null = null;
-  const treeFragSnapshot = (): string => {
+  /** 上次快照的 DOM/模型长度差（div 转变时才记录——稀疏取证不刷屏）。
+   *  真机 21:43 日志实锤：组字期 DOM 比模型多 1 个零宽字符（dom=1[55] vs
+   *  tn=1[54]，塌方后 8 vs 7 差值恒定）——豆包重识别按含零宽的几何替换，
+   *  文档当场塌掉。此差值何时出现/变化 = 机理时间线。 */
+  let lastFragDiv = -999;
+  const treeFragSnapshot = (force = false): string | null => {
     try {
       const rootEl = ed.getRootElement();
-      if (rootEl == null) return 'no-root';
+      if (rootEl == null) return null;
       const domLens: number[] = [];
+      const domModes: number[] = [];
       let firstTextEl: Text | null = null;
       const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
       let t = walker.nextNode();
       while (t != null) {
-        domLens.push(t.textContent?.length ?? 0);
+        const content = t.textContent ?? '';
+        domLens.push(content.length);
+        // 零宽字符计数（U+200B/U+200C/U+200D/U+FEFF）
+        const zw = (content.match(/[\u200b\u200c\u200d\ufeff]/g) ?? []).length;
+        domModes.push(zw);
         if (firstTextEl == null) firstTextEl = t as Text;
         t = walker.nextNode();
       }
+      const domTotal = domLens.reduce((a, b) => a + b, 0);
       const domSame = firstTextEl != null && firstTextEl === lastFragFirstTextEl;
       lastFragFirstTextEl = firstTextEl;
       const modelLens: number[] = [];
+      const modelModes: string[] = [];
+      let modelTotal = 0;
       ed.getEditorState().read(() => {
         const walk = (n: LexicalNode): void => {
           if ($isTextNode(n)) {
-            modelLens.push(n.getTextContentSize());
+            const len = n.getTextContentSize();
+            modelLens.push(len);
+            modelModes.push(n.getMode());
+            modelTotal += len;
             return; // TextNode 是叶子，不再下钻
           }
           if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
         };
         walk($getRoot());
       });
-      return `dom=${domLens.length}[${domLens.join(',')}] same=${domSame ? 1 : 0} tn=${modelLens.length}[${modelLens.join('+')}]`;
+      const div = domTotal - modelTotal;
+      const divChanged = div !== lastFragDiv;
+      lastFragDiv = div;
+      // div 未变化且元素未替换且非首次 ⇒ 不记录（稀疏取证）；force（塌方帧）例外
+      if (!force && !divChanged && lastFragDiv !== -999 && domSame) return null;
+      return `dom=${domLens.length}[${domLens.join(',')}] zw=[${domModes.join(',')}] same=${domSame ? 1 : 0} tn=${modelLens.length}[${modelLens.join('+')}] mode=[${modelModes.join(',')}] div=${div >= 0 ? '+' + div : div}`;
     } catch {
       return 'frag-err';
     }
@@ -2037,7 +2058,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         //   DOM 碎片结构（塌方前照），塌方判定帧处再记后照，前后对照即机理。
         //   注意放在 lastBiDataLen 更新**之前**（对比对象是上一帧的串长）。
         if (lastBiDataLen > 0 && ie.data != null && ie.data.length < lastBiDataLen) {
-          recordFlight('tree:frag', treeFragSnapshot());
+          const fragPre = treeFragSnapshot();
+          if (fragPre != null) recordFlight('tree:frag', fragPre);
         }
         // 🔴🔴🔴 v3.0.18：组字串长度喂锚点死亡检测（update 监听空转判定用：
         //   组字串远长于文档但树长不动 = 写入全部空转）。
@@ -2813,8 +2835,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
       // 🔴🔴 v3.1.9 取证：塌方落地后的 DOM 碎片结构（对照 beforeinput 时刻的前照，
-      //   前后差值 = 豆包重识别打塌树的机理证据）。
-      recordFlight('tree:frag', treeFragSnapshot());
+      //   前后差值 = 豆包重识别打塌树的机理证据）。塌方帧强制记录。
+      const fragAtCollapse = treeFragSnapshot(true);
+      if (fragAtCollapse != null) recordFlight('tree:frag', fragAtCollapse);
       // 🔴🔴 v3.1.6 懒重连：reboot 重建后第一个组字帧就把树打回 ⇒ 宿主视图
       //   确实没对齐（v3.0.19 震荡形状实锤）⇒ 补 blur/focus 重连。反之帧能
       //   落地（树长涨过峰值）时 flag 在解冻处清除，会话活着不拆。
