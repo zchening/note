@@ -265,8 +265,16 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
 
   // 🔴 老项目 :8246：滚动笔记即关闭诊断模态（用户拍板"滚动即视为离开诊断"）。
   //   只关模态不动浮层 —— 浮层是取证用的，用户就是要一边滚一边看读数。
-  const onScroll = (): void => {
-    if (open) close();
+  // 🔴🔴 v3.1.2：模态**自己内容区的滚动不算"离开诊断"**——真机报障实测：
+  //   400 条飞行日志必然超高 .diag-pre（max-height 56vh + overflow:auto），
+  //   用户必须**在 pre 里滑动**才能看到底部关键事件段；capture 监听连自家
+  //   pre 的滚动一起收 ⇒ "点一下/滑一下弹窗就秒关、想下滑看底部也不行"。
+  //   滚动目标在模态内（pre/box）一律忽略，只有模态**之外**的滚动
+  //   （滚笔记正文）才视为离开。
+  const onScroll = (e: Event): void => {
+    if (!open) return;
+    if (e.target instanceof Node && mask.contains(e.target)) return;
+    close();
   };
   document.addEventListener('scroll', onScroll, true);
 

@@ -524,6 +524,19 @@ test('DIAG-08e 遮罩只点空白处才关（无条件关会把刚打开的面�
   assert.match(m[0], /if \(e\.target === mask\) close\(\)/, '必须判 e.target === mask（老项目 :8244）');
 });
 
+test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真机报障：滑日志看关键事件段被秒关）', () => {
+  // 🔴 为什么必须有：400 条飞行日志必然超高 .diag-pre（max-height 56vh +
+  //   overflow:auto），用户必须**在 pre 里滑动**才能看到底部关键事件段；
+  //   capture 阶段的 document scroll 监听若不分来源，自家 pre 一滚就 close()
+  //   —— 用户实测「点一下就关、想下滑看底部也不行」。
+  const c = cleanKeepStr(PANEL_SRC);
+  const m = /const onScroll = \(e[^)]*\): void => \{[\s\S]*?\n {2}\};\n/.exec(c);
+  assert.ok(m, 'onScroll 必须带事件参数（不看来源就没法区分）');
+  assert.match(m[0], /e\.target/, '必须读 e.target 判定滚动来源');
+  assert.match(m[0], /mask\.contains\(/,
+    '滚动目标在模态内（pre.diag-pre 滑日志）必须忽略——只有模态之外的滚动（滚笔记正文）才关');
+});
+
 /* ============ DIAG-09 埋点与彩蛋门牌 ============ */
 
 test('DIAG-09 打开模态即打 diag 埋点，且在取读数之前', () => {
