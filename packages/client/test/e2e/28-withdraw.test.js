@@ -312,13 +312,15 @@ test('WD-E2E-06 🔴🔴 机制收尾后锚点死亡：空转 4 帧必须仍触�
   }
 });
 
-// ── v3.0.20：reboot 重连宿主输入连接＋冷却期 ───────────────────────────────
-//   真机 v3.0.19 日志钉死：reboot 重建 111 后下一个组字帧把树打回 14
-//   （upd len=14 d=-97 每帧重复）——docToLexical 是程序化动树，宿主侧
-//   InputConnection 文档视图仍停留在 14 字残串状态。reboot 后必须
-//   blur/focus 强迫宿主重启输入连接、重新 extract 全文（视图对齐）；
-//   重连若无效则空转循环（~500ms 一轮），冷却 2s 压制风暴。
-test('WD-E2E-07 🔴🔴 reboot 必须重连宿主（blur/focus 真实派发）＋冷却期不重复 reboot', async () => {
+// ── v3.1.6：reboot 不再无条作拆会话＋knock-back 懒重连＋冷却期 ──────────────
+//   用户真机日志（2026-10-12 v3.1.5）钉死：reboot 里的无条件 blur/focus 会
+//   拆掉 Android 输入法连接 ⇒ 豆包识别会话当场死（用户没点停止键也被掐断，
+//   之后的话一句都进不来）。blur 本是 v3.0.20 为修「重建后组字帧按宿主旧
+//   视图把树打回残串」的震荡加的——代价现在被量化。新语义：
+//     ① reboot 只做 ce＋重建，**不 blur**（给会话一次自愈机会）；
+//     ② 重建后组字帧真把树打回（knock-back ⇒ 视图确实没对齐）才补 blur/focus；
+//     ③ 冷却期语义不变（防震荡风暴）。
+test('WD-E2E-07 🔴🔴 reboot 本身不得 blur（拆会话＝掐断用户语音）；knock-back 才懒重连＋冷却期', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde07', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
@@ -346,7 +348,7 @@ test('WD-E2E-07 🔴🔴 reboot 必须重连宿主（blur/focus 真实派发）�
       { timeout: 8000 },
     );
     await page.waitForTimeout(300);
-    // 第一组空转 4 帧 → wd:dead → wd:reboot（带 blur/focus 重连）
+    // 第一组空转 4 帧 → wd:dead → wd:reboot（v3.1.6：只 ce＋重建，**不 blur**）
     for (let i = 0; i < 4; i += 1) {
       await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
       await page.waitForTimeout(80);
@@ -356,10 +358,33 @@ test('WD-E2E-07 🔴🔴 reboot 必须重连宿主（blur/focus 真实派发）�
       null,
       { timeout: 5000 },
     );
+    await page.waitForTimeout(200);
+    const counts1 = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
+    assert.equal(counts1.blur, 0,
+      '🔴🔴 reboot 本身不得 blur——blur 拆掉输入法连接＝掐断用户语音（真机实锤）');
+    assert.equal(counts1.focus, 0, 'reboot 本身不得 focus（与 blur 同一条连接）');
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      108,
+      'reboot 仍必须把峰值重建上屏（树=108）',
+    );
+
+    // knock-back 帧：reboot 重建后组字帧真把树打回（宿主旧视图没对齐的形状）
+    //   ⇒ 塌方守卫再拦截 + 必须补懒重连（blur/focus）
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapseMismatch(14, 200));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:reconnect'),
+      null,
+      { timeout: 5000 },
+    );
     await page.waitForTimeout(200); // blur 同步派发；focus 在 +50ms
-    const counts = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
-    assert.ok(counts.blur >= 1 && counts.focus >= 1, `🔴🔴 reboot 必须重连宿主输入连接（blur/focus 各至少 1 次），实得 blur=${counts.blur} focus=${counts.focus}`);
-    // 第二组空转（冷却 2s 内）⇒ 第二次 dead 后 reboot 必须被冷却拦下
+    const counts2 = await page.evaluate(() => ({ blur: window.__nsBlurCount, focus: window.__nsFocusCount }));
+    assert.ok(counts2.blur >= 1 && counts2.focus >= 1,
+      `🔴 knock-back 实锤后必须补 blur/focus 重连，实得 blur=${counts2.blur} focus=${counts2.focus}`);
+
+    // 冷却期：knock-back 之后再 4 帧空转 ⇒ 第二次 reboot 必须被冷却拦下。
+    //   （此时树停在 knock-back 的 14、真源仍是峰值 108——重建要等下一次
+    //     成功 reboot，故这里只断言真源不丢，不断言树长。）
     for (let i = 0; i < 4; i += 1) {
       await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.stallBi(200));
       await page.waitForTimeout(80);
@@ -370,11 +395,9 @@ test('WD-E2E-07 🔴🔴 reboot 必须重连宿主（blur/focus 真实派发）�
       { timeout: 5000 },
     );
     const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
-    assert.ok(flight.includes('wd:dead len=108 d=200'), '前置：机制外空转必须仍触发 wd:dead');
-    assert.ok(flight.includes('wd:reboot reconn'), '首次死亡确认必须 reboot＋重连');
+    assert.ok(flight.includes('wd:reboot reconn'), '首次死亡确认必须 reboot＋重建');
     assert.ok(flight.includes('wd:reboot skip cooldown'), '🔴 冷却期内的死亡确认必须拦下 reboot（防震荡风暴）');
-    const tree = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
-    assert.equal(tree, 108, `reboot 重建后树必须=108，实得 ${tree}`);
+    assert.equal(await textLen(page), 108, 'knock-back 后真源必须保持峰值 108 不被残串覆盖');
   } finally {
     await page.close();
   }

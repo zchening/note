@@ -1889,6 +1889,24 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  若成功（树长恢复增长）自然不再触发。 */
   let wdRebootAt = 0;
   const WD_REBOOT_COOLDOWN_MS = 2000;
+  /** 🔴 v3.1.6：懒重连窗口（ms）。reboot 后这么久还没被 knock-back ⇒ 视图
+   *  对齐成功（或会话已死），过期作废——别让陈年 flag 误伤后来的正常塌方。 */
+  const WD_RECONNECT_WINDOW_MS = 2000;
+  /** v3.1.6：reboot 已重建、正在等「下一个组字帧是否把树打回」的待重连标志。 */
+  let wdReconnectPending = false;
+  let wdReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 🔴🔴🔴 v3.1.6：懒重连——只有 knock-back 实锤（重建后组字帧真把树打回，
+   *  宿主视图确实没对齐）才拆会话。blur 会 tear down 输入法连接、豆包识别
+   *   会话当场死（用户 2026-10-12 真机日志实证：没点停止键也被掐断），
+   *   所以默认不拆，给会话一次自愈机会。 */
+  const wdReconnect = (): void => {
+    if (!wdReconnectPending) return;
+    wdReconnectPending = false;
+    if (wdReconnectTimer != null) { clearTimeout(wdReconnectTimer); wdReconnectTimer = null; }
+    recordFlight('wd:reconnect', 'blur/focus');
+    editorHost.blur();
+    setTimeout(() => { editorHost.focus(); }, 50);
+  };
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -2619,12 +2637,19 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             // 🔴🔴🔴 v3.0.20：宿主 InputConnection 视图错位对齐——真机 v3.0.19
             //   钉死：docToLexical 是程序化动树，宿主侧文档视图仍停留在 14 字
             //   残串状态，reboot 重建 111 后每个组字帧都按旧视图操作把树打回
-            //   14（upd len=14 d=-97 每帧重复）。blur/focus 强迫宿主重启输入
-            //   连接、重新 extract 全文（视图对齐重建后的内容），新组字会话
-            //   才有正确基座。间隔 50ms：同步连调会被 WebView 合并成一次无
-            //   效果的状态变化。
-            editorHost.blur();
-            setTimeout(() => { editorHost.focus(); }, 50);
+            //   14（upd len=14 d=-97 每帧重复）。
+            // 🔴🔴🔴 v3.1.6：但 blur/focus 不能再**无条件**执行——用户真机日志
+            //   （2026-10-12 v3.1.5）钉死：blur 会拆掉 Android 输入法连接，
+            //   豆包识别会话当场死（用户没点键盘停止键，之后说的话一句都进不来，
+            //   「说着话被自动掐断」的感知真凶）。改为懒重连：reboot 只做
+            //   ce＋重建，随后若组字帧真把树打回（视图确实没对齐，塌方守卫
+            //   会再拦截）才在 collapse 判定处补 wdReconnect()；帧能落地
+            //   （树长涨过峰值）则解冻处清 flag，会话活着、口述继续进。
+            wdReconnectPending = true;
+            wdReconnectTimer = setTimeout(() => {
+              wdReconnectPending = false;
+              wdReconnectTimer = null;
+            }, WD_RECONNECT_WINDOW_MS);
             }, 0);
           }
         } else {
@@ -2640,6 +2665,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         //   误解冻 → peakDoc 被残串覆盖）。涨过峰值才是组字恢复写入成功的真证据。
         if (treeLenNow > deferPeakLen) {
           wdFreeze = false;
+          // 🔴 v3.1.6：组字恢复写入成功（涨过峰值）⇒ 懒重连窗口作废——宿主
+          //   视图已对齐，会话活着，绝不拆。
+          wdReconnectPending = false;
+          if (wdReconnectTimer != null) { clearTimeout(wdReconnectTimer); wdReconnectTimer = null; }
         }
         armDeferredSync();
         recordFlight('wd:defer', 'reset len=' + deferTreeLen);
@@ -2648,6 +2677,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     const collapse = composeGuard.observe(newLen, composing, lastBiDataLen);
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
+      // 🔴🔴 v3.1.6 懒重连：reboot 重建后第一个组字帧就把树打回 ⇒ 宿主视图
+      //   确实没对齐（v3.0.19 震荡形状实锤）⇒ 补 blur/focus 重连。反之帧能
+      //   落地（树长涨过峰值）时 flag 在解冻处清除，会话活着不拆。
+      if (wdReconnectPending) {
+        setTimeout(() => { wdReconnect(); }, 0);
+      }
       latestDoc = before;
       latestDocRef = before;
     // 🔴🔴🔴 v3.0.16：与 wd restore（v3.0.15）同款——**绝不能在这里立即
