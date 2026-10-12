@@ -42,6 +42,7 @@ test('COMPOSE-E2E-01 🔴 合成中单帧塌方必须被守卫救回真源', asy
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp01', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 敲两段正文（跨块），每段 72 字、共 144 字 —— 贴近"整篇笔记"场景，且越过守卫阈值
     const base = '笔记内容测试文本';
@@ -134,6 +135,7 @@ test('COMPOSE-E2E-02 🔴🔴 回归：无 compositionstart、仅 insertComposit
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp02', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     const base = '笔记内容测试文本';
     const part1 = base.repeat(12);
@@ -234,6 +236,7 @@ test('COMPOSE-E2E-03 🔴🔴 塌方后组字恢复 ⇒ 树同步取消（绝不
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp03', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 两段正文共 144 字（越过守卫阈值），与 E2E-01 同款
     const base = '笔记内容测试文本';
@@ -285,6 +288,7 @@ test('COMPOSE-E2E-05 🔴🔴 真机 v3.1.4 两跳塌方：第二跳帧间仅掉
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp05', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 组字会话涨到峰值 129（真机 v3.1.4 日志：upd len=129）
     await page.evaluate(() => {
@@ -354,6 +358,7 @@ test('COMPOSE-E2E-06 🔴🔴 渐进放血后再大幅塌方：解冻锚必须�
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp06', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 会话峰值 129
     await page.evaluate(() => {
@@ -421,6 +426,7 @@ test('COMPOSE-E2E-04 🔴🔴 塌方后无恢复 ⇒ 1200ms 观察窗后延迟�
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp04', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     const base = '笔记内容测试文本';
     const part1 = base.repeat(12);

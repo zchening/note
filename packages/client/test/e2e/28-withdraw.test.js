@@ -40,6 +40,7 @@ test('WD-E2E-01 🔴 撤稿帧啃短真源 ⇒ 守卫回写会话峰值（口述
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde01', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 组字会话：增长帧 10→100（每帧 +10）→ 108（补一帧到峰值）
     await page.evaluate(() => {
@@ -90,6 +91,7 @@ test('WD-E2E-02 🔴 容差内收尾不回写（撤稿守卫不得对抗正常�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde02', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     await page.evaluate(() => {
       const t = window.__NOTESYNC_COMPOSE_TEST__;
@@ -126,6 +128,7 @@ test('WD-E2E-03 🔴 撤稿后组字恢复 ⇒ 树同步取消（绝不重建杀
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde03', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 组字会话增长到峰值 108（与撤稿帧分开 evaluate——见上方形状纪律）
     await page.evaluate(() => {
@@ -172,6 +175,7 @@ test('WD-E2E-04 🔴 撤稿后无恢复 ⇒ 1200ms 观察窗后延迟重建（�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde04', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 峰值帧（分两次 evaluate——见 WD-E2E-03 形状纪律）
     await page.evaluate(() => {
@@ -214,6 +218,7 @@ test('WD-E2E-05 🔴🔴 锚点死亡自愈：4 帧空转 ⇒ wd:reboot 结束�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde05', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 组字会话到峰值 108（分两次 evaluate——形状纪律）
     await page.evaluate(() => {
@@ -272,6 +277,7 @@ test('WD-E2E-06 🔴🔴 机制收尾后锚点死亡：空转 4 帧必须仍触�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde06', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 组字会话到峰值 108（分两次 evaluate——形状纪律）
     await page.evaluate(() => {
@@ -324,6 +330,7 @@ test('WD-E2E-07 🔴🔴 reboot 本身不得 blur（拆会话＝掐断用户语�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde07', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     // 🔴 blur/focus 计数器挂在 editorHost 上（真机宿主=Android InputConnection，
     //   桌面等价物=contenteditable 焦点变化——DOM 事件真实派发才可断言）
@@ -414,6 +421,7 @@ test('WD-E2E-08 🔴🔴 残串涨过基线但没过峰值必须重建上屏；�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde08', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     await page.evaluate(() => {
       const t = window.__NOTESYNC_COMPOSE_TEST__;
@@ -463,6 +471,7 @@ test('WD-E2E-09 🔴 窗口内用户手动打字 ⇒ wd:sync 必须 skip（手�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde09', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     await page.evaluate(() => {
       const t = window.__NOTESYNC_COMPOSE_TEST__;
@@ -512,6 +521,7 @@ test('WD-E2E-10 🔴🔴 reboot 连续救不活必须升级 blur/focus（无塌�
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde10', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.click('.ns-editor');
     await page.evaluate(() => {
       window.__nsBlurCount = 0;
@@ -564,6 +574,53 @@ test('WD-E2E-10 🔴🔴 reboot 连续救不活必须升级 blur/focus（无塌�
       '升级重连后树必须仍是峰值 108',
     );
     assert.equal(await textLen(page), 108, '真源保持峰值 108');
+  } finally {
+    await page.close();
+  }
+});
+
+// ── v3.2.0：组字心跳——长组字切段，豆包重识别永远够不到触发线 ───────────────
+//   真机 tree:frag 实证（21:05 日志）：塌方前后树都是单 TextNode（tn=1）——
+//   打塌树的不是 Lexical 碎片，是浏览器/输入法自己的替换几何，且只在组字
+//   >100 字时发生（7 次塌方全部 >100）。用户点「完成」再点麦克风（= 一次
+//   ce+cs）后组字从头计，从不触发——分段口述就是原理。心跳自动化：组字串
+//   过 80 字即合成 ce＋按模型重建（无 blur——合成 ce 不杀 ASR 会话已有实证）。
+test('WD-E2E-11 🔴🔴 组字心跳：组字串过阈值即 ce+重建，内容无损、口述继续、无塌方可救', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde11', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 70; n += 10) t.growTo(n);
+      t.growTo(85); // 跨过 80 阈值 ⇒ 心跳应触发
+    });
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('wd:heartbeat'),
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(300); // ce/重建在 setTimeout(0) 里
+    // 心跳 = ce＋按模型重建：内容必须无损（不丢、不翻倍）
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      85,
+      '心跳后树必须仍是 85（ce 提交当前组字文本，重建无内容变化）',
+    );
+    assert.equal(await textLen(page), 85, '真源必须仍是 85');
+    // 心跳后继续口述：新会话帧必须继续落地
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(95));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 95,
+      null,
+      { timeout: 5000 },
+    );
+    assert.equal(await textLen(page), 95, '心跳后口述必须继续落地（新会话）');
+    // 心跳把长组字切掉了 ⇒ 全程不得有塌方/重连/升级（无可救之物）
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(!flight.includes('gate:collapse'), '心跳切段后不得有塌方（无长组字即无触发）');
+    assert.ok(!flight.includes('wd:reconnect'), '心跳后不得触发懒重连（会话活着）');
+    assert.ok(!flight.includes('wd:escalate'), '心跳后不得触发升级重连');
   } finally {
     await page.close();
   }

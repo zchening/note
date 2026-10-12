@@ -202,6 +202,9 @@ declare global {
       stallBi: (dLen: number) => void;
       /** v3.0.18 只读探针：ed.isComposing() 当前值（死会话是否被 reboot 强制结束）。 */
       probeComposing: () => boolean;
+      /** v3.2.0：心跳阈值运行时改写（e2e 隔离机制用——其他判据关心跳钉自己的
+       *  形状，WD-E2E-11 专门钉心跳）。生产路径从不调用。 */
+      setHeartbeatAt: (n: number) => void;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1919,6 +1922,21 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   let wdEscalateAt = 0;
   /** 升级重连冷却（ms）：拆焦点是重兵器，10s 内只来一次，防焦点风暴。 */
   const WD_ESCALATE_COOLDOWN_MS = 10000;
+  /** 🔴🔴🔴 v3.2.0 组字心跳：组字串长过此阈值即合成 ce+重建（等价于用户点
+   *  「完成」重开口述），把长组字切成短组字。依据：真机 7 次塌方全部发生在
+   *  组字 >100 字时（tree:frag 实证塌方前后都是单 TextNode——打塌树的是
+   *  浏览器/输入法自己的替换几何，与 Lexical 碎片无关）；用户分段口述
+   *  （每段点完成 = 一次真实 ce+cs）从不触发。合成 ce 不杀 ASR 会话已有
+   *  三份真机实证（reboot 后新 cs 照来、帧照落）。 */
+  const COMPOSE_HEARTBEAT_AT = 80;
+  /** 心跳冷却（ms）：口述速度 ~10 字/秒，80 字 ≈ 8s，冷却很少绑定。 */
+  const COMPOSE_HEARTBEAT_COOLDOWN_MS = 5000;
+  let wdHeartbeatAt = 0;
+  let wdHeartbeatQueued = false;
+  /** 🔴 v3.2.0：心跳阈值的运行时可写副本——探针 setHeartbeatAt 改写它，
+   *  e2e 隔离各自机制用（关掉心跳钉撤稿/塌方形状，WD-E2E-11 专门钉心跳）。
+   *  生产代码路径从不写它，恒为 COMPOSE_HEARTBEAT_AT。 */
+  let wdHeartbeatThreshold = COMPOSE_HEARTBEAT_AT;
   /** 🔴🔴🔴 v3.1.6：懒重连——只有 knock-back 实锤（重建后组字帧真把树打回，
    *  宿主视图确实没对齐）才拆会话。blur 会 tear down 输入法连接、豆包识别
    *   会话当场死（用户 2026-10-12 真机日志实证：没点停止键也被掐断），
@@ -1931,30 +1949,64 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     editorHost.blur();
     setTimeout(() => { editorHost.focus(); }, 50);
   };
-  /** 🔴🔴 v3.1.9 取证：塌方机理调查——树的碎片结构快照（只记节点数量/长度，
-   *  绝不记内容）。真机日志至今只能看到塌方的长度差（115→19），看不到树内
-   *  TextNode 被拆成几块——而 compose-guard.ts 头部的机理分析（「Lexical 只回
-   *  灌 anchor 一个节点，其余被吞」）需要碎片证据才能定论。两个调用点：
-   *  豆包重识别瞬间（beforeinput、组字串变短 = 塌方前夜）、塌方判定帧
-   *  （update 监听、塌方落地后）——前后对照即机理。 */
+  /** 🔴🔴🔴 v3.2.0 组字心跳（排队一次 ce＋按模型重建）：把长组字切成短组字，
+   *  让豆包的重识别永远够不到触发长度。只在组字**健康**时触发（未冻结、
+   *  无恢复窗口）——塌方/空转的恢复期由各自的机制接管，心跳不插手。 */
+  const queueHeartbeat = (): void => {
+    if (wdHeartbeatQueued) return;
+    if (wdFreeze || deferredTreeSyncTimer != null) return;
+    if (Date.now() - wdHeartbeatAt < COMPOSE_HEARTBEAT_COOLDOWN_MS) return;
+    wdHeartbeatQueued = true;
+    setTimeout(() => {
+      wdHeartbeatQueued = false;
+      wdHeartbeatAt = Date.now();
+      recordFlight('wd:heartbeat', 'ce+rebuild');
+      clearSyntheticComposeTimer();
+      // 合成 ce：Lexical 把当前组字文本提交为正文（树里已经有了，无内容变化）
+      editorHost.dispatchEvent(new CompositionEvent('compositionend'));
+      syntheticCompose = false;
+      // 按模型重建：刷新 DOM 节点 + 让浏览器/输入法的文档视图对齐当前内容
+      const doc = latestDocRef;
+      if (doc != null) {
+        ed.update(() => { docToLexical(doc); }, { tag: EGG_NOFX_TAG, discrete: true });
+      }
+    }, 0);
+  };
+  /** 🔴🔴🔴 v3.1.9/v3.2.0 取证：塌方机理调查——快照分两层（只记数量/长度/
+   *  元素同异，绝不记内容）。真机 21:05 日志的模型层取证（tn=1 塌方前后单
+   *  TextNode）排除了碎片理论，把矛头指向 **Lexical 对 DOM 元素的管理**：
+   *  用户实证自带笔记/老版本同输入法长口述无恙，唯独本 App 出事 ⇒ 差异在
+   *  本页的组字期 DOM 处理。本快照含 DOM 层：contenteditable 内的文本节点
+   *  数量/长度＋首文本节点元素**是否与上次同一实例**（same=0 = 两次快照间
+   *  DOM 元素被替换 = 浏览器组字区域被打断的机理实锤）。 */
+  let lastFragFirstTextEl: Text | null = null;
   const treeFragSnapshot = (): string => {
     try {
-      return ed.getEditorState().read(() => {
-        const texts: number[] = [];
+      const rootEl = ed.getRootElement();
+      if (rootEl == null) return 'no-root';
+      const domLens: number[] = [];
+      let firstTextEl: Text | null = null;
+      const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
+      let t = walker.nextNode();
+      while (t != null) {
+        domLens.push(t.textContent?.length ?? 0);
+        if (firstTextEl == null) firstTextEl = t as Text;
+        t = walker.nextNode();
+      }
+      const domSame = firstTextEl != null && firstTextEl === lastFragFirstTextEl;
+      lastFragFirstTextEl = firstTextEl;
+      const modelLens: number[] = [];
+      ed.getEditorState().read(() => {
         const walk = (n: LexicalNode): void => {
           if ($isTextNode(n)) {
-            texts.push(n.getTextContentSize());
+            modelLens.push(n.getTextContentSize());
             return; // TextNode 是叶子，不再下钻
           }
           if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
         };
         walk($getRoot());
-        const blocks: string[] = [];
-        for (const b of $getRoot().getChildren()) {
-          blocks.push(`${b.getType() === 'paragraph' ? 'p' : b.getType()}${b.getTextContentSize()}`);
-        }
-        return `tn=${texts.length}[${texts.join('+')}] blk=${blocks.length}[${blocks.join(',')}]`;
       });
+      return `dom=${domLens.length}[${domLens.join(',')}] same=${domSame ? 1 : 0} tn=${modelLens.length}[${modelLens.join('+')}]`;
     } catch {
       return 'frag-err';
     }
@@ -1990,6 +2042,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         // 🔴🔴🔴 v3.0.18：组字串长度喂锚点死亡检测（update 监听空转判定用：
         //   组字串远长于文档但树长不动 = 写入全部空转）。
         lastBiDataLen = ie.data == null ? 0 : ie.data.length;
+        // 🔴🔴🔴 v3.2.0 组字心跳：组字串过阈值即排队 ce＋重建——把长组字切成
+        //   短组字，豆包的重识别永远够不到触发线（详见 COMPOSE_HEARTBEAT_AT 注释）。
+        //   阈值可被探针改写（setHeartbeatAt）——e2e 隔离各自机制用，生产恒为默认。
+        if (ie.data != null && ie.data.length >= wdHeartbeatThreshold) queueHeartbeat();
         // 🔴🔴🔴 v3.0.17：comp=1 组字帧到达 = 锚点活着 → 解冻（口述内容照常进
         //   模型）＋推迟重建到最后一次组字帧+窗口（原 v3.0.15/16 的「取消」在
         //   语音停顿场景失效：停顿超窗 → 定时器到期重建 → 杀锚点 → 后续口述空转）。
@@ -3116,6 +3172,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     },
     // 🔴 v3.0.18 只读探针：ed.isComposing() 当前值（死会话是否被 reboot 强制结束）。
     probeComposing: (): boolean => ed.isComposing() === true,
+    // 🔴 v3.2.0：心跳阈值运行时改写（e2e 隔离机制用）。生产路径从不调用。
+    setHeartbeatAt: (n: number): void => {
+      wdHeartbeatThreshold = n;
+    },
     flightLines: (): string[] => flightLines(),
     guardActive: (): boolean => composeGuard.isActive,
     treeTextLen: (): number => ed.getEditorState().read(() => $getRoot().getTextContent().length),
