@@ -118,8 +118,15 @@ test('EXPORT-06 🔴 renderCardToPng 必须用 offsetWidth（scrollWidth 会裁�
   assert.equal(RENDER_OPTS.useCORS, true);
 });
 
-test('EXPORT-07 🔴 交付阶梯顺序：剪贴板 → 原生桥 → 分享 → 预览', () => {
-  const order = ['clipboard', 'native', 'share', 'preview'];
+test('EXPORT-07 🔴 交付阶梯顺序：原生桥 → 剪贴板 → 分享 → 预览', () => {
+  // 🔴🔴 顺序**在 2026-10-13 特意翻转过**（原生桥从第二档提到第一档），
+  //   依据是 Chromium 源码而非推理：`ClipboardImpl.setImage()` 在
+  //   `mImageFileProvider == null`（WebView 宿主恒为 null）时「drop it on the floor」
+  //   却照样让 promise resolve ⇒ 壳内剪贴板档是**假成功**，把它排在前头
+  //   就等于永远走不到真正能写系统剪贴板的原生桥（用户报障：微信/小米笔记都粘不出）。
+  //   🔴 想改回去的人先回答：壳内 `navigator.clipboard.write` 写图片的返回值
+  //   到底有没有被 Chromium 用来区分"写成功了"？没有 —— 所以别改回去。
+  const order = ['native', 'clipboard', 'share', 'preview'];
   let last = -1;
   for (const k of order) {
     const at = RENDER_SRC.indexOf(`return '${k}'`);
@@ -127,6 +134,9 @@ test('EXPORT-07 🔴 交付阶梯顺序：剪贴板 → 原生桥 → 分享 →
     assert.ok(at > last, `${k} 的位置不对（阶梯顺序变了）`);
     last = at;
   }
+  // 🔴 壳内不许再调 WebView 剪贴板那一档（它会假成功）—— 判据在 EXPORT-21（行为级）
+  const fn = RENDER_SRC.slice(RENDER_SRC.indexOf('export async function deliverPng'));
+  assert.match(fn, /!deps\.isNativeApp &&\s*\n\s*navigator\.clipboard/, '壳内仍会走 WebView 剪贴板（它会假装成功）');
 });
 
 test('EXPORT-08 🔴🔴 剪贴板必须走 Promise 形态（await 渲染就晚了）', () => {
@@ -265,6 +275,107 @@ test('EXPORT-19 🔴🔴 html2canvas 必须**入库**（www/ 整个被 gitignore
   assert.match(BUILD_SRC, /materializeStatic/, '构建脚本未物化静态资源');
   assert.match(BUILD_SRC, /html2canvas\.min\.js/, '构建未点名 html2canvas（缺文件时无人知道）');
   assert.match(BUILD_SRC, /sw\.js/, '构建未点名 sw.js');
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * EXPORT-N：原生壳「导出为图片并复制」真机报障（2026-10-13）
+ *
+ * 用户原话：App 上「导出为图片并复制」点了之后，微信里粘不出来，小米自带
+ *   笔记 App 里也粘不出来 —— 等于**根本没写进系统剪贴板**。
+ *
+ * 🔴🔴 真因（源码级，不是推理）：
+ *   Chromium `ui/android/.../ClipboardImpl.setImage(byte[], String)` 开头就是
+ *     if (mImageFileProvider == null) { /* drop it on the floor *​/ return; }
+ *   而 `ImageFileProvider` 只有 Chrome 自己注入（ChromeImageFileProvider），
+ *   WebView 宿主（Capacitor 壳）**从不注入** ⇒ 壳内
+ *   `navigator.clipboard.write(ClipboardItem{'image/png'})` 被静默丢弃，
+ *   但 promise 照常 resolve ⇒ 阶梯在第①档就 return，谎报"已复制"，
+ *   系统剪贴板其实空着，原生桥（ImgClip）永远轮不到。
+ *
+ * ⇒ 判据要钉的是**行为**，不是文案：
+ *   ① 原生壳里**不许**先试 WebView 剪贴板（它会假装成功）；
+ *   ② 走原生桥之后必须**读回验证**，验证为空就不许算 'native'（不许谎报）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/** 装一个可控的 navigator.clipboard 替身，返回调用记录。 */
+function stubClipboard(impl) {
+  const rec = { writes: 0, items: [] };
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { clipboard: { write: async (items) => { rec.writes++; rec.items.push(items); await impl(items); } } },
+  });
+  Object.defineProperty(globalThis, 'ClipboardItem', {
+    configurable: true,
+    value: class { constructor(types) { this.types = types; } },
+  });
+  return rec;
+}
+
+test('EXPORT-21 🔴🔴 原生壳必须先走原生桥，绝不许先试 WebView 剪贴板', async () => {
+  const { deliverPng } = await import('../src/export/render.ts');
+
+  // ── 场景 A：桥成功 ⇒ 桥被调用、剪贴板**一次都不许调**、结果 native ──
+  {
+    const clip = stubClipboard(async () => {}); // 会"成功"的假剪贴板 = 真机 WebView 的骗人形态
+    let bridge = 0;
+    const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+      isNativeApp: true,
+      blobToB64: async () => 'QUFB',
+      nativeCopyImage: async () => { bridge++; return true; },
+      showPreview: () => {},
+    });
+    assert.equal(bridge, 1, '原生桥必须被调用');
+    assert.equal(clip.writes, 0, '桥成功时不该再动剪贴板');
+    assert.equal(kind, 'native', '桥成功且验证通过应返回 native');
+  }
+
+  // ── 场景 B（🔴 真正有牙的一档）：桥**失败**时壳内也不许退回 WebView 剪贴板 ──
+  //   若有人把"壳内跳过剪贴板"那个门删掉，场景 A 依然绿（桥成功就 return 了），
+  //   只有场景 B 会红：那时会去调那个"假装成功"的剪贴板，谎报 'clipboard'。
+  {
+    const clip = stubClipboard(async () => {});
+    let previewed = 0;
+    const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+      isNativeApp: true,
+      blobToB64: async () => 'QUFB',
+      nativeCopyImage: async () => false,
+      showPreview: () => { previewed++; },
+    });
+    assert.equal(clip.writes, 0, '🔴 原生壳里不许调 WebView 剪贴板（它在壳内会静默丢弃却 resolve）');
+    assert.notEqual(kind, 'clipboard', '🔴 桥失败时不许靠假成功的剪贴板档收场');
+    assert.equal(previewed, 1, '桥失败后必须落到可见出口（预览层）');
+  }
+});
+
+test('EXPORT-22 🔴🔴 原生桥写完必须读回验证；验证为空不许算成功（不许谎报"已复制"）', async () => {
+  const { deliverPng } = await import('../src/export/render.ts');
+  stubClipboard(async () => {});
+  let previewed = 0;
+  // 桥回报成功，但系统剪贴板读回来是空的（＝真机上最可能出现的"谎报"形状）
+  const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+    isNativeApp: true,
+    blobToB64: async () => 'QUFB',
+    nativeCopyImage: async () => true,
+    verifyClipboardImage: async () => false,
+    showPreview: () => { previewed++; },
+  });
+  assert.notEqual(kind, 'native', '🔴 验证为空时不许回报 native（那等于对用户谎报"已复制"）');
+  assert.equal(previewed, 1, '验证落空后必须落到可见出口（预览层）');
+});
+
+test('EXPORT-23 🔴 非原生（浏览器）仍是剪贴板优先，且原生桥不参与', async () => {
+  const { deliverPng } = await import('../src/export/render.ts');
+  const clip = stubClipboard(async () => {});
+  let bridge = 0;
+  const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+    isNativeApp: false,
+    blobToB64: async () => 'QUFB',
+    nativeCopyImage: async () => { bridge++; return true; },
+    showPreview: () => {},
+  });
+  assert.equal(kind, 'clipboard', '浏览器里仍是剪贴板档收场');
+  assert.equal(bridge, 0, '非原生壳不该走原生桥');
+  assert.equal(clip.writes, 1, '浏览器里必须真的调用一次剪贴板');
 });
 
 test('EXPORT-20 🔴 gitignore 不得把静态资源源目录排除掉', () => {

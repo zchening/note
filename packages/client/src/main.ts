@@ -1045,6 +1045,34 @@ async function nativeCopyImage(base64: string, mime: string): Promise<boolean> {
   }
 }
 
+/**
+ * 原生桥：读回系统剪贴板，确认里面**真的**有一张图。
+ *
+ * 🔴 为什么需要它（2026-10-13 真机报障）：桥回报 `ok:true` 只代表
+ *   "我们调了 ClipboardManager.setPrimaryClip"，不代表剪贴板里真有一张图 ——
+ *   ROM 拦写、被别的应用立刻覆盖、URI 权限出问题都会让"回报成功但没图"。
+ *   这种谎报比直接失败更伤用户：他会拿着一句「已复制」去微信里长按半天。
+ *
+ * 🔴🔴 桥上没有 `hasImage`（**旧 APK**）时必须返回 **true**（无法证伪 ⇒ 信任写入），
+ *   绝不能返回 false —— 那会把所有旧 APK 上的导出集体降级到分享/预览，
+ *   而旧 APK 恰恰是"已经装上、正在用"的那一批。等新 APK 铺开后这条回退自然失效。
+ */
+async function nativeClipboardHasImage(): Promise<boolean> {
+  try {
+    // 🔴 与 native-img-save.ts 同款：桥形状是 Kotlin 侧的契约，TS 不知道，必须显式收窄
+    const br = window.Capacitor?.Plugins?.ImgClip as
+      | { hasImage?: () => Promise<{ ok?: boolean; hasImage?: boolean } | null> }
+      | undefined;
+    if (!br || typeof br.hasImage !== 'function') return true;
+    const res = await br.hasImage();
+    // ok:false = 读不回来（权限/ROM 限制）⇒ 同样按"无法证伪"处理
+    if (res?.ok !== true) return true;
+    return res.hasImage === true;
+  } catch {
+    return true;
+  }
+}
+
 let currentPage = 'boot';
 let currentNote = '';
 
@@ -1374,6 +1402,8 @@ function onTopbar(act: TopbarAction): void {
         //   恒false ⇒ APK 里导出长图走不到原生复制那一档（降级到 html2canvas，慢且可能失败）。
         isNativeApp: isNativeApp(),
         nativeCopyImage,
+        // 🔴 复制之后读回验证：桥说成功不算数，剪贴板里真有图才算（见 render.ts 头部）
+        verifyClipboardImage: nativeClipboardHasImage,
         okMs: COPY.exportOkMs,
         failMs: COPY.exportFailMs,
       });

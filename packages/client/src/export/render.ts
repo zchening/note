@@ -8,10 +8,39 @@
  *
  *   渲染失败 → 一律给看得懂的失败文案，绝不静默。
  *   渲染成功 → 逐级往下交付，任何一档成功就收场：
- *     ① 剪贴板（Promise 形态，手势窗口内发起）
- *     ② APP 原生桥（Android WebView 剪贴板不可用时的确定性路径）
+ *     ① APP 原生桥（**壳内第一档**：ClipboardManager 真·复制图片）
+ *     ② 剪贴板（Promise 形态，手势窗口内发起；桌面/浏览器的主路径）
  *     ③ 系统分享面板（手机上「发给微信」更符合诉求）
  *     ④ 全屏预览（长按保存；唯一不依赖任何权限的出口）
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * 🔴🔴🔴 为什么原生壳里**不许**先试 WebView 剪贴板（2026-10-13 真机报障的根）
+ *
+ *   用户原话：App 里「导出为图片并复制」点了之后，微信粘不出、小米自带笔记
+ *   也粘不出 —— 等于**压根没进系统剪贴板**。
+ *
+ *   根因在 Chromium 源码里，不在我们代码里：
+ *     `ui/android/java/src/org/chromium/ui/base/ClipboardImpl.java`
+ *       public void setImage(byte[] imageData, String extension) {
+ *         if (mImageFileProvider == null) {
+ *           // ... we can just drop it on the floor.
+ *           return;
+ *         }
+ *     `ImageFileProvider` 只有 Chrome 自己注入（ChromeImageFileProvider），
+ *     WebView 宿主（Capacitor 壳）**从不注入** ⇒ 壳内
+ *     `navigator.clipboard.write(ClipboardItem{'image/png'})` 被**静默丢弃**，
+ *     而 C++ 侧不检查返回值、`Java_Clipboard_setImage` 又是 void ⇒
+ *     **promise 照常 resolve**。
+ *
+ *   ⇒ 于是阶梯在第①档就 return、弹「已复制」，而真正能写进系统剪贴板的
+ *     原生桥（ImgClip）**永远轮不到**。这就是「点了没复制到剪贴板」的全部。
+ *
+ *   ⇒ 修法：壳内把原生桥提到剪贴板之前。桌面/浏览器不受影响（那里没有壳，
+ *     也没有这个坑，异步剪贴板是真能写图片的）。
+ *
+ *   🔴 附带一条纪律：**写完必须读回验证**。桥回报 ok 只是"我调了
+ *   ClipboardManager"，不等于系统剪贴板里真有一张图。验证为空就继续往下
+ *   走（分享/预览），绝不能对用户谎报「已复制」。
  *
  * ─────────────────────────────────────────────────────────────────────────
  * 🔴🔴 为什么剪贴板要走「Promise 形态」（老项目 v7.7.0 血泪，最容易写错的一处）
@@ -128,6 +157,18 @@ export interface DeliverDeps {
   isNativeApp: boolean;
   /** Blob → base64（去掉 data: 前缀）。 */
   blobToB64: (blob: Blob) => Promise<string>;
+  /**
+   * 原生桥写完之后的**读回验证**（可为 undefined：旧 APK 没有 `hasImage`）。
+   *
+   * 🔴 返回 false = 系统剪贴板里确实没有图片 ⇒ 不许回报成功（谎报"已复制"
+   *   比直接失败更伤用户：他会去微信里长按半天）。
+   *   抛错/读不回来 = **无法证伪** ⇒ 调用方按 true 处理，信任桥的 ok。
+   *
+   * 🔴 显式写成 `| undefined`（不是只写 `?`）：本仓库开了
+   *   `exactOptionalPropertyTypes`，`{ verifyClipboardImage: undefined }`
+   *   **不** satisfies `verifyClipboardImage?: T`。
+   */
+  verifyClipboardImage?: (() => Promise<boolean>) | undefined;
   // 🔴🔴 这里**曾经**还有一个 `isTouch` 字段，是"剪贴板成功后给触屏补开预览层"那套
   //   逻辑的注入口（用户报障第 4 条，2026-10-07 用户拍板 A1 删除）。
   //   那个逻辑删掉后它零消费者，是个会骗人的死字段 —— 留着的话，下一个人会以为
@@ -161,9 +202,41 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
   // 防 unhandledrejection：回退路径可能先返回，blobP 的 rejection 无人消费
   blobP.catch(() => {});
 
-  // ① 剪贴板（Promise 形态，write 立即调用）
+  // ① APP 原生桥（**壳内第一档**）
+  //
+  // 🔴🔴 绝不许把它放到 WebView 剪贴板之后：壳内 `navigator.clipboard.write`
+  //   写图片会被 Chromium 静默丢弃却照常 resolve（见文件头第二节），
+  //   那样本档永远轮不到，用户永远是"复制了但哪儿都粘不出"。
+  if (deps.isNativeApp && deps.nativeCopyImage) {
+    let b: Blob | null = null;
+    try {
+      b = await blobP;
+    } catch (e) {
+      // 渲染失败是**真失败**（图没生成），必须如实往外抛，不许假装走了别的档
+      throw e instanceof Error ? e : new Error('渲染异常');
+    }
+    if (b) {
+      try {
+        if (await deps.nativeCopyImage(await deps.blobToB64(b), 'image/png')) {
+          // 🔴 验证器缺失（旧 APK）或读不回来 ⇒ 无法证伪 ⇒ 信任桥的 ok
+          const v = deps.verifyClipboardImage;
+          if (!v || (await v()) !== false) return 'native';
+          // 验证为空：系统剪贴板里没有图 ⇒ 继续往下走，绝不谎报
+        }
+      } catch {
+        /* 桥异常 / 验证异常 → 继续往下 */
+      }
+    }
+  }
+
+  // ② 剪贴板（Promise 形态，write 立即调用）
+  //
+  // 🔴🔴 **壳内不走这一档**：见文件头第二节 —— 壳内它会被静默丢弃却照常
+  //   resolve，等于给用户一个假的「已复制」。壳里要么桥成功（①档已返回），
+  //   要么老实走到分享/预览，用户总有能用的出口。
   try {
     if (
+      !deps.isNativeApp &&
       navigator.clipboard &&
       typeof navigator.clipboard.write === 'function' &&
       typeof ClipboardItem !== 'undefined'
@@ -186,8 +259,8 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
   if (renderErr) throw renderErr;
   if (!blob) return null;
 
-  // ② Promise 形态被个别旧内核拒（只认 Blob）→ 渲染完成后用 Blob 再试一次，
-  //   保住桌面「复制」语义。这必须在**非原生**下做：原生走桥。
+  // ② 之二 Promise 形态被个别旧内核拒（只认 Blob）→ 渲染完成后用 Blob 再试一次，
+  //   保住桌面「复制」语义。这必须在**非原生**下做（壳内剪贴板会假成功）。
   if (clipTried && !deps.isNativeApp) {
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
@@ -197,17 +270,7 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     }
   }
 
-  // ③ APP 原生桥：ClipboardManager 真·复制图片
-  if (deps.isNativeApp && deps.nativeCopyImage) {
-    try {
-      const ok = await deps.nativeCopyImage(await deps.blobToB64(blob), 'image/png');
-      if (ok) return 'native';
-    } catch {
-      /* 桥异常继续分享回退 */
-    }
-  }
-
-  // ④ 系统分享面板
+  // ③ 系统分享面板（原生壳里剪贴板不可信时，这是"真能进微信"的出口）
   try {
     const file = new File([blob], 'note.png', { type: 'image/png' });
     if (
@@ -223,7 +286,7 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     if (e instanceof Error && e.name === 'AbortError') return 'cancelled';
   }
 
-  // ⑤ 全屏预览：唯一不依赖任何权限的出口，必须永远存在
+  // ④ 全屏预览：唯一不依赖任何权限的出口，必须永远存在
   deps.showPreview(blob);
   return 'preview';
 }

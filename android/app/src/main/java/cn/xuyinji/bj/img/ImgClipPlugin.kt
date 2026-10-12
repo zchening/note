@@ -19,6 +19,40 @@ import java.io.File
 @CapacitorPlugin(name = "ImgClip")
 class ImgClipPlugin : Plugin() {
 
+    /**
+     * 读回系统剪贴板，确认里面**真的**有一张图。
+     *
+     * 🔴 v3.2.2：复制之后必须验证（用户报障「点了没复制到剪贴板」）。
+     *   `copyImage` 回报 ok 只代表"我们调了 setPrimaryClip"，不代表剪贴板里真有图；
+     *   JS 侧据此决定是弹「已复制」还是老实降级到分享/预览。
+     *
+     * 🔴 返回语义**三态**，别简化成布尔：
+     *   - `ok:true,  hasImage:true`  剪贴板里确实有图 ⇒ 可以报成功
+     *   - `ok:true,  hasImage:false` 读回来了，但里面没图 ⇒ **不许**报成功
+     *   - `ok:false`                 **读不回来**（ROM 限制/权限）⇒ 无法证伪，JS 侧信任写入
+     *   把"读不回来"和"确实没图"混成一个 false，会让受限 ROM 上的用户
+     *   每次导出都被打发到分享面板 —— 那是把取证手段当成了判据。
+     */
+    @PluginMethod
+    fun hasImage(call: PluginCall) {
+        val ret = JSObject()
+        try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip
+            val desc = clip?.description
+            val has = desc != null && (desc.hasMimeType("image/*") || desc.hasMimeType("image/png"))
+            ret.put("ok", true)
+            ret.put("hasImage", has)
+            ret.put("mime", if (desc != null && desc.mimeTypeCount > 0) desc.getMimeType(0) else "")
+            if (has) ret.put("uri", clip?.getItemAt(0)?.uri?.toString() ?: "")
+        } catch (e: Exception) {
+            // 🔴 读不回来 ⇒ ok:false（无法证伪），不是 hasImage:false
+            ret.put("ok", false)
+            ret.put("error", e.message ?: e.javaClass.simpleName)
+        }
+        call.resolve(ret)
+    }
+
     @PluginMethod
     fun copyImage(call: PluginCall) {
         val ret = JSObject()
@@ -40,6 +74,8 @@ class ImgClipPlugin : Plugin() {
             cm.setPrimaryClip(clip)
             ret.put("ok", true)
             ret.put("bytes", bytes.size)
+            // 便于诊断导出（真机报障时可直接看出落的是什么 URI）
+            ret.put("uri", uri.toString())
         } catch (e: Exception) {
             ret.put("ok", false)
             ret.put("error", e.message ?: e.javaClass.simpleName)

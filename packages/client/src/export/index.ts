@@ -57,6 +57,14 @@ export interface ExportDeps {
   isNativeApp: boolean;
   /** 原生桥复制图片（S8 注入；Web 下 undefined）。 */
   nativeCopyImage?: (base64: string, mime: string) => Promise<boolean>;
+  /**
+   * 原生桥写完后的**读回验证**（旧 APK 无 `hasImage` 时由调用方给 undefined）。
+   *
+   * 🔴 与 render.ts 的 DeliverDeps 同义，只是这一层是"顶栏 → 导出"的对外契约；
+   *   **必须透传下去**，不能在这一层自己判 —— 否则"验证过了没"这个事实
+   *   又变成藏在副作用里的东西（全项目统一纪律）。
+   */
+  verifyClipboardImage?: (() => Promise<boolean>) | undefined;
 }
 
 export type ExportResult = DeliverKind | 'cancelled' | 'loadfail' | 'renderfail';
@@ -95,6 +103,7 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
       isNativeApp: deps.isNativeApp,
       blobToB64,
       nativeCopyImage: deps.nativeCopyImage,
+      verifyClipboardImage: deps.verifyClipboardImage,
       showPreview: (b) => showPreview(b),
       // 🔴🔴 这里**不再**注入 isTouch：交付阶梯里唯一的平台分支是"原生桥 vs 分享"，
       //   而"剪贴板成功后给触屏补开预览层"已按用户拍板的 A1 删掉了（render.ts 的注释与
