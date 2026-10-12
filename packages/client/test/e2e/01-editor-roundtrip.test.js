@@ -139,9 +139,15 @@ test('E2E-UNDO1 Ctrl+Z 撤回 / Ctrl+Y 重做（撤销栈真的接上了）', as
   const page = await openEditor(h.browser(), h.baseUrl(), 'e2eUndo');
   try {
     await (await page.$('#editor-host[contenteditable="true"]')).click();
-    await page.keyboard.type('ABCDE');
-    // 🔴 必须等合并窗口（300ms）走完，否则这几个字还在合并中，
-    //   撤的是"半个单元"，断言会飘。
+    // 🔴🔴 输入走 insertText（单次插入 = 天然一个撤销单元），**不再用 5 次
+    //   keyboard.type** —— v3.1.1 CI 实栽：Lexical 合并窗口按**键间隙**计
+    //   （~300ms，350ms/键探针实测撕开：一次 Ctrl+Z 只撤最后一个字），
+    //   CI 负载下单次 press 偶发 >300ms，"5 键全进一个单元"是自动化速度
+    //   假设不是产品不变量，红在了 runner 慢上。判据要钉的是键盘→命令
+    //   映射 + 撤销栈真接上（Ctrl+Z/Ctrl+Y 仍是**真实按键**，映射那段照验），
+    //   不是"打字快到能挤进合并窗口"。insertText 同样走真实 CDP 输入管线，
+    //   不是 JS 合成事件。
+    await page.keyboard.insertText('ABCDE');
     await new Promise((r) => setTimeout(r, 600));
 
     const text = () => page.textContent('#editor-host');
