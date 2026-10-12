@@ -146,14 +146,30 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   copyBtn.id = 'diagCopy';
   copyBtn.textContent = COPY.diag.copy;
 
-  // 🔴🔴 v3.1.3：导出 .txt 文件 —— 真机剪贴板复制不全（400 条日志被截断），
-  //   用户要求"存成文本文件/传电脑"。两条链：
-  //   ① navigator.share（Android 系统分享面板 → 微信/文件管理器/蓝牙，File 对象）
-  //   ② 降级 Blob + a[download]（WebView 下载管理器落下载目录）
+  // 🔴🔴 v3.1.3/v3.1.4：导出 .txt 文件 —— 真机剪贴板复制不全（400 条日志被截断），
+  //   用户要求"存成文本文件/传电脑"。四级链（🔴 每级结束都要有反馈——v3.1.3 的
+  //   「点了没反应」正是全链静默的结果）：
+  //   ① App 壳原生桥 DiagExport.saveText → 落 Download/NoteSync（🔴 壳内
+  //      a[download] 是哑弹、WebView 无 navigator.share——MainActivity:167 注释
+  //      与 v8.0.8 导出图片链路双实锤，v3.1.3 的下载降级在 App 里正撞哑弹）；
+  //   ② 网页 navigator.share（Android Chrome 系统分享面板，File 对象）；
+  //   ③ 桌面 Blob + a[download]；
+  //   ④ 全部不可用 ⇒ 兜底复制全文并明确提示。
   const exportBtn = document.createElement('button');
   exportBtn.type = 'button';
   exportBtn.id = 'diagExport';
   exportBtn.textContent = COPY.diag.exportFile;
+
+  const noteExport = (msg: string, kind: string): void => {
+    const el = document.getElementById('uploadNote');
+    if (!el) return;
+    el.textContent = msg;
+    el.dataset.kind = kind;
+    window.setTimeout(() => {
+      // 🔴 与 onCopy 的提示同款守卫：只有"现在显示的仍是本条"才收
+      if (el.textContent === msg) el.remove();
+    }, COPY.diag.copiedMs);
+  };
 
   const onExport = async (): Promise<void> => {
     const txt = pre.textContent || '';
@@ -162,27 +178,54 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
     const name =
       `notesync-diag-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
       `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.txt`;
+    // ① App 壳原生桥（🔴 每次现读 Capacitor.Plugins.DiagExport——native-img-save 同款纪律）
+    const cap = (window as unknown as { Capacitor?: { Plugins?: { DiagExport?: { saveText?: (o: { name: string; content: string }) => Promise<{ ok?: boolean; path?: string; error?: string }> } } } }).Capacitor;
+    const plug = cap?.Plugins?.DiagExport;
+    if (plug && typeof plug.saveText === 'function') {
+      try {
+        const r = await plug.saveText({ name, content: txt });
+        if (r && r.ok) {
+          noteExport(COPY.diag.exported, 'ok');
+          return;
+        }
+      } catch {
+        /* 原生桥失败 → 落到下一级 */
+      }
+    }
+    // ② 网页系统分享面板（Android Chrome）
     const nav = navigator as Navigator & {
       canShare?: (data: { files: File[] }) => boolean;
       share?: (data: { files: File[]; title?: string }) => Promise<void>;
     };
-    const file = new File([txt], name, { type: 'text/plain' });
-    if (typeof nav.share === 'function' && typeof nav.canShare === 'function' && nav.canShare({ files: [file] })) {
+    if (typeof nav.share === 'function' && typeof nav.canShare === 'function') {
       try {
-        await nav.share({ files: [file], title: name });
-        return;
+        const file = new File([txt], name, { type: 'text/plain' });
+        if (nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: name });
+          return; // 用户在分享面板点取消（AbortError）也到此为止，不打扰
+        }
       } catch {
-        return; // 用户在分享面板点了取消，不算失败
+        /* 分享失败/取消 → 降级下载 */
       }
     }
-    const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.append(a);
-    a.click();
-    a.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    // ③ 桌面浏览器：Blob + a[download]
+    try {
+      const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      noteExport(`${COPY.diag.exported}`, 'ok');
+      return;
+    } catch {
+      /* 下载也不可用 → 兜底复制 */
+    }
+    // ④ 全部不可用：兜底复制全文，明确告知（绝不能静默）
+    onCopy();
+    noteExport(COPY.diag.exportFallbackCopy, 'ok');
   };
   exportBtn.onclick = () => {
     void onExport();

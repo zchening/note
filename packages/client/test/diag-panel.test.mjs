@@ -537,26 +537,46 @@ test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真�
     '滚动目标在模态内（pre.diag-pre 滑日志）必须忽略——只有模态之外的滚动（滚笔记正文）才关');
 });
 
-/* ============ DIAG-14 导出 .txt 文件（v3.1.3：剪贴板复制不全） ============ */
+/* ============ DIAG-14 导出 .txt 文件（v3.1.3 剪贴板复制不全 / v3.1.4 原生桥） ============ */
 
-test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮（真机剪贴板复制不全，用户要求存文件传电脑）', () => {
+test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮与四级导出链＋反馈提示（真机两轮钉死）', () => {
   const c = cleanKeepStr(PANEL_SRC);
   const COPY = cleanKeepStr(readFileSync(new URL('../src/ui/copy.ts', import.meta.url), 'utf8'));
+  const JAVA = readFileSync(
+    new URL('../../../android/app/src/main/java/cn/xuyinji/bj/diag/DiagExportPlugin.kt', import.meta.url), 'utf8');
   // 按钮与文案（🔴 keepStrings 去引号 ⇒ id = diagExport 是裸的）
   assert.match(c, /exportBtn\.id = diagExport/, '必须挂 diagExport 按钮');
   assert.match(COPY, /exportFile:/, 'COPY.diag 必须有 exportFile 文案');
   assert.match(c, /COPY\.diag\.exportFile/, '按钮文案必须来自 COPY.diag.exportFile');
-  // 导出链：Web Share（Android 分享面板 → 微信/文件管理器）优先
-  assert.match(c, /new File\(\[txt\]/, '必须构造 File 对象');
-  assert.match(c, /canShare/, '必须探测 canShare（分享面板可用性）');
-  assert.match(c, /nav\.share\(/, '必须优先走 navigator.share');
-  // 降级：Blob + a[download]（分享不可用时落下载）
-  assert.match(c, /createObjectURL/, '必须有 Blob URL 降级');
+  // 🔴 v3.1.4 一级链：App 壳原生桥（壳内 a[download] 是哑弹、WebView 无 navigator.share
+  //   —— MainActivity:167 注释与 v8.0.8 双实锤，v3.1.3 的下载降级在 App 里正撞哑弹）
+  assert.match(c, /cap\?\.Plugins\?\.DiagExport/, '必须现读 Capacitor.Plugins.DiagExport');
+  assert.match(c, /Capacitor\?:/, 'Capacitor 全局必须按可选处理');
+  assert.match(c, /saveText/, '必须调原生 saveText');
+  assert.match(JAVA, /@CapacitorPlugin\(name = "DiagExport"\)/, '原生插件名必须 DiagExport');
+  assert.match(JAVA, /MediaStore\.Downloads/, '必须落公开 Download 目录（API29+）');
+  assert.match(JAVA, /viaExternalFile/, '必须有 pre-29 降级');
+  // 二级：网页系统分享；三级：Blob 下载；四级：兜底复制
+  assert.match(c, /canShare/, '必须探测 canShare（网页分享面板可用性）');
+  assert.match(c, /nav\.share\(/, '网页必须走 navigator.share');
+  assert.match(c, /createObjectURL/, '桌面必须有 Blob URL 降级');
   assert.match(c, /a\.download = name/, '降级必须用 a[download]');
-  // 文件名带日期时间（多份日志不互相覆盖）
+  assert.match(c, /onCopy\(\)/, '全部不可用必须兜底复制全文（绝不能静默）');
+  // 🔴 v3.1.4 反馈提示：每一级结束都要有 uploadNote 提示（v3.1.3「点了没反应」
+  //   正是全链静默的结果）
+  assert.match(c, /noteExport\(/, '导出必须给出提示条反馈');
+  assert.match(COPY, /exported:/, 'COPY.diag 必须有 exported 成功文案');
+  assert.match(COPY, /exportFallbackCopy:/, 'COPY.diag 必须有 exportFallbackCopy 兜底文案');
+  // 文件名带日期时间（多份日志不互相覆盖）+ 按钮挂进弹窗
   assert.match(c, /notesync-diag-/, '文件名必须带 notesync-diag- 前缀');
-  // 按钮必须挂进弹窗
   assert.match(c, /box\.append\([^)]*exportBtn/, '导出按钮必须加入弹窗');
+});
+
+test('DIAG-14b 🔴 诊断弹窗相邻按钮必须有间距（v3.1.3 报障：导出与复制按钮视觉重合）', () => {
+  const c = cleanKeepStr(CSS_SRC);
+  assert.match(c, /\.diag-box button \+ button/,
+    '.diag-box 相邻按钮必须有 margin 规则（通栏按钮零 margin 相邻 = 视觉叠在一起）');
+  assert.match(c, /margin-top:\s*10px/, '间距 10px');
 });
 
 /* ============ DIAG-09 埋点与彩蛋门牌 ============ */

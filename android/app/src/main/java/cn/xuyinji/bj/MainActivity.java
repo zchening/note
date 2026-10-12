@@ -167,6 +167,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ImgSavePlugin.class); // v9.2.0：正文图片保存到相册原生桥（零新权限，壳内 a[download] 是哑弹）
         registerPlugin(LinkOpenPlugin.class); // v8.1.0：链接打开方式（外跳默认浏览器/应用内子 WebView）
         registerPlugin(UpdatePlugin.class); // v9.3.0：应用内升级原生桥（DownloadManager 下 APK + FileProvider 拉安装）
+        registerPlugin(cn.xuyinji.bj.diag.DiagExportPlugin.class); // v3.1.4：诊断日志导出 .txt 原生桥（落 Download/NoteSync，同 a[download] 哑弹实锤）
         super.onCreate(savedInstanceState);
 
         // v5.53：返回键接 WebView 历史——Capacitor 不接管返回键，默认 finish 直接回桌面。
