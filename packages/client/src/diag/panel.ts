@@ -146,28 +146,41 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   copyBtn.id = 'diagCopy';
   copyBtn.textContent = COPY.diag.copy;
 
-  // 🔴🔴 v3.1.3/v3.1.4：导出 .txt 文件 —— 真机剪贴板复制不全（400 条日志被截断），
-  //   用户要求"存成文本文件/传电脑"。四级链（🔴 每级结束都要有反馈——v3.1.3 的
-  //   「点了没反应」正是全链静默的结果）：
-  //   ① App 壳原生桥 DiagExport.saveText → 落 Download/NoteSync（🔴 壳内
-  //      a[download] 是哑弹、WebView 无 navigator.share——MainActivity:167 注释
-  //      与 v8.0.8 导出图片链路双实锤，v3.1.3 的下载降级在 App 里正撞哑弹）；
-  //   ② 网页 navigator.share（Android Chrome 系统分享面板，File 对象）；
-  //   ③ 桌面 Blob + a[download]；
-  //   ④ 全部不可用 ⇒ 兜底复制全文并明确提示。
+  // 🔴🔴 v3.1.3/v3.1.4/v3.1.5：导出/分享 .txt 文件 —— 真机剪贴板复制不全（400 条
+  //   日志被截断），用户要求"存成文本文件/传电脑/发微信"。五级链（🔴 每级结束都要
+  //   有反馈——v3.1.3 的「点了没反应」正是全链静默的结果）：
+  //   ① App 壳原生分享 DiagExport.shareText：写文件 + 拉系统分享面板（微信/QQ/
+  //      文件管理器/USB 一条路——用户原话「点击后直接把诊断信息.txt分享到微信」）；
+  //   ② App 壳原生落盘 DiagExport.saveText → Download/NoteSync（分享面板不可用
+  //      时的退路；壳内 a[download] 是哑弹、WebView 无 navigator.share——
+  //      MainActivity:167 注释与 v8.0.8 导出图片链路双实锤）；
+  //   ③ 网页 navigator.share（Android Chrome 系统分享面板，File 对象）；
+  //   ④ 桌面 Blob + a[download]；
+  //   ⑤ 全部不可用 ⇒ 兜底复制全文，复制成败都有明确提示（绝不静默）。
   const exportBtn = document.createElement('button');
   exportBtn.type = 'button';
   exportBtn.id = 'diagExport';
   exportBtn.textContent = COPY.diag.exportFile;
 
-  const noteExport = (msg: string, kind: string): void => {
-    const el = document.getElementById('uploadNote');
-    if (!el) return;
-    el.textContent = msg;
-    el.dataset.kind = kind;
+  // 🔴🔴🔴 v3.1.5：反馈条收进**弹窗自己的 DOM**。v3.1.3/v3.1.4 把反馈写进
+  //   #uploadNote（编辑器上传状态条），而诊断面板在**非编辑器态**照样能开
+  //   （?diag 直开、关于页连点标题——用户真机日志 inEditor=no 实锤）——那时
+  //   #uploadNote 不存在，`if (!el) return` 把每一级反馈都咽掉，用户看到的
+  //   就是「点击按钮没反应」。反馈面必须与触发面同生共死。
+  const diagNote = document.createElement('div');
+  diagNote.className = 'diag-note';
+  diagNote.id = 'diagNote';
+  diagNote.setAttribute('role', 'status');
+  diagNote.setAttribute('aria-live', 'polite');
+  diagNote.hidden = true;
+
+  const flash = (msg: string, kind: string): void => {
+    diagNote.textContent = msg;
+    diagNote.dataset.kind = kind;
+    diagNote.hidden = false;
     window.setTimeout(() => {
-      // 🔴 与 onCopy 的提示同款守卫：只有"现在显示的仍是本条"才收
-      if (el.textContent === msg) el.remove();
+      // 🔴 与老项目 :8232 同款守卫：只有"现在显示的仍是本条"才收
+      if (diagNote.textContent === msg) diagNote.hidden = true;
     }, COPY.diag.copiedMs);
   };
 
@@ -178,21 +191,34 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
     const name =
       `notesync-diag-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
       `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.txt`;
-    // ① App 壳原生桥（🔴 每次现读 Capacitor.Plugins.DiagExport——native-img-save 同款纪律）
-    const cap = (window as unknown as { Capacitor?: { Plugins?: { DiagExport?: { saveText?: (o: { name: string; content: string }) => Promise<{ ok?: boolean; path?: string; error?: string }> } } } }).Capacitor;
+    // ① App 壳原生分享（🔴 每次现读 Capacitor.Plugins.DiagExport——native-img-save 同款纪律）
+    const cap = (window as unknown as { Capacitor?: { Plugins?: { DiagExport?: { shareText?: (o: { name: string; content: string }) => Promise<{ ok?: boolean; path?: string; error?: string }>; saveText?: (o: { name: string; content: string }) => Promise<{ ok?: boolean; path?: string; error?: string }> } } } }).Capacitor;
     const plug = cap?.Plugins?.DiagExport;
+    if (plug && typeof plug.shareText === 'function') {
+      try {
+        const r = await plug.shareText({ name, content: txt });
+        if (r && r.ok) {
+          // 用户随后在分享面板点取消也到此为止（native 侧无法区分，不打扰）
+          flash(COPY.diag.exportedShare, 'ok');
+          return;
+        }
+      } catch {
+        /* 原生分享失败 → 落到下一级（仅落盘） */
+      }
+    }
+    // ② App 壳原生落盘（分享面板不可用/无分享应用时的退路）
     if (plug && typeof plug.saveText === 'function') {
       try {
         const r = await plug.saveText({ name, content: txt });
         if (r && r.ok) {
-          noteExport(COPY.diag.exported, 'ok');
+          flash(COPY.diag.exported, 'ok');
           return;
         }
       } catch {
         /* 原生桥失败 → 落到下一级 */
       }
     }
-    // ② 网页系统分享面板（Android Chrome）
+    // ③ 网页系统分享面板（Android Chrome）
     const nav = navigator as Navigator & {
       canShare?: (data: { files: File[] }) => boolean;
       share?: (data: { files: File[]; title?: string }) => Promise<void>;
@@ -208,7 +234,7 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
         /* 分享失败/取消 → 降级下载 */
       }
     }
-    // ③ 桌面浏览器：Blob + a[download]
+    // ④ 桌面浏览器：Blob + a[download]
     try {
       const url = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
       const a = document.createElement('a');
@@ -218,20 +244,20 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 5000);
-      noteExport(`${COPY.diag.exported}`, 'ok');
+      flash(COPY.diag.exportedDownloaded, 'ok');
       return;
     } catch {
       /* 下载也不可用 → 兜底复制 */
     }
-    // ④ 全部不可用：兜底复制全文，明确告知（绝不能静默）
-    onCopy();
-    noteExport(COPY.diag.exportFallbackCopy, 'ok');
+    // ⑤ 全部不可用：兜底复制全文（onCopy 自带成功/失败反馈，绝不静默；
+    //   成功文案用「导出不可用，已复制全文」——说清为什么得到的是复制而不是文件）
+    onCopy(COPY.diag.exportFallbackCopy);
   };
   exportBtn.onclick = () => {
     void onExport();
   };
 
-  box.append(head, pre, exportBtn, copyBtn);
+  box.append(head, pre, exportBtn, copyBtn, diagNote);
   mask.append(box);
   host.append(mask);
 
@@ -265,6 +291,9 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
    *   ③ `document.execCommand('copy')` 已废弃但**必须留**：非安全上下文
    *      （http 局域网直连、老 WebView）上clipboard API 根本不存在，
    *      删掉它等于这些环境下复制功能彻底消失、且零报错。
+   * 🔴 v3.1.5：失败**不再静默**。老注释写"按钮无反应本身就是反馈"——那是把
+   *   产品缺陷当设计；真机 v3.1.3 报障「点击按钮没反应」的最后一环就是这里：
+   *   execCommand 返 false 且无提示 ⇒ 用户无从判断是没点上还是没成功。
    */
   const fallbackCopyText = (txt: string, done: () => void): void => {
     const ta = document.createElement('textarea');
@@ -272,25 +301,25 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
     ta.style.cssText = 'position:fixed;left:-9999px';
     document.body.append(ta);
     ta.select();
+    let ok = false;
     try {
-      if (document.execCommand('copy')) done();
+      ok = document.execCommand('copy');
     } catch {
-      /* 复制失败不提示：用户已经点了，按钮无反应本身就是反馈 */
+      ok = false;
     }
     ta.remove();
+    if (ok) done();
+    else flash(COPY.diag.copyFailed, 'err');
   };
 
-  const onCopy = (): void => {
+  /**
+   * 复制。`successMsg` 供导出链的兜底级传更贴切的文案（「导出不可用，已复制
+   * 全文」比泛泛的「已复制诊断信息」多说清了一层为什么）；不传走默认。
+   */
+  const onCopy = (successMsg?: string): void => {
     const txt = pre.textContent || '';
     const done = (): void => {
-      const el = document.getElementById('uploadNote');
-      if (!el) return;
-      el.textContent = COPY.diag.copied;
-      el.dataset.kind = 'ok';
-      window.setTimeout(() => {
-        // 🔴 守卫：只有"现在显示的仍是本条提示"才收（老项目 :8232 原文）
-        if (el.textContent === COPY.diag.copied) el.remove();
-      }, COPY.diag.copiedMs);
+      flash(successMsg ?? COPY.diag.copied, 'ok');
     };
     const nav = navigator as Navigator & {
       clipboard?: { writeText: (t: string) => Promise<void> };
@@ -303,7 +332,9 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   };
 
   x.onclick = close;
-  copyBtn.onclick = onCopy;
+  copyBtn.onclick = () => {
+    onCopy();
+  };
   mask.onclick = (e) => {
     // 🔴 点遮罩空白处才关（老项目 :8244 `if (e.target === diagMask)`）。
     //   无条件 close 会让"点按钮时事件冒泡到遮罩"把刚打开的面板秒关。

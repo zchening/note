@@ -4,4 +4,9 @@
     <cache-path name="my_cache_images" path="." />
     <!-- v9.3.0：应用内升级 APK 落在 getExternalFilesDir(null)/update，FileProvider 只开这一个子目录 -->
     <external-files-path name="update" path="update/" />
+    <!-- v3.1.5：诊断日志分享（shareText）——pre-29 落 getExternalFilesDir(Documents)/NoteSync，
+         FileProvider 不显式开这个子目录，getUriForFile 直接抛
+         IllegalArgumentException ⇒ 分享面板起不来（而 ok:false 会走到 JS 的降级链，
+         症状只是"分享变成下载"，所以这条路径漏了也不会炸，只会静默降级）。 -->
+    <external-files-path name="diag" path="Documents/NoteSync/" />
 </paths>

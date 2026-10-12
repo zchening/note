@@ -22,6 +22,22 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const WWW = resolve(HERE, '..', '..', '..', '..', 'www');
 const h = installHarness(test, { dir: WWW });
 
+const textLen = (page) =>
+  page.evaluate(() => {
+    const d = window.__NOTESYNC_DOC__();
+    let n = 0;
+    const walk = (bs) => {
+      for (const b of bs ?? []) {
+        if (Array.isArray(b.spans)) for (const s of b.spans) n += s.t.length;
+        if (Array.isArray(b.title)) for (const s of b.title) n += s.t.length;
+        if (typeof b.text === 'string') n += b.text.length;
+        if (b.children) walk(b.children);
+      }
+    };
+    walk(d.blocks);
+    return n;
+  });
+
 test('COMPOSE-E2E-01 🔴 合成中单帧塌方必须被守卫救回真源', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'cmp01', 'pw');
   try {
@@ -259,6 +275,142 @@ test('COMPOSE-E2E-03 🔴🔴 塌方后组字恢复 ⇒ 树同步取消（绝不
     assert.ok(!flight2.includes('wd:cancel'), 'v3.0.17 起组字帧不再走 cancel（旧标记不得出现）');
     const tree2 = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen());
     assert.equal(tree2, 150, `树必须追上组字串 150（不得被重建的 144 覆盖），实得 ${tree2}`);
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
+  } finally {
+    await page.close();
+  }
+});
+
+test('COMPOSE-E2E-05 🔴🔴 真机 v3.1.4 两跳塌方：第二跳帧间仅掉 12 字也必须拦，解冻锚不得被蚀低', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'cmp05', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 组字会话涨到峰值 129（真机 v3.1.4 日志：upd len=129）
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 120; n += 10) t.growTo(n);
+      t.growTo(129);
+    });
+    await page.waitForFunction(
+      () => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)),
+      null,
+      { timeout: 5000 },
+    );
+
+    // 第一跳 129→21（真机：gate:collapse extreme collapse 129->21）
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapseNoStart('x'.repeat(21)));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('gate:collapse'),
+      null,
+      { timeout: 5000 },
+    );
+    let flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:defer peak=129'), '第一跳后必须按会话峰值 129 调度延迟同步');
+    assert.equal(await textLen(page), 129, '第一跳后真源必须保持峰值 129（塌方帧不回灌）');
+
+    // 第二跳 21→9，组字串 131（真机：upd len=9 d=-120）。守卫帧间只看 21→9：
+    //   drop=12 < absDrop=30 且 prevLen=21 < minPrev=40 ⇒ 旧实现两个早退全放行
+    //   （v3.1.3 的 mismatch 分支被闷死）⇒ 残串落账、组字帧全程空转。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapseMismatch(9, 131));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('composing-mismatch'),
+      null,
+      { timeout: 5000 },
+    );
+    flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(/composing-mismatch 21->9 d=131/.test(flight), '🔴 第二跳必须走 composing-mismatch 拦截');
+    assert.equal(await textLen(page), 129, '第二跳后真源仍必须保持峰值 129');
+
+    // 解冻锚防蚀：残串涨到 30（>21 但 <129）⇒ 不得解冻覆盖峰值模型。
+    //   变异①（ mismatch 分支挪回幅度阈值之后）：第二跳不拦 ⇒ 无 composing-mismatch（红）；
+    //   变异②（scheduleDeferredTreeSync 裸传 peakLen 不做 max）：第二跳把解冻锚蚀到 21
+    //     ⇒ 30>21 解冻 ⇒ 真源被 30 字残串覆盖（红）。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(30));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 30,
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(300);
+    assert.equal(
+      await textLen(page),
+      129,
+      '残串 30 涨过被蚀的锚 21 也不得解冻——真源必须仍是会话峰值 129',
+    );
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      30,
+      '树保持组字帧写入的 30（冻结只冻模型，不冻树）',
+    );
+
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
+  } finally {
+    await page.close();
+  }
+});
+
+test('COMPOSE-E2E-06 🔴🔴 渐进放血后再大幅塌方：解冻锚必须取会话峰值，不得用被放血的模型长', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'cmp06', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 会话峰值 129
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 120; n += 10) t.growTo(n);
+      t.growTo(129);
+    });
+    await page.waitForFunction(
+      () => window.__NOTESYNC_DOC__() && JSON.stringify(window.__NOTESYNC_DOC__()).includes('x'.repeat(20)),
+      null,
+      { timeout: 5000 },
+    );
+    // 渐进放血一跳：129→50。组字串同步变短（50≈树 50）⇒ 不是宿主替换错位，
+    //   掉幅 79 虽过 absDrop 但 50 > 129*0.5 ⇒ rel-ok 放行 ⇒ 模型被残串覆盖
+    //   （无冻结保护——这就是"水位线之外"的形状）。水位线会话峰值仍是 129。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(50));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 50,
+      null,
+      { timeout: 5000 },
+    );
+    assert.equal(await textLen(page), 50, '放血跳不拦：模型跟着树到 50');
+
+    // 大幅塌方：组字串 131 远长于树 9 ⇒ composing-mismatch 必拦。
+    //   🔴 关键：此刻模型长 50（被放血的），调用点若裸传模型长 ⇒ 解冻锚=50；
+    //     锚必须取会话峰值 129（v3.0.18 口径：树长涨过会话峰值才算恢复）。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.collapseMismatch(9, 131));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n').includes('composing-mismatch 50->9'),
+      null,
+      { timeout: 5000 },
+    );
+    let flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:defer peak=129 cur=9'),
+      '🔴 解冻锚必须是会话峰值 129（不是被放血的模型长 50）');
+    assert.equal(await textLen(page), 50, '塌方帧真源回退到塌方前模型（50，未冻结保护下的正确落账）');
+
+    // 残串涨到 60：>50（被蚀的锚）但 <129（会话峰值）⇒ 不得解冻。
+    //   变异（调用点裸传模型长 ⇒ 锚=50）：60>50 解冻 ⇒ 模型被 60 字残串覆盖（红）。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(60));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 60,
+      null,
+      { timeout: 5000 },
+    );
+    await page.waitForTimeout(300);
+    assert.equal(
+      await textLen(page),
+      50,
+      '残串 60 涨过被蚀的锚 50 也不得解冻——模型必须保持落账值（锚是会话峰值 129）',
+    );
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      60,
+      '树保持组字帧写入的 60（冻结只冻模型，不冻树）',
+    );
+
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.end());
   } finally {
     await page.close();

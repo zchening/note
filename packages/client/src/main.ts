@@ -178,6 +178,9 @@ declare global {
       collapse: (short: string) => void;
       /** v3.0.11 回归钩子：模拟豆包智能整理「只 insertCompositionText、不发 compositionstart」。 */
       collapseNoStart: (short: string) => void;
+      /** v3.1.5 回归钩子：真机 v3.1.4 第二跳形状——组字串 compLen 字远长于塌到的
+       *  shortLen 字（帧间掉幅小 + prevLen<minPrev，旧实现在早退里放行）。 */
+      collapseMismatch: (shortLen: number, compLen: number) => void;
       end: () => void;
       flightLines: () => string[];
       guardActive: () => boolean;
@@ -1859,7 +1862,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     wdFreeze = true;
     stallCount = 0;
     stallPrevTreeLen = -1;
-    deferPeakLen = peakLen;
+    // 🔴🔴🔴 v3.1.5：解冻锚（deferPeakLen）在延迟同步**已激活**时只涨不跌。
+    //   塌方路径传的是「会话峰值」（见下方调用点的 sessionPeak），而渐进放血
+    //   形状下模型长可能远低于会话峰值——任何把锚写低的调用都会让残串提前
+    //   解冻覆盖峰值模型（v3.0.18 WD-E2E-05 同款事故的另一入口）。无激活
+    //   定时器时（全新塌方）才以本次峰值为锚。
+    deferPeakLen = deferredTreeSyncTimer != null ? Math.max(deferPeakLen, peakLen) : peakLen;
     recordFlight('wd:defer', info);
     armDeferredSync();
   };
@@ -2642,18 +2650,28 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
       latestDoc = before;
       latestDocRef = before;
-      // 🔴🔴🔴 v3.0.16：与 wd restore（v3.0.15）同款——**绝不能在这里立即
-      //   docToLexical 重建**。v3.0.15 真机日志钉死：撤稿/塌方判定后浏览器侧
-      //   组字常常还活着（synthed=0、comp=1 每帧都来），立即重建杀死组字锚点
-      //   ⇒ 后续组字帧全部模型空转（upd len=5 d=0 冻结、组字串 d=260→279
-      //   增长 6.4s+，用户继续口述一字进不了文档）。v3.0.15 只修了 wd 路径
-      //   （真机 gate=24 = collapse 17 + wd 7）——**collapse 路径的 17 次立即
-      //   重建仍在杀锚点**（豆包重识别修订的大幅掉幅帧 comp=1 走 collapse、
-      //   此时组字活着）。改为同款延迟同步：600ms 内 comp=1 组字帧 ⇒ 取消
-      //   （锚点未破坏，输入法全量串替换让文档追上组字串）；超时 ⇒ 组字真死，
-      //   重建 before 安全（塌方前内容上屏兜底）。
-      scheduleDeferredTreeSync('peak=' + prevLen + ' cur=' + newLen, prevLen);
-      return;
+    // 🔴🔴🔴 v3.0.16：与 wd restore（v3.0.15）同款——**绝不能在这里立即
+    //   docToLexical 重建**。v3.0.15 真机日志钉死：撤稿/塌方判定后浏览器侧
+    //   组字常常还活着（synthed=0、comp=1 每帧都来），立即重建杀死组字锚点
+    //   ⇒ 后续组字帧全部模型空转（upd len=5 d=0 冻结、组字串 d=260→279
+    //   增长 6.4s+，用户继续口述一字进不了文档）。v3.0.15 只修了 wd 路径
+    //   （真机 gate=24 = collapse 17 + wd 7）——**collapse 路径的 17 次立即
+    //   重建仍在杀锚点**（豆包重识别修订的大幅掉幅帧 comp=1 走 collapse、
+    //   此时组字活着）。改为同款延迟同步：600ms 内 comp=1 组字帧 ⇒ 取消
+    //   （锚点未破坏，输入法全量串替换让文档追上组字串）；超时 ⇒ 组字真死，
+    //   重建 before 安全（塌方前内容上屏兜底）。
+    // 🔴🔴 v3.1.5：锚取**会话峰值** max(prevLen, 水位线会话峰值)，不再裸传
+    //   帧间 prevLen——注意调用点的 prevLen 是**模型相对**长度（docTextLen(before)）：
+    //   有冻结保护时它=峰值（没问题），但**渐进放血**形状（多跳小步缩水都没过
+    //   阈值、组字串同步变短不拦 ⇒ 模型被残串逐帧覆盖、无冻结）下它已远低于
+    //   会话峰值 ⇒ 裸传会把解冻锚蚀到放血后的模型长，残串一涨过它就解冻，
+    //   峰值与放血前内容一起丢。水位线会话峰值（withdrawGuard.peak）才是
+    //   v3.0.18 定的锚：「树长涨过会话峰值才算组字恢复写入成功」。
+    //   （scheduleDeferredTreeSync 里的 max 是第二道闸：延迟同步已激活时
+    //   只涨不跌，防将来别的调用方传低值。）
+    const sessionPeak = Math.max(prevLen, withdrawGuard.peak);
+    scheduleDeferredTreeSync('peak=' + sessionPeak + ' cur=' + newLen, sessionPeak);
+    return;
     }
     // 🔴🔴 v3.0.12：组字中本帧"部分欠插"（未达到塌方阈值）也量化，确认合成
     //   compositionstart 后是否仍有丢字（真机靠飞行记录器回传验证治本成效）。
@@ -2874,6 +2892,28 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         root.clear();
         const p = $createParagraphNode();
         p.append($createTextNode(short));
+        root.append(p);
+      });
+    },
+    // 🔴🔴 v3.1.5 回归钩子：模拟真机 v3.1.4 日志钉死的**第二跳漏拦形状**——
+    //   组字串远长于树（宿主替换区域错位/锚点死亡：串还在、树丢了），而帧间
+    //   掉幅很小（真机 21→9，drop=12<absDrop 且 prevLen=21<minPrev，两个早退
+    //   把 v3.1.3 的 mismatch 分支闷死）。beforeinput 带长组字串（compLen 字），
+    //   真源同时塌到 shortLen 字。与 collapseNoStart 的差别就在 compLen≠shortLen。
+    collapseMismatch: (shortLen: number, compLen: number): void => {
+      editorHost.dispatchEvent(
+        new InputEvent('beforeinput', {
+          inputType: 'insertCompositionText',
+          data: 'x'.repeat(compLen),
+          isComposing: true,
+          bubbles: true,
+        } as InputEventInit),
+      );
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode('x'.repeat(shortLen)));
         root.append(p);
       });
     },

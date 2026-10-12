@@ -496,10 +496,14 @@ test('DIAG-08 复制必须有 execCommand 降级（非安全上下文 clipboard 
 
 test('DIAG-08b 复制成功后的自动收起必须带"文案仍是它才清"的守卫', () => {
   const c = cleanKeepStr(PANEL_SRC);
-  const m = /window\.setTimeout\(\(\) => \{([\s\S]*?)\n {6}\}, COPY\.diag\.copiedMs\)/.exec(c);
-  assert.ok(m, '应能找到 2200ms 收起那段');
-  assert.match(m[1], /if \(el\.textContent === COPY\.diag\.copied\) el\.remove\(\)/,
-    '少了守卫会把随后出现的其它提示误清掉（老项目 :8232 的原文）');
+  // v3.1.5 起守卫随反馈条收进 flash（弹窗自建 #diagNote，不再写 #uploadNote）。
+  // 语义不变：2200ms 后只有"现在显示的仍是本条"才收（老项目 :8232 原文）。
+  const m = /const flash = \(msg: string, kind: string\): void => \{[\s\S]*?\n {2}\};/.exec(c);
+  assert.ok(m, '应能找到 flash 反馈函数（v3.1.5 起反馈住在弹窗内）');
+  assert.match(m[0], /window\.setTimeout\(\(\) => \{/, 'flash 必须带 2200ms 自动收起');
+  assert.match(m[0], /COPY\.diag\.copiedMs/, '收起时长必须走 COPY.diag.copiedMs');
+  assert.match(m[0], /if \(diagNote\.textContent === msg\) diagNote\.hidden = true/,
+    '少了守卫会把随后出现的其它提示误清掉（老项目 :8232 的原文，v3.1.5 平移到 flash）');
 });
 
 test('DIAG-08c 预里只用 textContent，绝不用 innerHTML（读数含用户正文）', () => {
@@ -537,9 +541,9 @@ test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真�
     '滚动目标在模态内（pre.diag-pre 滑日志）必须忽略——只有模态之外的滚动（滚笔记正文）才关');
 });
 
-/* ============ DIAG-14 导出 .txt 文件（v3.1.3 剪贴板复制不全 / v3.1.4 原生桥） ============ */
+/* ============ DIAG-14 导出/分享 .txt 文件（v3.1.3 剪贴板不全 / v3.1.4 原生桥 / v3.1.5 分享面板） ============ */
 
-test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮与四级导出链＋反馈提示（真机两轮钉死）', () => {
+test('DIAG-14 🔴🔴 必须有「分享诊断信息.txt」按钮与五级导出链＋弹窗内反馈（真机三轮钉死）', () => {
   const c = cleanKeepStr(PANEL_SRC);
   const COPY = cleanKeepStr(readFileSync(new URL('../src/ui/copy.ts', import.meta.url), 'utf8'));
   const JAVA = readFileSync(
@@ -548,12 +552,21 @@ test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮与四级导出链
   assert.match(c, /exportBtn\.id = diagExport/, '必须挂 diagExport 按钮');
   assert.match(COPY, /exportFile:/, 'COPY.diag 必须有 exportFile 文案');
   assert.match(c, /COPY\.diag\.exportFile/, '按钮文案必须来自 COPY.diag.exportFile');
-  // 🔴 v3.1.4 一级链：App 壳原生桥（壳内 a[download] 是哑弹、WebView 无 navigator.share
-  //   —— MainActivity:167 注释与 v8.0.8 双实锤，v3.1.3 的下载降级在 App 里正撞哑弹）
+  // 🔴 v3.1.5 一级链：App 壳原生**分享**（写文件 + 系统分享面板 ⇒ 微信/文件一条路）。
+  //   必须在 saveText 之前——用户要的是"点了直接能发微信"，落盘只是退路。
   assert.match(c, /cap\?\.Plugins\?\.DiagExport/, '必须现读 Capacitor.Plugins.DiagExport');
   assert.match(c, /Capacitor\?:/, 'Capacitor 全局必须按可选处理');
-  assert.match(c, /saveText/, '必须调原生 saveText');
+  assert.match(c, /shareText/, 'JS 必须调原生 shareText（v3.1.5 分享面板链）');
+  assert.match(c, /saveText/, '必须保留原生 saveText 落盘退路');
+  const shareAt = c.indexOf('plug.shareText');
+  const saveAt = c.indexOf('plug.saveText');
+  assert.ok(shareAt >= 0 && saveAt >= 0 && shareAt < saveAt,
+    'shareText 必须排在 saveText 之前（分享优先，落盘是退路）');
   assert.match(JAVA, /@CapacitorPlugin\(name = "DiagExport"\)/, '原生插件名必须 DiagExport');
+  assert.match(JAVA, /fun shareText/, 'Kotlin 必须有 shareText 方法');
+  assert.match(JAVA, /Intent\.ACTION_SEND/, 'shareText 必须走 ACTION_SEND 系统分享');
+  assert.match(JAVA, /FLAG_GRANT_READ_URI_PERMISSION/, '分享必须授读权限（否则接收方打不开 content URI）');
+  assert.match(JAVA, /createChooser/, '必须用系统选择器（用户自己挑微信/QQ/文件）');
   assert.match(JAVA, /MediaStore\.Downloads/, '必须落公开 Download 目录（API29+）');
   assert.match(JAVA, /viaExternalFile/, '必须有 pre-29 降级');
   // 二级：网页系统分享；三级：Blob 下载；四级：兜底复制
@@ -561,15 +574,47 @@ test('DIAG-14 🔴🔴 必须有「导出日志文件」按钮与四级导出链
   assert.match(c, /nav\.share\(/, '网页必须走 navigator.share');
   assert.match(c, /createObjectURL/, '桌面必须有 Blob URL 降级');
   assert.match(c, /a\.download = name/, '降级必须用 a[download]');
-  assert.match(c, /onCopy\(\)/, '全部不可用必须兜底复制全文（绝不能静默）');
-  // 🔴 v3.1.4 反馈提示：每一级结束都要有 uploadNote 提示（v3.1.3「点了没反应」
-  //   正是全链静默的结果）
-  assert.match(c, /noteExport\(/, '导出必须给出提示条反馈');
+  assert.match(c, /onCopy\(\)/, '复制按钮必须直通 onCopy');
+  assert.match(c, /onCopy\(COPY\.diag\.exportFallbackCopy\)/,
+    '导出链兜底级必须带「导出不可用，已复制全文」文案调用 onCopy（说清为什么得到的是复制）');
+  // 🔴 v3.1.4/v3.1.5 反馈提示：每一级结束都要有提示。v3.1.3「点了没反应」
+  //   正是全链静默的结果；v3.1.5 起反馈住在弹窗内（#uploadNote 在非编辑器态
+  //   不存在，v3.1.3/v3.1.4 的反馈全被 if(!el) return 咽掉——真机 inEditor=no 实锤）。
+  assert.match(c, /flash\(/, '导出必须给出弹窗内反馈条（flash）');
+  assert.match(c, /diagNote/, '反馈条必须是弹窗自建元素（不依赖编辑器上传条）');
+  assert.match(c, /box\.append\([^)]*diagNote/, '反馈条必须加入弹窗 DOM');
+  assert.doesNotMatch(c, /getElementById\(.uploadNote.\)/,
+    '诊断反馈不得再依赖 #uploadNote（非编辑器态开面板时它不存在 ⇒ 全链静默）');
   assert.match(COPY, /exported:/, 'COPY.diag 必须有 exported 成功文案');
+  assert.match(COPY, /exportedShare:/, 'COPY.diag 必须有 exportedShare 分享面板文案');
+  assert.match(COPY, /exportedDownloaded:/, 'COPY.diag 必须有 exportedDownloaded 下载文案');
+  assert.match(COPY, /copyFailed:/, 'COPY.diag 必须有 copyFailed 兜底失败文案');
   assert.match(COPY, /exportFallbackCopy:/, 'COPY.diag 必须有 exportFallbackCopy 兜底文案');
   // 文件名带日期时间（多份日志不互相覆盖）+ 按钮挂进弹窗
   assert.match(c, /notesync-diag-/, '文件名必须带 notesync-diag- 前缀');
   assert.match(c, /box\.append\([^)]*exportBtn/, '导出按钮必须加入弹窗');
+});
+
+test('DIAG-15 🔴🔴 复制链失败不再静默（v3.1.3「点击按钮没反应」的最后一环）', () => {
+  const c = cleanKeepStr(PANEL_SRC);
+  const COPY = cleanKeepStr(readFileSync(new URL('../src/ui/copy.ts', import.meta.url), 'utf8'));
+  // execCommand 返 false / 抛异常时，老实现是裸 catch（注释还写"无反应本身就是反馈"）
+  // ⇒ 必须落到 copyFailed 提示。钉住 fallbackCopyText 的两个出口都有反馈。
+  const fb = /const fallbackCopyText = [\s\S]*?\n {2}\};/.exec(c);
+  assert.ok(fb, '应能找到 fallbackCopyText');
+  assert.match(fb[0], /if \(ok\) done\(\);/, 'execCommand 成功才走 done');
+  assert.match(fb[0], /flash\(COPY\.diag\.copyFailed/, '复制失败必须明确提示（不得静默）');
+  assert.doesNotMatch(fb[0], /catch\s*\{\s*\}/, '不得留裸 catch 吞掉复制失败');
+  // done 的反馈也走 flash（老项目 :8232 的"仍是本条才收"守卫平移进 flash，见 DIAG-08b）
+  const done = /const done = \(\): void => \{[\s\S]*?\n {4}\};/.exec(c);
+  assert.ok(done, '应能找到 onCopy 的 done');
+  assert.match(done[0], /flash\(successMsg \?\? COPY\.diag\.copied/, '复制成功提示走 flash（可由调用方贴更准的文案）');
+  const flashFn = /const flash = \(msg: string, kind: string\): void => \{[\s\S]*?\n {2}\};/.exec(c);
+  assert.ok(flashFn, '应能找到 flash');
+  assert.match(flashFn[0], /diagNote\.textContent === msg/, '自动收起必须带"仍是本条才收"守卫');
+  // 反馈条自带 hidden 属性（不用 display none 与 mask.hidden 混用）
+  assert.match(c, /diagNote\.hidden = true/, '反馈条初始隐藏');
+  assert.match(c, /diagNote\.hidden = false/, '有反馈时必须显示');
 });
 
 test('DIAG-14b 🔴 诊断弹窗相邻按钮必须有间距（v3.1.3 报障：导出与复制按钮视觉重合）', () => {

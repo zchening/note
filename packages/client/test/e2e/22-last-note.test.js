@@ -36,14 +36,14 @@ const JUMPED_KEY = 'notesync_bj_jumped';
 
 const h = installHarness(test, {
   dir: WWW,
-  onReady: ({ browser, registerInit }) => {
-    // 🔴 模拟原生壳：注入 window.Capacitor（判据是 isNativePlatform()，老项目 :10125口径）。
-    //   注意这**只**解决"判据为真"，不解决"密钥能不能取到" —— 后者由 harness 的
-    //   内存 API + 口令页承担，与本条用例无关。
-    registerInit(() => {
-      window.Capacitor = { isNativePlatform: () => true };
-    });
-  },
+  // 🔴🔴 v3.1.5：这里原本有一个 onReady 全局注入 window.Capacitor——**删掉了**。
+  //   它写于 harness 的 registerInit 还是死功能（只 push 没人消费，v3.1.1 才接通）
+  //   的时代，所以从来没生效过、测试一直是"假绿"。v3.1.1 接通后它真的作用于
+  //   **所有页面** ⇒ LAST-E02（native:false 的纯网页端）也被判成原生壳、
+  //   应用直接跳进 /myNote，落地页永不渲染 ⇒ 15s 等 #landing 超时（实锤红）。
+  //   原生判定只需要出现在**要模拟原生的页面**上——openAt 的 native 分支干的就是
+  //   这件事（per-page addInitScript）。全局注入让 `native:false` 参数成为谎言，
+  //   正是 E02 这条承重反向要防的东西。删掉后 E01~E05 全部走 openAt 单通道。
 });
 
 /**

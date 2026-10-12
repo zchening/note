@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.core.content.FileProvider
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -24,6 +25,9 @@ import java.util.Locale
 // navigator.share 也不可用（Web Share API 是 Chrome 特性，WebView 不实现）。
 // 落点：公开的 Download/NoteSync 目录——文件管理器直接可见，微信「文件」/
 // USB 数据线传电脑都从这里拿。
+// v3.1.5：新增 shareText——落盘后直接拉系统分享面板（ACTION_SEND），用户
+// 一键把诊断信息.txt 发微信/QQ/文件管理器（用户原话「点击后直接把诊断信息.txt
+// 分享到微信」）。与 saveText 共用同一条落盘逻辑，零新权限。
 // 零新权限（与 ImgSave 同款设计）：
 //   · API 29+ → MediaStore.Downloads 带 RELATIVE_PATH=Download/NoteSync，分区存储免权限；
 //   · API 23–28 → 写 getExternalFilesDir(Documents)/NoteSync 后发 MediaScanner 广播。
@@ -52,6 +56,59 @@ class DiagExportPlugin : Plugin() {
                 ret.put("ok", true); ret.put("path", saved); ret.put("bytes", bytes.size)
             }
         } catch (e: Exception) {
+            ret.put("ok", false)
+            ret.put("error", e.message ?: e.javaClass.simpleName)
+        }
+        call.resolve(ret)
+    }
+
+    // v3.1.5：写文件 + 拉系统分享面板。分享 URI 两条路：
+    //   API 29+ → MediaStore 的 content://（应用自己 insert 的行，Intent 的
+    //     FLAG_GRANT_READ_URI_PERMISSION 即可授出去）；
+    //   pre-29 → FileProvider 包一层（O+ 直接 file:// 抛 FileUriExposedException，
+    //     v9.3.0 UpdatePlugin 同款实锤；file_paths.xml 的 diag 项为它而开）。
+    // 落盘失败（返回 null）⇒ ok:false，JS 自行降级到下一级，不静默。
+    @PluginMethod
+    fun shareText(call: PluginCall) {
+        val ret = JSObject()
+        try {
+            val content = call.getString("content") ?: ""
+            if (content.isEmpty()) {
+                ret.put("ok", false); ret.put("error", "empty")
+                call.resolve(ret); return
+            }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            val name = call.getString("name") ?: "notesync-diag-$stamp.txt"
+            val bytes = content.toByteArray(Charsets.UTF_8)
+            val shareUri: Uri? = if (Build.VERSION.SDK_INT >= 29) {
+                viaMediaStore(name, bytes)?.let { Uri.parse(it) }
+            } else {
+                viaExternalFile(name, bytes)?.let {
+                    FileProvider.getUriForFile(context, context.packageName + ".fileprovider", File(it))
+                }
+            }
+            if (shareUri == null) {
+                ret.put("ok", false); ret.put("error", "save-failed")
+                call.resolve(ret); return
+            }
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, shareUri)
+                putExtra(Intent.EXTRA_SUBJECT, name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // NEW_TASK 与 v9.3.0 UpdatePlugin 同口径：Plugin 的 context 不保证是
+            // Activity，startActivity 需要它。选择器标题说清在分享什么。
+            val chooser = Intent.createChooser(send, "分享诊断日志").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+            // 用户随后在面板里点取消，native 侧收不到回执——一律按"已拉起"算，
+            // 不打扰（JS 侧文案说的就是"已拉起分享面板"）。
+            ret.put("ok", true); ret.put("shared", true)
+        } catch (e: Exception) {
+            // 无任何应用能接 ACTION_SEND / ROM 拦 startActivity 等 ⇒ ok:false，
+            // JS 降级到 saveText（文件照样落盘）。
             ret.put("ok", false)
             ret.put("error", e.message ?: e.javaClass.simpleName)
         }

@@ -273,3 +273,40 @@ test('COMPOSE-11 🔴 守卫 observe 必须把组字串长度喂进判定（main
   const d2 = g2.observe(49, true);
   assert.equal(d2.restore, false, '未传串长时保持旧行为');
 });
+
+test('COMPOSE-12 🔴🔴 真机 v3.1.4 形状：帧间仅掉 12 字 + prevLen<minPrev，组字串远长于树仍必拦', () => {
+  // 用户真机飞行日志（2026-10-12，ver 3.1.4）钉死的漏拦形状：
+  //   gate:collapse extreme collapse 129->21（第一掉，已拦）
+  //   → wd:defer peak=129 cur=21
+  //   → upd len=9 d=-120（第二掉：守卫帧间只看 21→9，drop=12 < absDrop=30；
+  //     且 prevLen=21 < minPrev=40）⇒ 两个早退把 v3.1.3 的 mismatch 分支闷死
+  //   → 组字串 d=131→132 持续增长而树钉死 9：用户继续口述全部空转，
+  //     屏幕停在 9 字（"说到一半被截断、继续说录不进去"）。
+  // 指纹：组字串没变短而树远低于它 = 宿主替换区域错位/锚点死亡，与用户删字
+  // （删字会连组字串一起变短）本质不同 —— 该指纹必须先于一切幅度阈值判定。
+  const d = decideCollapseRestore({ currentLen: 9, prevLen: 21, multiBlock: false, cfg: CFG, composingDataLen: 131 });
+  assert.equal(d.restore, true, '🔴 组字串 131 远长于树 9 = 写入没落地，必须拦');
+  assert.match(d.reason, /composing-mismatch/);
+  // 状态机链式复现真机两跳：129→21（第一掉）→ 21→9（第二掉，旧实现 drop<abs 放行）
+  const g = new ComposeGuard(CFG);
+  g.observe(129, true, 130);
+  const first = g.observe(21, true, 130);
+  assert.equal(first.restore, true, '第一掉 129→21 必须拦（既有 extreme/mismatch 都命中）');
+  const second = g.observe(9, true, 131);
+  assert.equal(second.restore, true, '🔴 第二掉 21→9 帧间仅 12 字，旧实现在 drop<abs 早退放行');
+  assert.match(second.reason, /composing-mismatch/);
+  // 反例一：组字串与树一起塌到 9（真删字/真修订）⇒ 不得拦
+  const d3 = decideCollapseRestore({ currentLen: 9, prevLen: 21, multiBlock: false, cfg: CFG, composingDataLen: 9 });
+  assert.equal(d3.restore, false, '组字串同步塌 = 真删字，不得拦（防对抗合法修订）');
+  // 反例二：健康组字——树包含组字串（树 ≥ 串）⇒ 不得拦
+  const d4 = decideCollapseRestore({ currentLen: 131, prevLen: 130, multiBlock: false, cfg: CFG, composingDataLen: 131 });
+  assert.equal(d4.restore, false, '树长 ≥ 组字串 = 写入正常落地，不得拦');
+  // 🔴🔴 反例三（v3.1.5 分工闸）：树**纹丝不动**（13→13）而组字串 200 远长于它
+  //   ＝锚点死亡空转形状，归空转检测（4 帧 ⇒ wd:dead+wd:reboot）管，mismatch
+  //   **不得拦**——拦了会让每个空转帧走 collapse restore ⇒ scheduleDeferredTreeSync
+  //   清零 stall 计数 ⇒ reboot 永远数不到 4（WD-E2E-05/06/07 实锤）。
+  const d5 = decideCollapseRestore({ currentLen: 13, prevLen: 13, multiBlock: false, cfg: CFG, composingDataLen: 200 });
+  assert.equal(d5.restore, false, '树不动+串远长 = 空转形状，必须留给空转检测 reboot（不得被 mismatch 拦）');
+  const d6 = decideCollapseRestore({ currentLen: 50, prevLen: 50, multiBlock: false, cfg: CFG, composingDataLen: 200 });
+  assert.equal(d6.restore, false, '长文档冻住同样不拦（prevLen≥minPrev 也走 drop<abs 放行）');
+});

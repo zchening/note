@@ -60,13 +60,27 @@ export interface CollapseDecision {
 /**
  * 纯判定：给定当前帧与上一帧正文本长度，决定是否要把真源回退到塌方前。
  *
+ * 🔴🔴 v3.1.5 判据顺序修正（真机 v3.1.4 日志钉死）：composing-mismatch 指纹
+ *   （组字串远长于文档**且树真在掉**）必须**先于一切幅度阈值**判定。v3.1.3 把它
+ *   放在 drop<abs / rel-ok / minPrev 之后 —— 而真机的第二跳正是 21→9（帧间仅掉
+ *   12 字 < absDrop=30，且 prevLen=21 < minPrev=40），两个早退把分支闷死，
+ *   残串落账、组字帧全程空转。该指纹与帧间掉幅**大小**无关：串还在、树远低于串
+ *   = 写入没落地（宿主替换区域错位），本身就是必拦信号。
+ *   ⚠️ 但"树纹丝不动 + 串远长于树"是锚点死亡空转形状，**故意不拦**（留给
+ *   v3.0.19 的空转检测：4 帧 ⇒ wd:dead + wd:reboot 自愈）——mismatch 拦它会让
+ *   scheduleDeferredTreeSync 每帧清零 stall 计数，reboot 永远数不到 4
+ *   （WD-E2E-05/06/07 实锤）。分工：树在掉 ⇒ 拦+冻结保模型；树冻住 ⇒ reboot。
+ *
  * 🔴 先红后改的反例（删实现=下限，组合攻击才算真判据）：
  *   - 把 `multiBlock` 分支删掉 ⇒ 跨段整理不再被拦（COMPOSE-01 红）；
  *   - 把 `relDrop` 判据删掉 ⇒ 116→100 这种小幅删除也误拦（COMPOSE-02 红）；
  *   - 把极端塌方分支删掉 ⇒ 没捕获到 compositionstart 时整篇被吞无兜底
  *     （COMPOSE-03 红）；
  *   - 把 `minPrev` 判据删掉 ⇒ 短文档正常编辑误伤（COMPOSE-04 红）。
- *   - 把 composing-mismatch 分支删掉 ⇒ 单段宿主替换错位漏拦（COMPOSE-10 红）。
+ *   - 把 composing-mismatch 分支删掉 ⇒ 单段宿主替换错位漏拦（COMPOSE-10 红）；
+ *   - 把 mismatch 分支挪回幅度阈值之后 ⇒ 真机 21→9 形状重新漏拦（COMPOSE-12 红）；
+ *   - 把 mismatch 的 `currentLen < prevLen` 条件删掉 ⇒ 空转帧被 collapse 拦，
+ *     stall 计数每帧被清零 ⇒ reboot 不触发（WD-E2E-05/06/07 红）。
  */
 export function decideCollapseRestore(opts: {
   currentLen: number;
@@ -80,6 +94,19 @@ export function decideCollapseRestore(opts: {
   composingDataLen?: number;
 }): CollapseDecision {
   const { currentLen, prevLen, multiBlock, cfg, composingDataLen } = opts;
+  // 🔴🔴🔴 v3.1.5：指纹优先——但只拦**树在掉**的帧。组字串远长于文档 = 组字
+  //   写入没落地（宿主替换区域错位/锚点死亡），与帧间掉幅大小、文档长短都无关，
+  //   必须先于下面所有幅度阈值判定（真机 v3.1.4：21→9 帧间掉 12 字 +
+  //   prevLen=21<minPrev，两个早退曾把 v3.1.3 的分支闷死；COMPOSE-12 钉这形状）。
+  //   🔴 为什么必须带 `currentLen < prevLen`（树真掉了）而不是只看串远长于树：
+  //   「树纹丝不动 + 串远长于树」是**锚点死亡空转**形状，归空转检测管
+  //   （连续 4 帧 ⇒ wd:dead + wd:reboot 自愈）。mismatch 若也拦这种帧，每个
+  //   空转帧都会走 collapse restore ⇒ scheduleDeferredTreeSync 把 stall 计数
+  //   清零 ⇒ reboot 永远数不到 4（WD-E2E-05/06/07 实锤红过）。两个机制按
+  //   「树在掉 ⇒ 拦+冻结保模型」/「树冻住 ⇒ reboot 救屏幕」分工，互不踩踏。
+  if (composingDataLen != null && currentLen < prevLen && composingDataLen > currentLen + 12) {
+    return { restore: true, reason: `composing-mismatch ${prevLen}->${currentLen} d=${composingDataLen}` };
+  }
   if (prevLen < cfg.minPrev) return { restore: false, reason: 'prev<min' };
   const drop = prevLen - currentLen;
   if (drop < cfg.absDrop) return { restore: false, reason: 'drop<abs' };
@@ -92,14 +119,11 @@ export function decideCollapseRestore(opts: {
   if (currentLen < prevLen * cfg.extremeRel && prevLen > cfg.minPrev * cfg.extremePrevMult) {
     return { restore: true, reason: `extreme collapse ${prevLen}->${currentLen}` };
   }
-  // 🔴🔴 v3.1.3：单段「宿主替换错位」兜底——真机 v3.1.1/v3.1.2 日志钉死
-  //   （用户报「说着说着自动截断、后面录不进去」）：143→49（掉 66%，extreme
-  //   差 6 字没过）与 49→9（prevLen=49 < 80 下限）两次全部 single-block 放行
-  //   ⇒ 残串写进真源并 push 到云端（内容真丢）。两次的指纹一致：组字串恒定
-  //   （143/140）而树骤降——串仍远长于文档＝串在树丢，必拦。
-  if (composingDataLen != null && composingDataLen > currentLen + 12) {
-    return { restore: true, reason: `composing-mismatch ${prevLen}->${currentLen} d=${composingDataLen}` };
-  }
+  // 🔴 v3.1.3 原位的单段「宿主替换错位」兜底已上移到函数顶部（v3.1.5：
+  //   放这里会被 drop<abs / prev<min 早退闷死——真机 21→9 实锤）。
+  //   真机 v3.1.1/v3.1.2 日志：143→49（掉 66%，extreme 差 6 字没过）与
+  //   49→9（prevLen=49 < 80 下限）两次全部 single-block 放行 ⇒ 残串写进真源
+  //   并 push 到云端（内容真丢）。指纹一致：组字串恒定（143/140）而树骤降。
   return { restore: false, reason: 'single-block' };
 }
 

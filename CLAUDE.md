@@ -56,6 +56,7 @@ cd D:/Users/zchen/Documents/WorkBuddyProject/NoteSync
 - 🔴 **新增服务端文件必须同步加进上传清单**（`_bj_deploy_web.py` 里 `("server.js","failmap.js","guards.js","upsign.js","net-ip.js")`），漏了就是 ESM 找不到模块、服务起不来
 - 🔴 **新增静态资源子目录**（如 `.well-known/`、`icons/`）要确认两处都放行：`_bj_deploy_web.py` 用 `os.walk` 递归上传；`build.mjs` 的"跳过点文件"过滤器要放行 `.well-known`（否则文件在仓库里、产物里没有、线上 404 而构建日志正常）
 - 凭据：SSH 走 `~/.ssh/notesync_deploy`（ed25519），脚本里不出现密码
+- 🔴🔴🔴 **CSP 唯一权威 = `packages/server/src/server.js` 的 P1-12（随 HTML 文档下发），Caddy 层严禁再设 CSP**（v3.1.5 事故）：Caddy bj 块的 CSP 是 S7-b 时代值（`style-src 'unsafe-inline'` 无 `'self'`，那会儿 CSS 还内联），v3.1.x 起 CSS 外链成 `app.css` 后**多个 CSP 头按交集生效** ⇒ 过期头把外链样式整页挡死（首页/笔记页全无样式，还顺带挡了 PBKDF2 Blob Worker），而构建与部署日志一切正常。2026-10-12 已从 Caddyfile 删除该行（脚本 `_bj_caddy_fix_csp.py`，老项目 9 域名零回归）。**将来改 CSP 只改 server.js 一处**；判据：线上响应头有且仅有一份 CSP 且含 `style-src 'self'`＋`worker-src 'self' blob:`
 
 ## APK 发版（GitHub 云构建 + 自动 OTA，勿手打）
 
@@ -104,6 +105,8 @@ git push origin main
 - 🔴 **`:not()` 的 specificity 取其参数**（自身不贡献），写补丁选择器必须精确数。
 - 🔴 **`--test-name-pattern` 用子测试名会整轮空跑**：e2e 是 `test('父', t => t.test('子'))` 两层结构，用**子**级名过滤会让 node 当文件级过滤、子测试全跳过，输出 `# tests 1 / # pass 1` 假绿。pattern 必须给**父级**名，并核对子测试 `ok N` 真的列出（不只看 `# pass`）。
 - 🔴 **桌面 e2e 的 Backspace/逐字符删除走 contenteditable 原生路径**，焦点稍偏就 DOM/树分叉（DOM 删了、editorState 没动，判死不触发）——与真机 beforeinput 不同构。删字符类判据用 `Control+a + 重打` 的树替换形状（REM-05/REM-19），细节见 `docs/replication-checklist.md` 判据纪律的 e2e 四坑。
+- 🔴🔴 **撤稿守卫两个机制按形状分工，不许互相踩踏**（v3.1.5 实锤）：composing-mismatch 只拦「**树真在掉**（currentLen<prevLen）＋组字串远长于文档」的帧（拦+冻结保模型）；「树**纹丝不动**＋串远长于树」是锚点死亡空转形状，归空转检测（4 帧 ⇒ wd:dead＋wd:reboot 救屏幕）。mismatch 若也拦空转帧，每个空转帧都会走 collapse restore ⇒ `scheduleDeferredTreeSync` 把 stall 计数清零 ⇒ reboot 永远数不到 4（WD-E2E-05/06/07 红过）。改判定顺序/条件后必须同轮跑 26+28 两个文件。
+- 🔴 **调用点传锚要传会话峰值，不传模型长**：update 监听里的 `prevLen` 是 `docTextLen(before)`（**模型相对**），渐进放血形状下模型已被残串覆盖、远低于水位线会话峰值——塌方路径锚取 `max(prevLen, withdrawGuard.peak)`，`scheduleDeferredTreeSync` 里再来一道 max 闸（延迟同步已激活时只涨不跌）。
 
 ## 深入文档
 

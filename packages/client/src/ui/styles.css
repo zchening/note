@@ -2244,6 +2244,21 @@ html.ns-no-callout .ns-editor img { -webkit-touch-callout: none; }
  *   只钉 .diag-box 内的相邻按钮对，不动全站 .box button 规则。 */
 .diag-box button + button { margin-top: 10px; }
 
+/* 🔴🔴 v3.1.5 弹窗内反馈条：导出/复制的结果提示。v3.1.3/v3.1.4 把反馈写进
+   编辑器上传条 #uploadNote，而诊断面板在非编辑器态也能开（?diag/关于页连点）
+   ——那时 #uploadNote 不存在 ⇒ 全链反馈被 `if (!el) return` 咽掉 ⇒ 用户看到
+   「点击按钮没反应」（真机 inEditor=no 实锤）。反馈面必须住在弹窗里。
+   配色跟随 #uploadNote 的贴底黑胶囊同款变量（--upload-bg/--bg），状态色只走
+   文案不染色（老项目口径：成功/失败全靠文案区分）。 */
+.diag-note {
+  margin: 10px 0 0; padding: 8px 14px;
+  font-size: 12px; line-height: 1.5; text-align: center;
+  color: var(--upload-bg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 999px;
+}
+.diag-note[data-kind="err"] { color: var(--danger); border-color: var(--danger); }
+.diag-note[hidden] { display: none; }
+
 /* ── v9.2.0 刷新开奖卡（老项目 index.html:119-148 逐字移植，id nsDraw→eggDraw）
  *    Bug4 用户报障根因：彩蛋 JS（egg/draw.ts）移植了，这块 CSS 一条没跟过来，
  *    卡片以裸文本渲染在 body 末尾。与 #nsGreet 同一条底部浮层泳道（bottom:64px），
