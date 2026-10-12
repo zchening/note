@@ -2293,3 +2293,23 @@ body.ns-mirror-C .ns-top{flex-direction:row-reverse}
 .ns-mrow{display:flex;gap:8px;margin:0 0 12px}
 .ns-mrow button{flex:1;padding:9px 6px;border:1px solid var(--line);border-radius:10px;background:var(--box-bg);color:var(--fg);font-size:13px;cursor:pointer}
 .ns-mrow button.on{border-color:var(--accent);color:var(--accent);font-weight:600}
+
+/* ---- 离线草稿冲突条 #draftBar（v3.1.1）：老项目 draftBar/remoteBar 同族
+   （index.html:160-167 / :720-727 逐字几何）。配色全走 theme 令牌；
+   老项目 .confcard 的 rgba 阴影按「色彩只进 theme.ts」红线折算成 --shadow-box。
+   条与时间 chip 同位 top:54px（老项目 :156），弹出时 chip 让位由 chip 侧
+   既有逻辑处理；bj 的 chip 锚位有意的偏离不动（VVW-33 同一纪律：这里只加不改）。 */
+.conflictbar { position: fixed; left: 50%; transform: translateX(-50%); z-index: 55;
+  pointer-events: none; max-width: 92vw; }
+.conflictbar.hidden { display: none; }
+#draftBar { top: 54px; }
+.confcard { pointer-events: auto; background: var(--box-bg); border: 1px solid var(--line);
+  border-top: 3px solid var(--accent); border-radius: 18px; box-shadow: var(--shadow-box);
+  padding: 22px 26px 18px; width: min(92vw, 420px); text-align: center;
+  animation: rise .5s cubic-bezier(.2, .7, .3, 1) both; }
+.confcard .conf-title { font-size: 17.5px; font-weight: 600; margin: 0 0 8px; color: var(--fg); }
+.confcard .conf-msg { font-size: 13.5px; color: var(--muted); margin: 0 0 16px; line-height: 1.6; }
+.confcard .conf-btns { display: flex; gap: 10px; }
+.confcard .conf-btns button { flex: 1; min-height: 44px; padding: 12px 0; font-size: 15px;
+  color: var(--fg); background: none; border: 1px solid var(--line); border-radius: 10px;
+  cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }

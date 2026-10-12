@@ -326,7 +326,21 @@ export function installHarness(test, { dir, onReady, api }) {
     const s = await serveStatic(dir, store);
     base = s.base;
     server = s.srv;
-    browser = await launchBrowser();
+    const real = await launchBrowser();
+    // 🔴🔴 v3.1.1 修：initScripts 此前**只 push 没人消费**——registerInit 宣称的
+    //   「页面脚本执行之前注入」从未发生，挂上去的钩子全部落空（死功能）。
+    //   接法：包装 browser.newPage，每开一页就把已注册的钩子 addInitScript 到
+    //   **page** 上（覆盖该页随后所有导航：goto / reload 都会先跑）。
+    //   用例与 openEditor 全部经由 browser().newPage() 取页 ⇒ 一处包装全覆盖。
+    browser = {
+      newPage: async (...args) => {
+        const page = await real.newPage(...args);
+        for (const fn of initScripts) await page.addInitScript(fn);
+        return page;
+      },
+      newContext: (...args) => real.newContext(...args),
+      close: (...args) => real.close(...args),
+    };
     // 🔴 onReady 可选：多数文件只是要个浏览器 + base，不需要额外装配。
     //   写成必填会让每个文件都塞一个空函数，纯粹是噪音。
     if (onReady) await onReady({ browser, base, registerInit });

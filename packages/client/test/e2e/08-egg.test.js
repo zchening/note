@@ -659,3 +659,59 @@ test('EGG-E15 🔴🔴 notesync 烟花：20 枚金色圆点 + 老项目 nsFwOut 
     await page.close();
   }
 });
+
+test('EGG-E16 🔴🔴 数字梗组字路径：IME 组字提交（compositionend）后必须补扫放粒子', async () => {
+  // 用户报障（v3.1.1）：安卓/拼音 IME 下敲 520/1314/666 不放动画，回车+退格才放。
+  // 根因：组字**提交帧**的 update 到达时 ed.isComposing() 仍为 true，update 监听器
+  // 的组字闸把扫描挡掉；compositionend 之后不再有 update，组字路径永远没人扫。
+  // notesync 是例外 —— word-trigger 自带 compositionend 通道（word-trigger.ts 通道 2）。
+  const page = await openEditor(h.browser(), h.baseUrl(), 'eggNumCompose', PASS);
+  try {
+    const editable = await page.$('#editor-host[contenteditable="true"]');
+    assert.ok(editable, '编辑器未挂载');
+
+    const waitBurst = () =>
+      page.waitForSelector('.ns-burst', { state: 'attached', timeout: 4000 });
+    const readTexts = () =>
+      page.evaluate(() => {
+        const w = document.querySelector('.ns-burst');
+        return w ? Array.from(w.querySelectorAll('i')).map((i) => i.textContent).join('') : '';
+      });
+    // 合成组字事件打在 #editor-host 上 —— 它本身就是 Lexical root（contenteditable），
+    // Lexical 的 composition 监听就绑在它上面，合成事件能真实驱动组字态。
+    const fireCompose = (type) =>
+      page.evaluate((t) => {
+        document
+          .getElementById('editor-host')
+          .dispatchEvent(new CompositionEvent(t, { bubbles: true, composed: true }));
+      }, type);
+
+    await editable.click();
+    // ① 非梗底：让闩锁处于脱梗态
+    await page.keyboard.type('abc');
+    await page.waitForTimeout(150);
+
+    // ② 进入组字态（等价于安卓键盘 setComposingText / 拼音 IME 按键）
+    await fireCompose('compositionstart');
+    // ③ 组字中敲入 520 —— 每键的 update 都被组字闸挡住
+    await page.keyboard.type('520');
+    await page.waitForTimeout(500);
+    // 中间断言（装置自证）：若合成 compositionstart 没让 Lexical 进入组字态，
+    // 直接输入路径会在这一拍就爆 —— 断言把"装置失真"和"修复缺失"分开。
+    const early = await page.$('.ns-burst');
+    assert.equal(early, null, '组字中的 update 必须被组字闸挡住（不爆）——若此处爆，说明组字态未置位，装置失真');
+
+    // ④ 提交（compositionend）—— 🔴 修复点：补扫必须在这一拍之后救回成梗判定
+    await fireCompose('compositionend');
+    await waitBurst();
+    const texts = await readTexts();
+    assert.match(
+      texts,
+      /💕/,
+      `组字提交后应补扫成梗放 💕（老项目 input 通道等价行为），实得 ${JSON.stringify(texts)}`,
+    );
+  } finally {
+    await page.close();
+  }
+});
+

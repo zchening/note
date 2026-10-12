@@ -84,7 +84,8 @@ test('S4-C3 菜单 11 项文案逐字一致', () => {
   assert.equal(COPY.menuThemeLight, '日间模式');
   assert.equal(COPY.menuPass, '修改口令');
   assert.equal(COPY.menuLock, '退出锁定');
-  assert.equal(COPY.menuAbout, '关于 NoteSync');
+  // 🔴 v3.1.1 用户拍板：关于入口用完整产品名 NoteSyncX（与 APK 壳名同口径）
+  assert.equal(COPY.menuAbout, '关于 NoteSyncX');
 });
 
 test('S4-C4 二级视图与底栏文案逐字一致', () => {

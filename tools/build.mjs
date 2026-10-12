@@ -226,6 +226,16 @@ function indexHtml(version, date, sha) {
 <body>
 <div id="boot">载入中…</div>
 <div id="app"></div>
+<!-- 🔴 离线草稿条（v3.1.1）：老项目 index.html:720-727 #draftBar 逐字同款
+     （标记/文案归属见 ui/copy.ts 的 draftBar 段与 sync/draft.ts 文件头）。
+     hidden 起步：只有 startSyncFor 的 restoreDraftIfNeeded 判出冲突才摘掉。 -->
+<div id="draftBar" class="conflictbar hidden">
+  <div class="confcard">
+    <div class="conf-title">检测到同步冲突</div>
+    <div class="conf-msg" id="draftMsg">发现本机有一份离线草稿，与当前内容不一致</div>
+    <div class="conf-btns"><button type="button" id="draftRestore">保留本机</button><button type="button" id="draftDiscard">使用云端</button></div>
+  </div>
+</div>
 <!-- 🔴 defer：不阻塞 HTML 解析，且**在 DOMContentLoaded 之前**执行完，
      所以放在它后面的内联脚本（window.__NOTESYNC_BUILD__）会**先**跑 ——
      这正好修掉一个潜在的顺序坑：不加 defer 时 app.js 先于那段内联执行，

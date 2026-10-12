@@ -57,7 +57,7 @@ export interface AboutDeps {
   };
   /**
    * 🔴🔴 v3.0.12：关于页关闭后的回调（归还焦点/选区到编辑器）。
-   *   关于页浮层标题"关于 NoteSync"位于 editorHost 之外的外壳节点；点开关闭后若
+   *   关于页浮层标题"关于 NoteSyncX"位于 editorHost 之外的外壳节点；点开关闭后若
    *   原生 caret 仍停在外壳节点，后续输入会落到编辑器外（v3.0.11 诊断 anchor=关于NoteSync、
    *   inEditor=no）。关页时主动把焦点与选区交还编辑器，避免该失效选区遗留。
    *   不传 ⇒ 不接（不留半个实现）。

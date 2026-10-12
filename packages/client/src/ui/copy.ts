@@ -149,10 +149,12 @@ export const COPY = {
   menuThemeLight: '日间模式',
   menuPass: '修改口令',
   menuLock: '退出锁定',
-  menuAbout: '关于 NoteSync',
+  // 🔴 v3.1.1（用户拍板）：菜单与关于页标题用**完整产品名 NoteSyncX**，
+  //   与 APK 壳应用名（strings.xml app_name）/ manifest name 同一口径。
+  menuAbout: '关于 NoteSyncX',
 
   /* 关于页 */
-  aboutTitle: '关于 NoteSync',
+  aboutTitle: '关于 NoteSyncX',
   close: '关闭',
   aboutWeb: '网页',
   /** App 版本行的键；整行仅在 App 壳内显示 */
@@ -423,6 +425,13 @@ export const COPY = {
   conflictKeepLocal: '保留本机',
   conflictKeepRemote: '使用云端',
   conflictEmpty: '当前没有冲突',
+
+  /* 离线草稿条（v3.1.1）：老项目 #draftBar（index.html:722-723）逐字同款。
+     🔴 bj 没有 baseV 语义（sync/draft.ts 头注），无法区分「他端已更新」与
+     「本机离线草稿」，所以固定用老项目 baseV 相同分支的那句正文——
+     它在两种情况下都为真（草稿确实在本机、确实与当前内容不一致）。 */
+  draftBarTitle: '检测到同步冲突',
+  draftBarMsg: '发现本机有一份离线草稿，与当前内容不一致',
 
   /* 提醒：响铃卡片（老项目 remCard，页内主通道 —— 无论通知权限如何都弹） */
   remCardTitle: '提醒',

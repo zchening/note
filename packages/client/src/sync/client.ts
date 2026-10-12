@@ -138,6 +138,20 @@ export interface SyncDeps {
    *   存档失败**绝不能**让这次推送变成失败。
    */
   onArchive?: (prev: Doc) => void;
+
+  /**
+   * 🔴 v3.1.1：推送成功后的**无条件**回调（区别于 onArchive 的"有覆盖物才调"）。
+   *
+   *   为什么必须有它：离线草稿（main.ts 的 clearDraft）要挂在"云端确认收到这一版"
+   *   这个事实上，而 onArchive 带两道闸（prev 非空 && prev≠doc）—— **首推**时
+   *   prev 是空文档，onArchive 不调 ⇒ 草稿永远清不掉（e2e DRAFT-E1 实锤）。
+   *   快照存档的语义（"刚被覆盖的那一版"）与草稿清理的语义（"云端已确认"）
+   *   是两件事，不该挤在同一个回调里互相迁就闸门。
+   *
+   * 🔴 调用点在 base 推进之后、send('pushed') 之前；抛异常按 onArchive 同款
+   *   try/catch 兜住，绝不让它把这次推送变成失败。
+   */
+  onPushed?: () => void;
 }
 
 /** 去抖：停止输入多久后推送 */
@@ -1339,6 +1353,16 @@ export class SyncClient {
         this.d.onArchive(prev);
       } catch {
         /* 存档是保险：抛了也不许影响本次同步的结论 */
+      }
+    }
+    // 🔴 v3.1.1：云端确认收到这一版（无条件）—— 离线草稿到此完成使命。
+    //   首推也必须调（onArchive 的双闸会跳过首推），否则首推后草稿永远残留。
+    //   挂起（pending）期间的防误清由 clearDraft 自身的形状兜底。
+    if (this.d.onPushed) {
+      try {
+        this.d.onPushed();
+      } catch {
+        /* 同上：回调是保险不是主链路 */
       }
     }
     // 🔴 缓存已在本函数**发请求之前**写过（见上面那段注释：本地是权威、云端是备份）。

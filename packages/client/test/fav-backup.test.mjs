@@ -313,8 +313,14 @@ test('BAK-FAV-15 🔴 恢复侧：先取本机现状、再合并收藏、最后�
   //   （判据一度写成"必须出现 hadBefore 这个变量名"，那钉的是命名不是行为，
   //     实现换个名字就红、改回名字就绿 —— 恒真断言的镜像形态。这里改成钉顺序。）
   const start = main.indexOf('async function applyFavBackupRestore');
-  const fn = main.slice(start);
   assert.ok(start >= 0, '应能定位到 applyFavBackupRestore');
+  // 🔴🔴 右界必须钉到**函数体末尾**（下一个顶层声明 openFavBackupTake），不能 slice(start)
+  //   切到文件尾 —— v3.1.1 实栽：boot() 里的离线草稿条接线（docToLexical 回灌）合法地
+  //   写在本函数之后，无右界时被反向断言误卷，收藏恢复测试红在了别人的代码上。
+  //   （同 BAK-FAV-14 的做法：按下一个顶层声明取右界，钉行为不钉文件布局。）
+  const end = main.indexOf('function openFavBackupTake');
+  assert.ok(end > start, '应能定位到 applyFavBackupRestore 的右界 openFavBackupTake');
+  const fn = main.slice(start, end);
   // 本机现状的读取（算覆盖的那次）必须早于合并
   const iBefore = fn.search(/new Set\(readFavs\(|readFavs\(favStore\)\.indexOf/);
   const iMerge = fn.indexOf('mergeFavs(');

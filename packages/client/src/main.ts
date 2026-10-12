@@ -45,7 +45,7 @@ import { insertFoldAtCaret, placeCaret, registerCommands } from './commands.ts';
 import { $isFoldNode, $isReminderMarkNode } from './nodes.ts';
 import { ALL_NODES } from './node-registry.ts';
 import { docToLexical, lexicalToDoc, nodesToSpans, replaceBlocksAt } from './serialize.ts';
-import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
+import { canonicalize, decryptString, deriveKey, encryptString, emptyDoc, normalize, parseDoc, putKey, resolveKey, type DerivedKey, type Doc, type Envelope } from '@bj/shared-schema';
 import { SyncClient, fetchTextWithTimeout, FETCH_TIMEOUT_GET_MS, type TimedResponse } from './sync/client.ts';
 import { ComposeGuard, WithdrawGuard } from './sync/compose-guard.ts';
 import {
@@ -56,7 +56,18 @@ import {
   pushHistory,
 } from './sync/history.ts';
 import type { SyncState } from './sync/fsm.ts';
-import { changePassphrase, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
+import {
+  applyDraft,
+  clearDraft,
+  discardDraft,
+  flushDraft,
+  resetDraftSession,
+  restoreDraftIfNeeded,
+  readDraft,
+  saveDraft,
+  type DraftCtx,
+} from './sync/draft.ts';
+import { changePassphrase, fetchRemote, lockNote, unlock, unlockIfRemembered } from './sync/unlock.ts';
 import { readCache, writeCache, envelopeOf } from './sync/local-cache.ts';
 import { installKdfWorker } from './sync/kdf-worker.ts';
 import { pushInternalError } from './diag/internal-ring.ts';
@@ -1450,6 +1461,8 @@ const eggDraw = buildEggDraw();
 
 function mountEditor(name: string, initialDoc?: Doc): void {
   currentNote = name;
+  // 🔴 离线草稿条是常驻 DOM：换笔记先收上一条（是否再弹由 startSyncFor 的裁决决定）。
+  hideDraftBar();
   // 🔴 收藏态与收藏夹列表必须在**挂菜单之前**算好：菜单是打开时读这两个值的，
   //   留到 onMenu 回调里算就晚了（那时 innerHTML 已经渲染完，用户会先看到
   //   「收藏笔记」点一下才变「取消收藏」）。
@@ -2171,6 +2184,29 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   //   （数字梗/烟花，跑在 update 真源文本上），与光标位置无关（见 layer.ts 注释）。
   ensureEggLayer()?.bindWordTrigger(editorHost);
 
+  // 🔴🔴 v3.1.1 数字梗**组字补扫**（用户报障：安卓/拼音 IME 下敲 520/1314/666 不放动画，
+  //   回车+退格才放；notesync 是例外——word-trigger 自带 compositionend 通道）。
+  //   根因：数字梗扫描只挂在 update 监听器上，三道闸的第三道 `!ed.isComposing()`
+  //   会把**组字提交帧**挡掉 —— 安卓键盘 setComposingText / 拼音组字下，提交那一刻
+  //   Lexical 还在组字态；compositionend 之后不再有 update flush，于是组字路径的
+  //   成梗永远没人扫。回车/退格走 Lexical 键盘命令路径（非组字）⇒ 能扫 ⇒ "回车+
+  //   退格才爆"。E2E-E16 实锤：提交后 waitBurst 超时，中间断言（组字中不爆）绿。
+  //   修法与 word-trigger 通道 2 同款：compositionend → setTimeout(0)
+  //   （等 Lexical 清组字态、等最后一次 DOM 变更的 flush 收尾）→ 不在组字态才补扫。
+  //   🔴 无条件补扫（不判文本真变）：被挡的那帧已经把 lastEggText 更新过了，
+  //     再判真变恒 false —— 去重交给数字梗闩锁（gagFire 在梗态内不重复放），
+  //     补扫与提交帧扫描撞车时第二次自动 no-op。
+  editorHost.addEventListener('compositionend', () => {
+    window.setTimeout(() => {
+      try {
+        if (!eggLayer || ed.isComposing()) return;
+        scanEggTriggers(eggLayer);
+      } catch {
+        /* 氛围层：绝不把编辑流程带崩（同 scan 内 try/catch 纪律） */
+      }
+    }, 0);
+  });
+
   // 🔴🔴 打字机音（老项目 index.html:6783-6878）。复古皮肤内才发声。
   //
   //   为什么挂在**这里**而不是 buildShell 那一段：三条输入通道必须绑在
@@ -2767,7 +2803,19 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   少了这个判断：docToLexical 的首次 update、以及 merge 把远端内容写回来时，
     //   都会触发一次"编辑"，于是**刚拉下来的内容立刻被推回去** ——
     //   两台设备会互相回声，永不停歇，且服务端被打满。
-    if (canonicalize(latestDoc) !== canonicalize(before)) syncRef?.noteEdit();
+    if (canonicalize(latestDoc) !== canonicalize(before)) {
+      syncRef?.noteEdit();
+      // 🔴 v3.1.1 取证：草稿写入进飞行记录器（带 tag），「云端版顶掉离线草稿」类故障可查。
+      recordFlight(
+        'draft:save',
+        'len=' + canonicalize(latestDoc).length + ' tag=' + (tags ? [...tags].join(',') : '-'),
+      );
+      // 🔴 离线草稿（v3.1.1）：与 noteEdit **同一条件**——只在用户内容真变时记。
+      //   远端回灌走 setDoc，进来时 latestDoc 已被更新，before == latestDoc
+      //   ⇒ 不进这个分支，不会给"云端刚写下来的内容"白记一份草稿。
+      //   草稿条挂起期间 saveDraft 内部直接短路（draft.ts 红线：pending 不写）。
+      saveDraftForNote(name, latestDoc);
+    }
   });
 
   ed.update(() => docToLexical(initial), { discrete: true, tag: EGG_NOFX_TAG });
@@ -3045,9 +3093,87 @@ function footFor(s: SyncState): { s: 'connecting' | 'synced' | 'offline'; d?: st
   }
 }
 
+/* ================================================================== *
+ * 离线草稿（v3.1.1）—— sync/draft.ts 的主流程接入
+ * ================================================================== */
+
+/** 草稿条当前挂起的笔记。undefined = 屏上没有草稿条。 */
+let draftConflictNote: string | undefined;
+
+/** 正在编辑的笔记（visibilitychange 兜底用——那个监听器拿不到 startSyncFor 闭包里的 name）。 */
+let draftActiveNote: string | undefined;
+
+/**
+ * 草稿上下文。🔴 密钥不缓存：每次从 currentDk 现取（draft.ts 头注的密钥策略——
+ * 切笔记的 await 间隙里拿旧密钥加密新内容 = 云端再也解不开且零报错）。
+ */
+function draftCtxOf(noteId: string): DraftCtx | undefined {
+  const dk = currentDk;
+  if (!dk) return undefined;
+  return { noteId, dk };
+}
+
+/**
+ * 🔴🔴 开篇裁决闸（v3.1.1）：startSyncFor 的草稿裁决（restoreDraftIfNeeded）完成之前，
+ * **一切 saveDraftForNote 都不写**。
+ *
+ *   为什么必须有它：mountEditor 的装载链（docToLexical / 各类程序化 update）在
+ *   restore 之前就会触发 update 监听器，而 `before`（上一次的 latestDoc）彼时还是
+ *   undefined/旧值 ⇒ canonicalize 比对恒「真变」⇒ **把刚从云端/缓存解出来的内容
+ *   当成"用户编辑"写进草稿**——盘上那份真正的离线草稿被顶掉（e2e DRAFT-E1 实锤：
+ *   reload 前 268 字节离线记录、restore 读到的已是 51 字节装载回声写下的 248，
+ *   conflict 判成「一致」静默清；多设备场景下离线段就此丢失）。
+ *
+ *   装载回声的内容来源是云端/缓存，**本来就不是用户编辑**——restore 完成后
+ *   （conflict ⇒ pending 闸由 draft.ts 形状兜底；none ⇒ 草稿已清）再放行真编辑。
+ *   🔴 切笔记（startSyncFor 开头）先重关：上一篇的放行状态不许漏进下一篇。
+ */
+let draftGateOpen = false;
+
+/**
+ * 把内容记进草稿。baseRev 恒 0 —— bj 没有本地内容版本号（diag/lines.ts 口径：
+ * 三方合并靠 base 文档而非自增 rev），draft.ts 把 baseRev 的语义留给调用方定义，
+ * 这里就诚实地传 0：只作往返保真，不参与任何决策（冲突裁决比的是内容不是 rev）。
+ */
+function saveDraftForNote(noteId: string, doc: Doc): void {
+  // 🔴 开篇裁决闸：restore 完成前不记（见 draftGateOpen 注释）。flushDraftNow
+  //   （pagehide/visibilitychange）同样被它挡住——彼时草稿记录还是权威副本，不许覆写。
+  if (!draftGateOpen) return;
+  const ctx = draftCtxOf(noteId);
+  if (!ctx) return; // 密钥未就绪（startSyncFor 的 await 间隙）：编辑器里还是云端内容，无需草稿
+  void saveDraft(ctx, doc, 0);
+}
+
+/**
+ * 离开兜底（pagehide / visibilitychange→hidden）：把**活真源**落一次草稿。
+ * 存在理由：PUSH_DEBOUNCE_MS=700 内关页，最后一批编辑没进云端也没进草稿就是丢失。
+ * saveDraft（内容真变才写）+ flushDraft（强制落一次，防另一 Tab 删过/上次配额满失败）。
+ */
+function flushDraftNow(noteId: string): void {
+  const ctx = draftCtxOf(noteId);
+  if (!ctx) return;
+  const live = window.__NOTESYNC_DOC__?.();
+  if (live) saveDraftForNote(noteId, live);
+  void flushDraft(ctx);
+}
+
+/** 弹「保留本机 / 使用云端」。文案在 build.mjs 的静态标记里，这里只管显隐与挂起对象。 */
+function showDraftBar(noteId: string): void {
+  draftConflictNote = noteId;
+  document.getElementById('draftBar')?.classList.remove('hidden');
+}
+
+/** 收起草稿条。切笔记 / 回首页 / 回落地页都必须调——条是常驻 DOM，忘了收会盖在别的页上。 */
+function hideDraftBar(): void {
+  draftConflictNote = undefined;
+  document.getElementById('draftBar')?.classList.add('hidden');
+}
+
 async function startSyncFor(name: string): Promise<void> {
   syncRef?.stop();
   syncRef = undefined;
+  // 🔴 开篇裁决闸先重关：上一篇的放行状态不许漏进下一篇（见 draftGateOpen 注释）。
+  draftGateOpen = false;
   // 🔴🔴 先清密钥再解新的：解密钥是 await，期间任何一次历史操作都该看到"没有密钥"，
   //   而不是拿着上一篇的密钥去加密这一篇的内容（见 currentDk 的注释）。
   currentDk = undefined;
@@ -3058,6 +3184,51 @@ async function startSyncFor(name: string): Promise<void> {
     return;
   }
   currentDk = dk;
+  // 🔴 离线草稿裁决（v3.1.1）：开新会话先清内存态（只清内存，盘上记录绝不动——
+  //   切笔记不许毁掉别的笔记还没推送的草稿，draft.ts DR-13），再拿「解锁时解出来的
+  //   云端版」比对盘上草稿：一致 ⇒ 静默清（草稿已无意义）；不一致 ⇒ 弹
+  //   「保留本机 / 使用云端」由用户裁决，绝不自动覆盖（老项目 v5.49 同一口径）。
+  resetDraftSession();
+  draftActiveNote = name;
+  {
+    // 🔴🔴 v3.1.1 裁决基准修正：缓存 miss 时 unlockIfRemembered 只能回 emptyDoc
+    //   （它自己不在线拉，"交给 sync 去拉"——而裁决发生在首拉**之前**）。
+    //   拿 emptyDoc 当基准会把「云端与草稿一致」（E3 实锤：推送成功→缓存被清→
+    //   重开误弹「检测到同步冲突」）误判成 conflict。此处在线拉一次真云端：
+    //   env→解密→parseDoc 成功才替换基准；offline/empty/解不开（口令在别处改过）
+    //   一律维持 emptyDoc 走原判 —— 离线时无法验证，保守交用户裁决，无害。
+    let base = mountDocSnapshot ?? emptyDoc();
+    if (canonicalize(base) === canonicalize(emptyDoc())) {
+      try {
+        const remote = await fetchRemote(name, fetch);
+        if (remote.kind === 'env') {
+          try {
+            base = parseDoc(await decryptString(remote.env, dk.key, 'note'));
+          } catch {
+            /* 解不开（口令已换）：维持 emptyDoc 走原判 */
+          }
+        }
+      } catch {
+        /* fetchRemote 自身不抛（offline 形状），这里只是兜底 */
+      }
+    }
+    // 🔴 v3.1.1 取证：先只读一份草稿明文长度（readDraft 不改状态），再裁决——
+    //   「该弹条没弹」时这行能直接分辨「一致静默清 / 解不开 / 无草稿」三种形状
+    //   （e2e DRAFT-E1 实测就栽在分不清这三种）。盐前缀进日志：盐本就在信封里明文，非新增暴露面。
+    const pre = await readDraft({ noteId: name, dk });
+    const rr = await restoreDraftIfNeeded({ noteId: name, dk }, base);
+    recordFlight(
+      'draft:restore',
+      rr.kind +
+        ' draft=' + (pre ? canonicalize(pre.doc).length : 'x') +
+        ' cloud=' + canonicalize(base).length +
+        ' salt=' + dk.saltB64.slice(0, 6),
+    );
+    if (rr.kind === 'conflict') showDraftBar(name);
+  }
+  // 🔴 裁决完成才放行草稿写入：此后 update 监听器/离开兜底记的才是真用户编辑。
+  //   conflict 时防误清由 pending 闸（draft.ts 形状）继续兜底。
+  draftGateOpen = true;
   const c = new SyncClient({
     noteId: name,
     // 🔴🔤🔤 base 播种（用户报障第 1 条，B-①）：
@@ -3162,8 +3333,19 @@ async function startSyncFor(name: string): Promise<void> {
     },
     // 🔴 自动快照：每次推送成功后把"刚被覆盖的那一版"存进快照环。
     //   节流在 pushAutoHistory 里（60s，老项目 :8469 同值同理由）。
+    //   ⚠️ onArchive 带 onPushed 没有的两道闸（prev 非空 && prev≠doc）——
+    //   首推不调它，所以**清草稿不能挂这里**（DRAFT-E1 实锤过：挂这里
+    //   首推后草稿永远残留）。快照与草稿清理是两件事，见 onPushed。
     onArchive: (prev) => {
       void pushAutoHistory(name, prev);
+    },
+    // 🔴 离线草稿（v3.1.1）：推送成功 ⇒ 云端已确认收到这一版 ⇒ 镜像它的草稿完成使命。
+    //   🔴 挂 onPushed 不挂 onArchive：首推（prev 为空）也必须清（见上）。
+    //   clearDraft 的 API 形状保证：草稿条挂起（pending）期间这里**什么都不做**，
+    //   绝不会把用户还没裁决的草稿删掉（draft.ts 文件头的数据丢失红线）。
+    //   🔴 全 main.ts 只有这一处 clearDraft —— 清草稿的调用面收紧到一点才可审计。
+    onPushed: () => {
+      clearDraft(name);
     },
   });
   syncRef = c;
@@ -3187,6 +3369,9 @@ async function startSyncFor(name: string): Promise<void> {
   const prevPagehide = pagehideHandler;
   if (prevPagehide) window.removeEventListener('pagehide', prevPagehide);
   pagehideHandler = () => {
+    // 🔴 离线草稿兜底（v3.1.1）：走之前把活真源落一次草稿 —— 推送没完成的场景
+    //   （700ms 去抖没到 / 断网 / 被系统杀）就靠这份草稿在下次打开时找回。
+    flushDraftNow(name);
     // 🔴 同步读一次 localStorage 不做，push 本身已是 fire-and-forget；
     //   本地那份在 writeCache 里是同步写的，所以最坏只丢"上云"这一步。
     syncRef?.flushPending();
@@ -4783,6 +4968,7 @@ function showConflictHint(): void {
 const PASS_ERROR = '口令不对，或数据无法解密';
 
 function showLanding(): void {
+  hideDraftBar(); // 🔴 草稿条是常驻 DOM，离开编辑器必须收（否则盖在落地页上）
   buildLanding(app, {
     onOpen: (name, isEgg) => {
       if (isEgg) {
@@ -4803,11 +4989,13 @@ function showLanding(): void {
 }
 
 function showHome(): void {
+  hideDraftBar(); // 🔴 同 showLanding：常驻 DOM 不收会盖在首页上
   buildHome(app);
   goto('home');
 }
 
 function showPass(name: string): void {
+  hideDraftBar(); // 🔴 同 showLanding：口令页不许残留上一条的草稿条
   buildPass(app, {
     onSubmit: async (pass) => {
       // 🔴🔴 这里必须真解锁，**不能**先放行再补。
@@ -5071,6 +5259,30 @@ function boot(): void {
   //   **绝不会变成解锁失败** —— 所以这里不判返回值、不弹错。
   installKdfWorker();
   applyTheme();
+  // 🔴 离线草稿条（v3.1.1）：两个裁决按钮的监听只挂一次（标记是 build.mjs 静态壳）。
+  //   「保留本机」= applyDraft 拿草稿内容回灌（与 restoreHistVersion 同一条链：
+  //   docToLexical 触发的 update 会自动把真源写回 latestDoc，canonical 比较判定
+  //   内容真变 ⇒ 自动 noteEdit 走正常推送链，不另开第二条推送路径）；
+  //   🔴 **绝不在推送成功前 clearDraft** —— 草稿此刻仍是唯一底线（draft.ts 红线），
+  //   清理由 onArchive 在推送成功后完成。
+  document.getElementById('draftRestore')?.addEventListener('click', () => {
+    const noteId = draftConflictNote;
+    hideDraftBar();
+    const got = noteId ? applyDraft(noteId) : undefined;
+    const ed = editor;
+    if (!got || !ed) return;
+    ed.update(() => {
+      docToLexical(got.doc);
+    }, { discrete: true });
+    // 🔴 草稿里的裸网址也要亮（与恢复历史版本同一收口，漏掉就是裸文本）。
+    linkifyNowRef?.();
+  });
+  // 「使用云端」= 丢弃草稿，编辑器保持云端内容不动。
+  document.getElementById('draftDiscard')?.addEventListener('click', () => {
+    const noteId = draftConflictNote;
+    hideDraftBar();
+    if (noteId) discardDraft(noteId);
+  });
   // 🔴 隐藏的 file input 必须在启动时就建好（见 ensureUploadInput 的注释）：
   //   懒创建会让"第一次点击"成为唯一能走通的机会，一旦那次失败按钮就永久是死的。
   ensureUploadInput();
@@ -5151,6 +5363,9 @@ try {
   });
   document.addEventListener('visibilitychange', () => {
     recordFlight('vis', document.visibilityState, document.visibilityState === 'hidden');
+    // 🔴 离线草稿兜底（v3.1.1）：切后台（Android 上锁屏/切 App 都会触发）把活真源
+    //   落一次草稿 —— 后台进程被杀时页面不会收到 pagehide，这里就是最后的机会。
+    if (document.visibilityState === 'hidden' && draftActiveNote) flushDraftNow(draftActiveNote);
   });
   window.addEventListener('pagehide', () => {
     recordFlight('vis', 'pagehide', true);

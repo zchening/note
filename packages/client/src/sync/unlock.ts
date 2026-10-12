@@ -96,8 +96,13 @@ export type UnlockResult = UnlockOk | UnlockFail;
 
 const OFFLINE_MSG = '连不上服务器，请检查网络';
 
-/** 取远端信封。返回 'empty' 表示 200 + 空体（确实没有这篇笔记）。 */
-async function fetchRemote(
+/**
+ * 取远端信封。返回 'empty' 表示 200 + 空体（确实没有这篇笔记）。
+ * 🔴 v3.1.1 导出：startSyncFor 的草稿裁决在缓存 miss（unlockIfRemembered 只能回
+ *   emptyDoc，它自己不在线拉）时也要拿真云端做比对基准 —— 复用这一份取数逻辑，
+ *   不另写第二份（两份实现迟早漂，漂移零报错）。
+ */
+export async function fetchRemote(
   noteId: string,
   f: typeof fetch,
 ): Promise<{ kind: 'empty' } | { kind: 'env'; env: Envelope } | { kind: 'offline' } | { kind: 'broken' }> {

@@ -90,7 +90,7 @@ const fontEq = (computed, token) => fontKey(computed) === fontKey(token);
 /** 开菜单。 */
 const openMenu = (page) => withTimeout(page.click('#menuBtn'), 5_000, '点菜单键');
 
-/** 打开关于页（走真实路径：底栏菜单 → 关于 NoteSync）。 */
+/** 打开关于页（走真实路径：底栏菜单 → 关于 NoteSyncX）。 */
 async function openAbout(page) {
   await openMenu(page);
   await page.waitForSelector('#menuAbout', { timeout: 10_000 });
@@ -2621,7 +2621,7 @@ test('VVW-26 🔴🔴🔴 触屏：菜单三条关闭路径 + 修改口令取消
     await page.waitForTimeout(150);
     await assertNoKeyboard(page, '菜单点空白关闭后');
 
-    // ② 菜单 → 关于 NoteSync → × 关闭
+    // ② 菜单 → 关于 NoteSyncX → × 关闭
     await page.tap('#menuBtn');
     await withTimeout(page.waitForSelector('#menuAbout', { timeout: 10_000 }), 12_000, '等菜单(二次)');
     await page.tap('#menuAbout');
@@ -2639,7 +2639,7 @@ test('VVW-26 🔴🔴🔴 触屏：菜单三条关闭路径 + 修改口令取消
       6000, '关于页应关闭',
     );
     await page.waitForTimeout(150);
-    await assertNoKeyboard(page, '关于 NoteSync 关闭后');
+    await assertNoKeyboard(page, '关于 NoteSyncX 关闭后');
 
     // ③ 菜单 → 修改口令 → 取消关闭
     await page.tap('#menuBtn');
@@ -3161,13 +3161,23 @@ test('VVW-33 🔴🔴🔴 日夜两态滚动条轨道必须显式定色为 --lin
       // 🔴 断言 4（组二 · 样式表声明层）：那些**打不开的面板**容器
       //   （彩蛋图鉴 #eggList、游戏镜像 .ns-mirror-box、时间滚轮 .ns-rem-wheel）
       //   在 e2e 里没有可达入口，覆盖不到就等于留了无保护的口子。
-      //   ⇒ 这一组直接读**产物里内联的 CSS 文本**，按选择器逐条查有没有 track 声明。
+      //   ⇒ 这一组直接读**产物的 CSS 文本**，按选择器逐条查有没有 track 声明。
       //   ⚠️ 只对**伪元素**用文本匹配是安全的：`::-webkit-scrollbar-track` 只可能来自
       //      样式表，不像普通属性那样被 specificity 吃回（这条已在声明层验证过可读且敏感）。
-      const cssText = await page.evaluate(() => {
-        // 产物把 CSS 内联在 <style> 里（无外链 .css，见 build.mjs indexHtml）
-        return Array.from(document.querySelectorAll('style'))
+      const cssText = await page.evaluate(async () => {
+        // 🔴 产物 CSS 是**外链**（v3.1.0 P1-15：CSS 外链 + app.js defer），内联 <style>
+        //   已不承载主样式 —— v3.1.1 实栽：只读 querySelectorAll('style') 拿到空串，
+        //   track 规则"全部缺失"整条红在别人的代码上。外链同源，fetch href 取全文；
+        //   内联 <style> 保留读取（兼容回退/内联小片），两者拼接后交给同一解析器。
+        const inline = Array.from(document.querySelectorAll('style'))
           .map((s) => s.textContent || '').join('\n');
+        const hrefs = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+          .map((l) => l.getAttribute('href')).filter(Boolean);
+        const ext = [];
+        for (const href of hrefs) {
+          try { ext.push(await (await fetch(href)).text()); } catch (e) { ext.push(''); }
+        }
+        return inline + '\n' + ext.join('\n');
       });
       // 按 CSS 规则块切开，逐块找选择器与声明。不用正则硬啃整个文件 ——
       // 「选择器里带逗号」和「声明里带 }」都会让朴素正则错切。
