@@ -1931,6 +1931,34 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     editorHost.blur();
     setTimeout(() => { editorHost.focus(); }, 50);
   };
+  /** 🔴🔴 v3.1.9 取证：塌方机理调查——树的碎片结构快照（只记节点数量/长度，
+   *  绝不记内容）。真机日志至今只能看到塌方的长度差（115→19），看不到树内
+   *  TextNode 被拆成几块——而 compose-guard.ts 头部的机理分析（「Lexical 只回
+   *  灌 anchor 一个节点，其余被吞」）需要碎片证据才能定论。两个调用点：
+   *  豆包重识别瞬间（beforeinput、组字串变短 = 塌方前夜）、塌方判定帧
+   *  （update 监听、塌方落地后）——前后对照即机理。 */
+  const treeFragSnapshot = (): string => {
+    try {
+      return ed.getEditorState().read(() => {
+        const texts: number[] = [];
+        const walk = (n: LexicalNode): void => {
+          if ($isTextNode(n)) {
+            texts.push(n.getTextContentSize());
+            return; // TextNode 是叶子，不再下钻
+          }
+          if ($isElementNode(n)) for (const c of n.getChildren()) walk(c);
+        };
+        walk($getRoot());
+        const blocks: string[] = [];
+        for (const b of $getRoot().getChildren()) {
+          blocks.push(`${b.getType() === 'paragraph' ? 'p' : b.getType()}${b.getTextContentSize()}`);
+        }
+        return `tn=${texts.length}[${texts.join('+')}] blk=${blocks.length}[${blocks.join(',')}]`;
+      });
+    } catch {
+      return 'frag-err';
+    }
+  };
   // 🔴🔴 v3.0.11：组字态由输入事件流的 isComposing 驱动（见 onFlightBI / onComposeStartGuard）。
   //   豆包智能整理常只发 insertCompositionText、不发 compositionstart ⇒ v3.0.10 的守卫从不
   //   激活而漏拦。这里从 beforeinput 的 isComposing 抽出来，供 update 监听判定 composing。
@@ -1953,6 +1981,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     if (ie.inputType === 'insertCompositionText') {
       lastBiIsComposing = !!ie.isComposing;
       if (lastBiIsComposing) {
+        // 🔴🔴 v3.1.9 取证：豆包重识别的瞬间（组字串变短）= 塌方前夜——先记
+        //   DOM 碎片结构（塌方前照），塌方判定帧处再记后照，前后对照即机理。
+        //   注意放在 lastBiDataLen 更新**之前**（对比对象是上一帧的串长）。
+        if (lastBiDataLen > 0 && ie.data != null && ie.data.length < lastBiDataLen) {
+          recordFlight('tree:frag', treeFragSnapshot());
+        }
         // 🔴🔴🔴 v3.0.18：组字串长度喂锚点死亡检测（update 监听空转判定用：
         //   组字串远长于文档但树长不动 = 写入全部空转）。
         lastBiDataLen = ie.data == null ? 0 : ie.data.length;
@@ -2722,6 +2756,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     const collapse = composeGuard.observe(newLen, composing, lastBiDataLen);
     if (collapse.restore) {
       recordFlight('gate:collapse', collapse.reason + ' prevLen=' + prevLen);
+      // 🔴🔴 v3.1.9 取证：塌方落地后的 DOM 碎片结构（对照 beforeinput 时刻的前照，
+      //   前后差值 = 豆包重识别打塌树的机理证据）。
+      recordFlight('tree:frag', treeFragSnapshot());
       // 🔴🔴 v3.1.6 懒重连：reboot 重建后第一个组字帧就把树打回 ⇒ 宿主视图
       //   确实没对齐（v3.0.19 震荡形状实锤）⇒ 补 blur/focus 重连。反之帧能
       //   落地（树长涨过峰值）时 flag 在解冻处清除，会话活着不拆。
