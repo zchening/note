@@ -84,6 +84,7 @@ import { ensureExactAlarmPermission } from './reminder/native-rem.ts';
 import { ReminderUI, lastNativeSyncOutcome } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
 import { bindImageViewer } from './image/viewer.ts';
+import { nativeSaveImage } from './image/native-img-save.ts';
 import { browserStore, favListOf, mergeFavs, readFavs, toggleFav, writeFavs, FAVS_MAX } from './fav/favs.ts';
 import { buildEggLayer, scanEggTriggers, type EggLayer } from './egg/layer.ts';
 import { initInstallPrompt, tryShowInstallBar } from './pwa/install-bar.ts';
@@ -1073,8 +1074,29 @@ async function nativeClipboardHasImage(): Promise<boolean> {
   }
 }
 
-let currentPage = 'boot';
-let currentNote = '';
+/**
+ * 把导出长图的同一张 PNG 再存一份进系统相册（壳内；Web 下桥不存在 ⇒ false）。
+ *
+ * 🔴🔴 为什么复制成功还要存相册（2026-10-13 用户第二轮报障）：
+ *   **微信 Android 不支持从剪贴板粘贴图片** —— 多来源一致，第三方实测
+ *   （三星平板同款问题）给出的可行路径就是「先存相册 → 微信相册选图」。
+ *   这是微信自己的输入实现，剪贴板写得再对也改不掉；而"复制到剪贴板"
+ *   这个按钮对微信就是死路。⇒ 顺手存一份，用户才真能把图送进微信。
+ *
+ * 🔴 复用剪贴板那一份 base64（调用方传进来的就是），不再转一次。
+ * 🔴 失败**绝不抛**：复制本身已经成功，存相册只是多铺一条路；
+ *   抛错会把调用方的成功路径断掉（症状：明明复制成功却弹失败）。
+ */
+async function saveExportImageToAlbum(base64: string, mime: string): Promise<boolean> {
+  try {
+    const r = await nativeSaveImage(base64, mime);
+    return r?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+let currentPage = 'boot';let currentNote = '';
 
 /**
  * 本次会话用过的口令（**只在内存里**，不落盘、不进 localStorage）。
@@ -1404,6 +1426,8 @@ function onTopbar(act: TopbarAction): void {
         nativeCopyImage,
         // 🔴 复制之后读回验证：桥说成功不算数，剪贴板里真有图才算（见 render.ts 头部）
         verifyClipboardImage: nativeClipboardHasImage,
+        // 🔴 微信不认剪贴板图片 ⇒ 复制成功后顺手存一份相册，文案据此指路
+        saveToAlbum: saveExportImageToAlbum,
         okMs: COPY.exportOkMs,
         failMs: COPY.exportFailMs,
       });

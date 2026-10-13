@@ -65,6 +65,15 @@ export interface ExportDeps {
    *   又变成藏在副作用里的东西（全项目统一纪律）。
    */
   verifyClipboardImage?: (() => Promise<boolean>) | undefined;
+  /**
+   * 把同一张图再存一份进系统相册（壳内；Web 下 undefined）。
+   *
+   * 🔴 v3.2.3：**微信 Android 不支持从剪贴板粘贴图片**（多来源一致，第三方
+   *   实测的可行路径就是「先存相册 → 微信相册选图」）⇒ 复制成功之后顺手
+   *   存一份，用户才真能把图送进微信。存不成不影响复制本身已成功，
+   *   只影响文案提不提"相册"（没存成绝不许提，那是谎报）。
+   */
+  saveToAlbum?: ((base64: string, mime: string) => Promise<boolean>) | undefined;
 }
 
 export type ExportResult = DeliverKind | 'cancelled' | 'loadfail' | 'renderfail';
@@ -99,11 +108,12 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
     // 🔴🔴 渲染 Promise **立即**开始，交付阶梯同步发起 ——
     //   剪贴板要抢在用户手势窗口内，await 渲染就晚了（见 render.ts 文件头）。
     const blobP = renderCardToPng(card.el);
-    const kind = await deliverPng(blobP, {
+    const out = await deliverPng(blobP, {
       isNativeApp: deps.isNativeApp,
       blobToB64,
       nativeCopyImage: deps.nativeCopyImage,
       verifyClipboardImage: deps.verifyClipboardImage,
+      saveToAlbum: deps.saveToAlbum,
       showPreview: (b) => showPreview(b),
       // 🔴🔴 这里**不再**注入 isTouch：交付阶梯里唯一的平台分支是"原生桥 vs 分享"，
       //   而"剪贴板成功后给触屏补开预览层"已按用户拍板的 A1 删掉了（render.ts 的注释与
@@ -111,8 +121,8 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
       //   走同一个唯一出处 `platform/touch.ts`，不在 render.ts 再开一个注入口。
     } satisfies DeliverDeps);
 
-    if (kind === 'cancelled') return 'cancelled';
-    if (kind === null) {
+    if (out.kind === 'cancelled') return 'cancelled';
+    if (out.kind === null) {
       deps.onStatus('bad', COPY.exportFailUnknown, deps.failMs);
       return 'renderfail';
     }
@@ -120,14 +130,17 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
     //   就是 hideUploadStatus）。此前这里统一弹「图片已生成，可长按保存或下载」——
     //   那是老项目里不存在的文案，且弹在预览浮层**背后**，用户压根看不见，
     //   等于凭空多一次状态切换（预览层盖住提示条，关闭后又闪一下）。
-    if (kind === 'preview') return kind;
+    if (out.kind === 'preview') return out.kind;
     // 🔴🔴 触屏上剪贴板档不能给「Ctrl+V」（手机没这个动作）。
     //   触屏判据与 dismissKeyboardForTouch 同一套，不用 UA sniff。
     // 🔴 顺带修一处**口径分裂**：文案分档与预览层补微信指引原先各写一遍
     //   matchMedia 字面量，而 `isTouchDevice()` 那边还多一层 try/catch ——
     //   同一件事三处写法，matchMedia 缺失时行为不一致。统一走唯一出处。
-    deps.onStatus('ok', (isTouchDevice() ? COPY.exportOkMsgTouch : COPY.exportOkMsg)(kind), deps.okMs);
-    return kind;
+    // 🔴 第二参 albumSaved：相册存成了文案才敢指路"微信请从相册选图发送"，
+    //   没存成就不提相册（不许谎报）—— 判据 EXPORT-25 钉着这两句话。
+    const okMsg = isTouchDevice() ? COPY.exportOkMsgTouch : COPY.exportOkMsg;
+    deps.onStatus('ok', okMsg(out.kind, out.albumSaved), deps.okMs);
+    return out.kind;
   } catch (e) {
     // 🔴 SecurityError 是外链图片跨域的典型症状，必须说人话而不是回显英文
     const msg =

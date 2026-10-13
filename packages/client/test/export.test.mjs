@@ -126,10 +126,14 @@ test('EXPORT-07 🔴 交付阶梯顺序：原生桥 → 剪贴板 → 分享 →
   //   就等于永远走不到真正能写系统剪贴板的原生桥（用户报障：微信/小米笔记都粘不出）。
   //   🔴 想改回去的人先回答：壳内 `navigator.clipboard.write` 写图片的返回值
   //   到底有没有被 Chromium 用来区分"写成功了"？没有 —— 所以别改回去。
+  // 🔴 v3.2.3：返回从「裸 kind 字符串」改为对象（要多带一个 albumSaved），
+  //   所以这里找的是 `kind: '<k>'` 而不是 `return '<k>'` —— 钉的事实没变
+  //   （四档谁在前谁在后），只是字面形态随实现演进。判据取数方式随产物形态
+  //   演进，这是本项目的老纪律（v3.1.1 VVW-33 同款）。
   const order = ['native', 'clipboard', 'share', 'preview'];
   let last = -1;
   for (const k of order) {
-    const at = RENDER_SRC.indexOf(`return '${k}'`);
+    const at = RENDER_SRC.indexOf(`kind: '${k}'`);
     assert.ok(at > 0, `阶梯里缺 ${k}`);
     assert.ok(at > last, `${k} 的位置不对（阶梯顺序变了）`);
     last = at;
@@ -156,10 +160,10 @@ test('EXPORT-08 🔴🔴 剪贴板必须走 Promise 形态（await 渲染就晚�
 test('EXPORT-09 🔴🔴 预览必须是最后一档且永不返回 null', () => {
   const fn = RENDER_SRC.slice(RENDER_SRC.indexOf('export async function deliverPng'));
   // 分享取消 → 'cancelled'，不是 null（用户主动取消不该被当成失败）
-  assert.match(fn, /AbortError[\s\S]{0,40}return 'cancelled'/, '用户取消分享未单列');
-  // 预览兜底在最后
-  const shareAt = fn.indexOf("return 'share'");
-  const previewAt = fn.indexOf("return 'preview'");
+  assert.match(fn, /AbortError[\s\S]{0,60}kind: 'cancelled'/, '用户取消分享未单列');
+  // 预览兜底在最后（同上：返回改对象后找 `kind:` 字面）
+  const shareAt = fn.indexOf("kind: 'share'");
+  const previewAt = fn.indexOf("kind: 'preview'");
   assert.ok(previewAt > shareAt, '预览必须在分享之后');
   assert.match(fn, /deps\.showPreview\(blob\)/, '预览兜底未接上');
 });
@@ -318,7 +322,7 @@ test('EXPORT-21 🔴🔴 原生壳必须先走原生桥，绝不许先试 WebVie
   {
     const clip = stubClipboard(async () => {}); // 会"成功"的假剪贴板 = 真机 WebView 的骗人形态
     let bridge = 0;
-    const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+    const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
       isNativeApp: true,
       blobToB64: async () => 'QUFB',
       nativeCopyImage: async () => { bridge++; return true; },
@@ -326,7 +330,7 @@ test('EXPORT-21 🔴🔴 原生壳必须先走原生桥，绝不许先试 WebVie
     });
     assert.equal(bridge, 1, '原生桥必须被调用');
     assert.equal(clip.writes, 0, '桥成功时不该再动剪贴板');
-    assert.equal(kind, 'native', '桥成功且验证通过应返回 native');
+    assert.equal(out.kind, 'native', '桥成功且验证通过应返回 native');
   }
 
   // ── 场景 B（🔴 真正有牙的一档）：桥**失败**时壳内也不许退回 WebView 剪贴板 ──
@@ -335,14 +339,14 @@ test('EXPORT-21 🔴🔴 原生壳必须先走原生桥，绝不许先试 WebVie
   {
     const clip = stubClipboard(async () => {});
     let previewed = 0;
-    const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+    const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
       isNativeApp: true,
       blobToB64: async () => 'QUFB',
       nativeCopyImage: async () => false,
       showPreview: () => { previewed++; },
     });
     assert.equal(clip.writes, 0, '🔴 原生壳里不许调 WebView 剪贴板（它在壳内会静默丢弃却 resolve）');
-    assert.notEqual(kind, 'clipboard', '🔴 桥失败时不许靠假成功的剪贴板档收场');
+    assert.notEqual(out.kind, 'clipboard', '🔴 桥失败时不许靠假成功的剪贴板档收场');
     assert.equal(previewed, 1, '桥失败后必须落到可见出口（预览层）');
   }
 });
@@ -352,14 +356,14 @@ test('EXPORT-22 🔴🔴 原生桥写完必须读回验证；验证为空不许�
   stubClipboard(async () => {});
   let previewed = 0;
   // 桥回报成功，但系统剪贴板读回来是空的（＝真机上最可能出现的"谎报"形状）
-  const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+  const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
     isNativeApp: true,
     blobToB64: async () => 'QUFB',
     nativeCopyImage: async () => true,
     verifyClipboardImage: async () => false,
     showPreview: () => { previewed++; },
   });
-  assert.notEqual(kind, 'native', '🔴 验证为空时不许回报 native（那等于对用户谎报"已复制"）');
+  assert.notEqual(out.kind, 'native', '🔴 验证为空时不许回报 native（那等于对用户谎报"已复制"）');
   assert.equal(previewed, 1, '验证落空后必须落到可见出口（预览层）');
 });
 
@@ -367,15 +371,98 @@ test('EXPORT-23 🔴 非原生（浏览器）仍是剪贴板优先，且原生�
   const { deliverPng } = await import('../src/export/render.ts');
   const clip = stubClipboard(async () => {});
   let bridge = 0;
-  const kind = await deliverPng(Promise.resolve(new Blob(['png'])), {
+  const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
     isNativeApp: false,
     blobToB64: async () => 'QUFB',
     nativeCopyImage: async () => { bridge++; return true; },
     showPreview: () => {},
   });
-  assert.equal(kind, 'clipboard', '浏览器里仍是剪贴板档收场');
+  assert.equal(out.kind, 'clipboard', '浏览器里仍是剪贴板档收场');
   assert.equal(bridge, 0, '非原生壳不该走原生桥');
   assert.equal(clip.writes, 1, '浏览器里必须真的调用一次剪贴板');
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * EXPORT-X：复制成功之后，微信那条路怎么办（用户报障，2026-10-13 第二轮）
+ *
+ * 用户原话：「复制到小米自带的笔记 APP 是可以的；复制到微信好像没反应。
+ *   老版本 NoteSync 出现过同样的问题，看看当时是怎么处理的。」
+ *
+ * 🔴🔴 查证结论（不是猜）：
+ *   1. **微信 Android 不支持从剪贴板粘贴图片** —— 多来源一致，第三方实测
+ *      （三星平板同款问题）给出的可行路径就是「先存相册，再从微信相册选图」。
+ *      这是微信自己的输入实现，网页/原生桥都改不掉。
+ *   2. 老项目当年"修复好了"的真相：老项目 index.html:2908 注释自己写着
+ *      「Android WebView 对图片写剪贴板长期不可用」⇒ 它判定小米机上
+ *      **落不到剪贴板档**，于是用户进微信走的是后面的分享面板 / 预览层
+ *      长按转发。bj 现在真把图片写进剪贴板了（小米笔记确实能粘），
+ *      反而停在了微信不认的那一档 —— 剪贴板成功 ≠ 用户能把它送进微信。
+ *
+ * ⇒ 修法：复制成功之后**顺手存一份到系统相册**（已有 ImgSave 桥，零新权限），
+ *   提示语指路「微信请从相册选图发送」。剪贴板语义一分不变（小米笔记照旧）。
+ *
+ * 🔴 文案必须按相册结果分档：存成了才敢提"相册"；没存成绝不许提
+ *   （相册里根本没有图，提了就是谎报——全项目同一条纪律）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('EXPORT-24 🔴🔴 壳内复制成功必须顺手存一份相册（微信不认剪贴板图片）', async () => {
+  const { deliverPng } = await import('../src/export/render.ts');
+  stubClipboard(async () => {});
+  const saves = [];
+  let b64calls = 0;
+  const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
+    isNativeApp: true,
+    blobToB64: async () => { b64calls++; return 'QUFB'; },
+    nativeCopyImage: async () => true,
+    saveToAlbum: async (b64, mime) => { saves.push([b64, mime]); return true; },
+    showPreview: () => {},
+  });
+  assert.equal(out.kind, 'native', '复制仍应回报 native');
+  assert.equal(saves.length, 1, '🔴 复制成功后必须尝试存相册（否则微信那条路是死的）');
+  assert.equal(saves[0][0], 'QUFB', '存进相册的就是剪贴板那一张');
+  assert.equal(saves[0][1], 'image/png', '相册存的是 PNG');
+  assert.equal(out.albumSaved, true, '存成必须如实回报');
+  assert.equal(b64calls, 1, 'base64 只转换一次（剪贴板与相册共用同一份）');
+});
+
+test('EXPORT-25 🔴🔴 文案按相册结果分档：存成了指路微信，没存成不许提相册', async () => {
+  const { COPY } = await import('../src/ui/copy.ts');
+  // 存成：必须同时点名"相册"和"微信" —— 用户要的是能进微信，不提等于没修
+  const withAlbum = COPY.exportOkMsg('native', true);
+  assert.match(withAlbum, /相册/, '存成相册却不在文案里指路 = 用户不知道微信能走相册');
+  assert.match(withAlbum, /微信/, '文案必须点名微信');
+  const withAlbumTouch = COPY.exportOkMsgTouch('native', true);
+  assert.match(withAlbumTouch, /相册/, '触屏版同样要指路');
+  assert.match(withAlbumTouch, /微信/, '触屏版同样要点名微信');
+  // 没存成：绝不许提"相册"（相册里没有图，提了就是谎报）
+  assert.doesNotMatch(COPY.exportOkMsg('native', false), /相册/, '相册没存成却提相册 = 谎报');
+  assert.doesNotMatch(COPY.exportOkMsgTouch('native', false), /相册/, '触屏版同规');
+  // 没存成时至少保住老项目原句（小米笔记等仍可粘贴）
+  assert.match(COPY.exportOkMsg('native', false), /可直接粘贴/, '相册没存成时不许丢掉老项目原句');
+  // 其它档位文案不受影响（EXPORT-14 的逐字对齐仍在）
+  assert.match(COPY.exportOkMsg('clipboard', false), /已复制，可直接 Ctrl\+V 粘贴/);
+  assert.match(COPY.exportOkMsg('share', false), /已通过系统分享发出/);
+});
+
+test('EXPORT-26 🔴 相册桥缺失/抛错/失败都不许把导出搞坏', async () => {
+  const { deliverPng } = await import('../src/export/render.ts');
+  const cases = [
+    ['桥缺失', undefined],
+    ['桥回报失败', async () => false],
+    ['桥抛错', async () => { throw new Error('boom'); }],
+  ];
+  for (const [label, save] of cases) {
+    stubClipboard(async () => {});
+    const out = await deliverPng(Promise.resolve(new Blob(['png'])), {
+      isNativeApp: true,
+      blobToB64: async () => 'QUFB',
+      nativeCopyImage: async () => true,
+      saveToAlbum: save,
+      showPreview: () => {},
+    });
+    assert.equal(out.kind, 'native', `${label}：复制本身仍是成功的`);
+    assert.equal(out.albumSaved, false, `${label}：albumSaved 必须如实为 false`);
+  }
 });
 
 test('EXPORT-20 🔴 gitignore 不得把静态资源源目录排除掉', () => {

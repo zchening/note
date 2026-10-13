@@ -140,6 +140,26 @@ export async function renderCardToPng(wrap: HTMLElement): Promise<Blob> {
 /** 交付方式。调用方据此决定提示文案。 */
 export type DeliverKind = 'clipboard' | 'native' | 'share' | 'preview';
 
+/**
+ * 交付结果。
+ *
+ * 🔴 v3.2.3 起从「裸 kind 字符串」改成对象，原因：**壳内复制成功后还有第二件事
+ *   （顺手存一份到相册），而它的成败必须能被调用方看见**。
+ *   早先只有 kind，调用方无法知道相册存没存成 ⇒ 要么谎报"请从相册选图"，
+ *   要么放弃相册这条路。把事实放在返回值里，而不是藏在副作用/文案里。
+ */
+export interface DeliverOutcome {
+  kind: DeliverKind | 'cancelled' | null;
+  /**
+   * 壳内：同一张图是否也存进了系统相册。仅 `kind === 'native'` 时有意义。
+   *
+   * 🔴 false 的三种来源（桥缺失 / 桥回报失败 / 桥抛错）都**不是失败** ——
+   *   复制本身已经成功，只是微信那条"从相册选图"的路没铺上。调用方据此
+   *   决定文案提不提"相册"，**绝不许在没存成时说相册里有图**。
+   */
+  albumSaved: boolean;
+}
+
 export interface DeliverDeps {
   /**
    * 原生桥（Android）。S8 注入；Web 下为 undefined。
@@ -169,6 +189,20 @@ export interface DeliverDeps {
    *   **不** satisfies `verifyClipboardImage?: T`。
    */
   verifyClipboardImage?: (() => Promise<boolean>) | undefined;
+  /**
+   * 把同一张图再存一份进系统相册（壳内；Web 下 undefined）。
+   *
+   * 🔴🔴 为什么复制成功还要存相册（2026-10-13 用户第二轮报障）：
+   *   **微信 Android 不支持从剪贴板粘贴图片**（多来源一致，第三方实测的
+   *   可行路径就是「先存相册 → 微信相册选图」）。这是微信自己的输入实现，
+   *   剪贴板写得再对也改不掉。而"复制到剪贴板"这个按钮对微信就是死路。
+   *   ⇒ 复制成功之后顺手存一份相册，提示语指路，用户才真能把图送进微信。
+   *   剪贴板语义一分不变（小米自带笔记等照旧能粘）。
+   *
+   * 🔴 **复用剪贴板那一份 base64**，不要为了存相册再转一次（长图 base64
+   *   可能上 MB，两次 FileReader 是白烧 CPU；判据 EXPORT-24 钉着）。
+   */
+  saveToAlbum?: ((base64: string, mime: string) => Promise<boolean>) | undefined;
   // 🔴🔴 这里**曾经**还有一个 `isTouch` 字段，是"剪贴板成功后给触屏补开预览层"那套
   //   逻辑的注入口（用户报障第 4 条，2026-10-07 用户拍板 A1 删除）。
   //   那个逻辑删掉后它零消费者，是个会骗人的死字段 —— 留着的话，下一个人会以为
@@ -197,7 +231,7 @@ export interface DeliverDeps {
  * @returns 实际生效的那一档；用户主动取消分享返回 'cancelled'。
  * @returns 全部失败返回 null（调用方必须给可见失败提示）。
  */
-export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promise<DeliverKind | 'cancelled' | null> {
+export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promise<DeliverOutcome> {
   let clipTried = false;
   // 防 unhandledrejection：回退路径可能先返回，blobP 的 rejection 无人消费
   blobP.catch(() => {});
@@ -217,10 +251,24 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     }
     if (b) {
       try {
-        if (await deps.nativeCopyImage(await deps.blobToB64(b), 'image/png')) {
+        const b64 = await deps.blobToB64(b);
+        if (await deps.nativeCopyImage(b64, 'image/png')) {
           // 🔴 验证器缺失（旧 APK）或读不回来 ⇒ 无法证伪 ⇒ 信任桥的 ok
           const v = deps.verifyClipboardImage;
-          if (!v || (await v()) !== false) return 'native';
+          if (!v || (await v()) !== false) {
+            // 🔴🔴 微信 Android 不支持粘贴剪贴板图片 ⇒ 顺手存一份相册，
+            //   给用户一条真能用的路。存不成**不影响**这次复制已经成功，
+            //   只是 albumSaved=false，调用方文案里不提"相册"（不许谎报）。
+            let album = false;
+            if (deps.saveToAlbum) {
+              try {
+                album = (await deps.saveToAlbum(b64, 'image/png')) === true;
+              } catch {
+                album = false;
+              }
+            }
+            return { kind: 'native', albumSaved: album };
+          }
           // 验证为空：系统剪贴板里没有图 ⇒ 继续往下走，绝不谎报
         }
       } catch {
@@ -243,7 +291,7 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     ) {
       clipTried = true;
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]);
-      return 'clipboard';
+      return { kind: 'clipboard', albumSaved: false };
     }
   } catch {
     /* 被拒/超时/不支持 → 继续往下 */
@@ -257,14 +305,14 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
     renderErr = e instanceof Error ? e : new Error('渲染异常');
   }
   if (renderErr) throw renderErr;
-  if (!blob) return null;
+  if (!blob) return { kind: null, albumSaved: false };
 
   // ② 之二 Promise 形态被个别旧内核拒（只认 Blob）→ 渲染完成后用 Blob 再试一次，
   //   保住桌面「复制」语义。这必须在**非原生**下做（壳内剪贴板会假成功）。
   if (clipTried && !deps.isNativeApp) {
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      return 'clipboard';
+      return { kind: 'clipboard', albumSaved: false };
     } catch {
       /* 仍被拒（手势过期等）→ 继续 */
     }
@@ -279,16 +327,16 @@ export async function deliverPng(blobP: Promise<Blob>, deps: DeliverDeps): Promi
       typeof navigator.share === 'function'
     ) {
       await navigator.share({ files: [file] });
-      return 'share';
+      return { kind: 'share', albumSaved: false };
     }
   } catch (e) {
     // 用户主动取消分享：静默收场，不该弹"失败"
-    if (e instanceof Error && e.name === 'AbortError') return 'cancelled';
+    if (e instanceof Error && e.name === 'AbortError') return { kind: 'cancelled', albumSaved: false };
   }
 
   // ④ 全屏预览：唯一不依赖任何权限的出口，必须永远存在
   deps.showPreview(blob);
-  return 'preview';
+  return { kind: 'preview', albumSaved: false };
 }
 
 /** Blob → base64（去 data: 前缀）。 */

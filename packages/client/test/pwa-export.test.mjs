@@ -311,10 +311,13 @@ test('EXP-W02b 🔴🔴 A1：剪贴板档成功后**零后续动作**（老项�
     /openTouchPreviewOnClipboard/,
     '🔴 剪贴板成功后不许再开预览层（openTouchPreviewOnClipboard 必须整个删掉）',
   );
-  // 🔴 两个剪贴板档的 return 之前都只剩 `return 'clipboard'`，中间不许夹任何调用。
-  //   用"剪贴板成功分支里最后一次 return 'clipboard' 之前不许出现 showPreview"来钉，
+  // 🔴 两个剪贴板档的 return 之前都只剩收场 return，中间不许夹任何调用。
+  //   用"剪贴板成功分支里最后一次 return 之前不许出现 showPreview"来钉，
   //   比逐个函数体切片更抗改写（判据纪律：钉行为，不钉命名）。
-  const retIdx = [...renderCode.matchAll(/return 'clipboard';/g)].map((m) => m.index);
+  // 🔴 v3.2.3：返回从裸字符串改成对象（要多带 albumSaved），所以这里匹配的是
+  //   `return { kind: 'clipboard', albumSaved: false };` —— 钉的事实没变
+  //   （仍是两处、且之前不许有 showPreview），只是字面随形态演进。
+  const retIdx = [...renderCode.matchAll(/return \{ kind: 'clipboard', albumSaved: false \};/g)].map((m) => m.index);
   assert.equal(retIdx.length, 2, '应有两处剪贴板成功收场（Promise 形态 + Blob 重试），实际 ' + retIdx.length);
   for (const i of retIdx) {
     const win = renderCode.slice(Math.max(0, i - 400), i);
@@ -327,7 +330,7 @@ test('EXP-W02b 🔴🔴 A1：剪贴板档成功后**零后续动作**（老项�
   // 🔴 反向闸 A：第⑤档全屏预览兜底必须**仍然存在**（剪贴板全拒时它是唯一出口，
   //   删掉它等于把"导不出图"变成"什么都拿不到"）。
   assert.match(renderCode, /deps\.showPreview\(blob\);/, '第⑤档全屏预览兜底必须保留');
-  assert.match(renderCode, /return 'preview';/, '第⑤档必须仍返回 preview');
+  assert.match(renderCode, /return \{ kind: 'preview', albumSaved: false \};/, '第⑤档必须仍返回 preview');
   // 🔴 反向闸 B：DeliverDeps 的 isTouch 注入口必须一并删掉。
   //   那个字段是"触屏补开预览层"的唯一入口；逻辑删了字段留着就是死字段，
   //   而死字段会骗下一个人以为"触屏还有地方需要平台分支"，从而把行为原样写回来。

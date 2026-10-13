@@ -722,10 +722,18 @@ export const COPY = {
    *      少了「Ctrl+V」。这是最常走的一档（PC 浏览器点复制就落这里）。
    *    - 只有 App 原生桥那档是「图片已复制，可直接粘贴」（触屏没有 Ctrl+V 这个动作）。
    *    - 分享档「已通过系统分享发出」，预览档老项目**根本不给提示条**
-   *      （showImagePreview 第一行就是 hideUploadStatus，见 index.html:2967）。 */
-  exportOkMsg: (kind: string): string =>
+   *      （showImagePreview 第一行就是 hideUploadStatus，见 index.html:2967）。
+   *
+   * 🔴 v3.2.3 第二参 `albumSaved`（同一张图是否也存进了相册）：
+   *   **微信 Android 不支持从剪贴板粘贴图片**（多来源一致，第三方实测的
+   *   可行路径是「先存相册 → 微信相册选图」）⇒ 壳内复制成功后会顺手存
+   *   一份相册。存成才敢在文案里提"相册"，没存成绝不许提 ——
+   *   相册里没有图，提了就是谎报（同上面那条纪律）。 */
+  exportOkMsg: (kind: string, albumSaved?: boolean): string =>
     kind === 'native'
-      ? '图片已复制，可直接粘贴'
+      ? albumSaved === true
+        ? '已复制到剪贴板；微信请从相册选图发送'
+        : '图片已复制，可直接粘贴'
       : kind === 'share'
         ? '已通过系统分享发出'
         : '图片已复制，可直接 Ctrl+V 粘贴',
@@ -744,10 +752,15 @@ export const COPY = {
    *
    *   代价明说：在"剪贴板成功但微信不接受剪贴板图片"的内核上，
    *   用户确实进不去微信。老项目同样如此（它压根没这段分流），这不是新缺陷。
-   */
-  exportOkMsgTouch: (kind: string): string =>
+   *
+   *   🔴 v3.2.3 这条"代价"**已经修掉了**：微信不认剪贴板图片，那就再存一份
+   *     相册（`albumSaved`），文案指路「微信请从相册选图发送」。存成才敢提
+   *     相册，没存成退回上面那句老项目原话，绝不谎报。 */
+  exportOkMsgTouch: (kind: string, albumSaved?: boolean): string =>
     kind === 'native'
-      ? '图片已复制，可直接粘贴'
+      ? albumSaved === true
+        ? '已复制到剪贴板；微信请从相册选图发送'
+        : '图片已复制，可直接粘贴'
       : kind === 'share'
         ? '已通过系统分享发出'
         : '图片已复制，可直接粘贴',
