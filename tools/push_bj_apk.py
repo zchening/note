@@ -200,7 +200,16 @@ def main():
     remote_json = REMOTE_DEPLOY + r"\latest_app.json"
     ssh_run('if exist "%s" copy /y "%s" "%s.bak_%s" >nul' % (remote_json, remote_json, remote_json, str(int(time.time()))))
     print("[srv] 落 deploy/latest_app.json …")
-    scp_put(meta_local, remote_json)
+    # 🔴🔴 **必须原子替换**（v3.2.4 实栽，2026-10-13）：scp 直写目标文件 =
+    #   truncate + 流式写入，窗口期内 /api/latest 会读到**半截 JSON** ⇒
+    #   客户端 parseLatest 判 bad-json ⇒ 撞上这个几秒窗口的用户点「检查更新」
+    #   报「检查失败，稍后再试」（deploy 完成后一切正常，极难复现）。
+    #   修法：先传**同目录**临时名（同卷 move 才是真 rename，跨盘是拷贝），
+    #   再 `move /y` 原子替换 —— 客户端任何时刻读到的要么是旧版完整 JSON、
+    #   要么是新版完整 JSON，不存在中间态。
+    remote_json_tmp = REMOTE_DEPLOY + r"\latest_app.json.incoming"
+    scp_put(meta_local, remote_json_tmp)
+    ssh_run('move /y "%s" "%s" >nul' % (remote_json_tmp, remote_json))
 
     # ===== 线上校验（不查就等于没发布）=====
     # 🔴🔴 校验必须**断言**，不能只 print 状态码 —— 只打印的话，"校验"这一步
