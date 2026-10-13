@@ -69,6 +69,56 @@ declare global {
 let loadPromise: Promise<boolean> | null = null;
 
 /**
+ * 🔴 v3.2.4：空闲时预拉 html2canvas（198KB），消掉"点导出才下载"的那一次等待。
+ *
+ * 动机（用户报障「生成图片的时间太长了」）：老项目 index.html:2877 有
+ * `prefetchHtml2CanvasIdle` —— 页面一空闲就把导出组件拉好，所以点导出是热的。
+ * bj 只给扫码做了同款预热（`prefetchJsQrIdle`，v1.12.0，用户报障
+ * 「老版本扫描识别更快」的根因之一），**导出这条一次都没预热**：
+ * `loadHtml2Canvas` 只在用户点「导出为图片并复制」时才被调，
+ * 于是冷启动后的第一次导出，第一件事就是等一个 198KB 的脚本网络往返 ——
+ * 移动端几百毫秒到一秒，而这期间屏幕**没有任何反馈**（见 export/index.ts
+ * 里那条"提示条必须先于加载"的修正）。
+ *
+ * 🔴 为什么是幂等且不阻塞的（与 prefetchJsQrIdle 逐条同款）：
+ *   · 复用 `loadHtml2Canvas`，它自带 in-flight 去重（loadPromise）
+ *     ⇒ 预热与用户真点导出并发不会拉两次。
+ *   · `requestIdleCallback` 带 timeout 兜底 —— 移动内核（尤其国产 WebView）
+ *     可能压根不调 rIC，只靠它会永远不预热。
+ *   · 两道保险（rIC + setTimeout）重复调用同 URL 无害，loadPromise 去重。
+ *   · 失败不重试也不打印：预热是**可选优化**，失败只意味着回到"导出时再拉"，
+ *     而那时 `loadHtml2Canvas` 自己会打日志（onerror 那条）。
+ *     这里再打一遍就是同一条原因刷两行日志，干扰真排查。
+ *
+ * 🔴 顺序陷阱：老项目的 `setTimeout(go, 8000)` 放在 rIC **之后**，
+ *   这里照抄同一顺序（prefetchJsQrIdle 同款）—— 两次调用的结果由
+ *   `loadHtml2Canvas` 内部去重兜住，换顺序不会出错，但保持一致便于对照。
+ *
+ * 🔴 不在 Node 侧直接调用（`typeof window` 守卫）：本文件被单测直接 import，
+ *   无 window 环境时立刻返回，不能碰 document。
+ */
+export function prefetchHtml2CanvasIdle(src = '/html2canvas.min.js'): void {
+  if (typeof window === 'undefined') return;
+  const go = (): void => {
+    try {
+      void loadHtml2Canvas(src).catch(() => {});
+    } catch {
+      /* 预热失败静默：导出时那次调用自己会报 */
+    }
+  };
+  try {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(go, { timeout: 4000 });
+    } else {
+      setTimeout(go, 3000);
+    }
+    setTimeout(go, 8000); // 移动内核 rIC 可能不来：双保险，重复调用同 URL 去重无害
+  } catch {
+    go();
+  }
+}
+
+/**
  * 懒加载同源 html2canvas。
  *
  * 🔴🔴 绝不能挂公共 CDN（老项目 v7.5.1 血泪）：jsdelivr 在大陆常不可达，

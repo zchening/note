@@ -525,7 +525,11 @@ test('DIAG-08e 遮罩只点空白处才关（无条件关会把刚打开的面�
   const c = cleanKeepStr(PANEL_SRC);
   const m = /mask\.onclick = \(e\) => \{[\s\S]*?\n {2}\};\n/.exec(c);
   assert.ok(m, '应能找到 mask.onclick');
-  assert.match(m[0], /if \(e\.target === mask\) close\(\)/, '必须判 e.target === mask（老项目 :8244）');
+  // 🔴 v3.2.4 起关闭条件多一道输入宽限期（DIAG-18），所以不再要求逐字等于
+  //   `if (e.target === mask) close()`；但 `e.target === mask` 这个判来源的
+  //   前提仍然是承重的 —— 少了它，"点按钮时事件冒泡到遮罩"就会把面板秒关。
+  assert.match(m[0], /e\.target === mask/, '必须判 e.target === mask（老项目 :8244）');
+  assert.match(m[0], /close\(\)/, '判中之后必须 close()');
 });
 
 test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真机报障：滑日志看关键事件段被秒关）', () => {
@@ -539,6 +543,50 @@ test('DIAG-08f 🔴🔴 模态内容区自身的滚动不得关闭面板（真�
   assert.match(m[0], /e\.target/, '必须读 e.target 判定滚动来源');
   assert.match(m[0], /mask\.contains\(/,
     '滚动目标在模态内（pre.diag-pre 滑日志）必须忽略——只有模态之外的滚动（滚笔记正文）才关');
+});
+
+/* ============ DIAG-15 按钮顺序（用户报障：复制/分享导出两个按钮位置互换） ============ */
+
+test('DIAG-17 🔴🔴 复制按钮必须排在导出按钮之前（用户报障第 2 条：两个按钮位置互换）', () => {
+  // 用户原话：「诊断报告上面有两个按钮，一个是复制什么的，一个是分享什么的，
+  // 你把这两个按钮的位置给我换一换。」⇒ copyBtn 在前、exportBtn 在后。
+  const c = cleanKeepStr(PANEL_SRC);
+  const m = /box\.append\(([^)]*)\)/.exec(c);
+  assert.ok(m, '必须找到 box.append(...)');
+  const args = m[1].split(',').map((s) => s.trim());
+  const ci = args.indexOf('copyBtn');
+  const ei = args.indexOf('exportBtn');
+  assert.ok(ci >= 0 && ei >= 0, `append 参数里必须同时有 copyBtn 与 exportBtn，实际：${m[1]}`);
+  assert.ok(ci < ei, `复制按钮必须排在导出按钮之前（copyBtn@${ci} vs exportBtn@${ei}）`);
+});
+
+/* ============ DIAG-16 打开后的输入宽限期（用户报障第 1 条：连点 4 下诊断弹窗不出现） ============ */
+
+test('DIAG-18 🔴🔴 打开模态后必须有输入宽限期（连点是同一个手势，第 5 下补点会秒关弹窗）', () => {
+  // 🔴🔴 真机实锤（用户报障第 1 条「点 4 下关于标题，诊断弹窗不出现」）：
+  //   4 连点命中时用户的手指往往还悬在屏幕上，第 5 下「是不是没点上」的补点
+  //   在 ~150-400ms 后落在刚展开的 #diagMask 空白处 → mask.onclick 的
+  //   `e.target === mask` 分支把面板秒关；而这整个动作发生在 `.box` 的
+  //   nsRise 入场动画（.5s）结束之前，用户**根本没见过那个弹窗**。
+  //   同类噪声还有真机的 incidental scroll（软键盘收起 / 视口变化 /
+  //   手指微小拖动都被 Chromium 算成 scroll 事件），同样经 onScroll 秒关。
+  // ⇒ 两条关闭路径都必须过同一道宽限期闸。
+  const c = cleanKeepStr(PANEL_SRC);
+  // ① 宽限常量必须存在，且是个有名字的数字（不能是散落的魔法数）
+  assert.match(c, /DIAG_INPUT_GRACE_MS\s*=\s*\d+/, '必须定义 DIAG_INPUT_GRACE_MS 常量');
+  const ms = Number(/DIAG_INPUT_GRACE_MS\s*=\s*(\d+)/.exec(c)[1]);
+  assert.ok(ms >= 500,
+    `宽限期必须长于 .box 的 nsRise 入场动画（500ms），否则弹窗还没被看见就可能被关：${ms}`);
+  // ② open() 必须记下打开时刻（否则宽限期无从算起）
+  assert.match(c, /openedAt\s*=/, 'open() 必须记录打开时刻 openedAt');
+  // ③ 遮罩空白点击必须过宽限期
+  const mm = /mask\.onclick = \(e\) => \{[\s\S]*?\n {2}\};\n/.exec(c);
+  assert.ok(mm, '应能找到 mask.onclick');
+  assert.match(mm[0], /inInputGrace\(\)/, 'mask.onclick 的关闭必须过输入宽限期');
+  // ④ modal 外 scroll 必须过宽限期
+  const sm = /const onScroll = \(e[^)]*\): void => \{[\s\S]*?\n {2}\};\n/.exec(c);
+  assert.ok(sm, '应能找到 onScroll');
+  assert.match(sm[0], /inInputGrace\(\)/, 'onScroll 的关闭必须过输入宽限期');
 });
 
 /* ============ DIAG-14 导出/分享 .txt 文件（v3.1.3 剪贴板不全 / v3.1.4 原生桥 / v3.1.5 分享面板） ============ */

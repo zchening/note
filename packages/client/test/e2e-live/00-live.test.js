@@ -116,6 +116,17 @@ async function s01() {
   // 🔴 关键：新项目 CSP 里**不该**有 cdn.jsdelivr.net。
   //   本地 e2e 测不到响应头，只有打真域名能抓到"清单忘改"这类漏。
   assert.ok(!csp.includes('jsdelivr'), 'CSP 不该放行 jsdelivr（新项目全自托管）');
+  // 🔴🔴🔴 v3.2.4：img-src 必须放行图床投递域名 res.cloudinary.com。
+  //   用户报障「上传成功、图片却是一条横线」的真因就是它不在 img-src 里：
+  //   上传走 connect-src 的 https:（过得去），图片本身被挡死 ⇒ `<img>`
+  //   加载失败 ⇒ 零高度 + 1px 边框。**本地 e2e 发现不了这一类**（harness
+  //   不起 Node 服务、不发 CSP），只有打真域名能抓。
+  //   🔴 同时防 Caddy 层又叠一份过期 CSP：多份 CSP 头按**交集**生效，
+  //     历史上正是过期头把 app.css 整页挡死（v3.1.5 事故）。
+  assert.ok(
+    /(?:^|; )img-src [^;]*res\.cloudinary\.com/.test(csp),
+    'img-src 必须放行 res.cloudinary.com（笔记内图片就是图床 secure_url）。实际 CSP：' + csp,
+  );
   // 🔴 nosniff 由 Node 服务端发（server.js 的 send / serveStatic），
   //   Caddy 侧刻意不写 —— 两层都发时浏览器收到 "nosniff, nosniff"。
   //   判据是"值恰好等于 nosniff"而不是"含 nosniff"：

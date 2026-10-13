@@ -468,4 +468,67 @@ test('SCAN-E 扫码配对全链路', async (t) => {
       await page.close();
     }
   });
+
+  await t.test('SCAN-E08 \u{1f534}\u{1f534}\u{1f534} 扫码落地后「已扫码解锁，正在打开笔记」必须过几秒自动消失', async () => {
+    // \u{1f534} 用户报障（v3.2.3 真机）：「打开笔记之后，这条提示过几秒钟帮我消掉，
+    //    不要一直显示在那里。」两个落地入口（扫码 handleScanRaw / #p= 直链
+    //    landPairFragment）都曾用 showUploadNote('doing', \u2026, 0) 挂它，
+    //    而 0 的语义是**常驻** \u2192 笔记早已打开、用户开始打字，底部还挂着这句。
+    //
+    // \u{1f534} 为什么必须走 __NOTESYNC_SCAN_RAW__：它是喂一条扫码结果进
+    //    **生产落地链路**的正式接口（main.ts 注释：headless 没摄像头，
+    //    不给钩子就只能直接调内部函数，判的就是另一条路）。
+    const page = await openEditor(browser, h.baseUrl(), 'scanland', PASS);
+    const errs = [];
+    page.on('pageerror', (e) => errs.push(String(e.message)));
+    try {
+      const origin = await page.evaluate(() => location.origin);
+      // 口令由页面外注入：它不进 evaluate 的返回值，也不进测试输出。
+      // 🔴 编码必须与生产 b64UrlEncode（scan/pair-link.ts:49）逐字同款：
+      //   UTF-8 字节 → 二进制串 → btoa → base64url。口令是中文，裸 btoa 会抛
+      //   InvalidCharacterError；而"编码错了"不会静默通过 —— 落地根本不会发生，
+      //   下面的 ① 会先红。
+      const b64url = (s) =>
+        Buffer.from(s, 'utf8')
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+      const raw = `${origin}/scanland#p=${b64url(PASS)}`;
+      // 自证编码与生产一致：喂回去必须解得开，且篇名/口令长度对得上
+      // （与 SCAN-E03 同款纪律：不手写第二份解析，只用生产解析器验往返）
+      const shape = await page.evaluate((r) => window.__NOTESYNC_PARSE_PAIR__(r), raw);
+      assert.equal(shape.ok, true, `配对链接必须能被生产解析器解开：${JSON.stringify(shape)}`);
+      assert.equal(shape.noteId, 'scanland');
+      assert.equal(shape.passLen, PASS.length, '口令长度应与建篇口令一致');
+
+      await page.evaluate((r) => window.__NOTESYNC_SCAN_RAW__(r), raw);
+
+      // ① 落地提示必须出现过（内容逐字），且编辑器确实挂上了
+      await withTimeout(
+        page.waitForFunction(
+          () => document.querySelector('#uploadNote')?.textContent === '已扫码解锁，正在打开笔记',
+          { timeout: 10_000 },
+        ),
+        12_000,
+        '扫码落地后应出现「已扫码解锁，正在打开笔记」',
+      );
+      await withTimeout(
+        page.waitForFunction(() => !!window.__NOTESYNC_EDITOR__, { timeout: 10_000 }),
+        12_000,
+        '扫码落地后编辑器应挂上',
+      );
+
+      // ② 关键：它必须**自己消失**。\u{1f534} 只等"出现"会发现不了常驻缺陷 \u2014\u2014
+      //    那正是用户报障的形状（提示一直在，只是没人注意到它该走）。
+      await withTimeout(
+        page.waitForFunction(() => !document.getElementById('uploadNote'), { timeout: 8000 }),
+        10_000,
+        '落地提示必须在几秒内自动消失（v3.2.3 及以前传 0 = 常驻，用户报障）',
+      );
+      assert.deepEqual(errs, [], '扫码落地过程有页面错误');
+    } finally {
+      await page.close();
+    }
+  });
 });

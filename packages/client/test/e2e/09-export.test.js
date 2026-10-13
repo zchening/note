@@ -314,39 +314,23 @@ test('EXPORT-E 导出长图全链路', async (t) => {
 });
 
 /* ═══════════════════════════════════════════════════════════════════════
- * EXPORT-W：移动端「导出图片复制到微信」（用户报障第 5 条）
+ * EXPORT-M：移动端导出弹窗（用户报障第 4 条，2026-10-13 逐字拍板）
  *
- * 用户原话：「导出为图片并复制在 PC 端可以正常复制，在我的小米手机上
- * 可以正常复制到系统自带笔记app 里，但复制到微信会话框没反应。
- * 我记得之前老版本也出现过这个问题并且修复好了。」
- * 用户 2026-10-07 拍板核查方向：「移动浏览器访问」。
- *
- * ═══════════════════════════════════════════════════════════════════════
- * 🔴🔴🔴 先把"这是不是一个 bug"这件事查清楚，而不是先写代码
- *
- * 老项目的修法（index.html:2904-2958 v7.7.0逐字）是一条**五档交付阶梯**，
- * 每一档都还在 bj 里（export/render.ts:139deliverPng 同构）。
- * 老项目那条注释把移动端的机制说得很直白：
- *   「Android WebView 对图片写剪贴板长期不可用、`<a download>` 在壳内是哑弹」
- * ⇒ **老项目认定移动端落不到剪贴板档**，于是后面三档才是手机上真正生效的出口。
- *
- * 而用户的现象是「能复制到系统自带笔记 App」⇒ **剪贴板档在他手机上其实是成功的**
- *（系统笔记能读到剪贴板里的图）。可微信会话框不接受剪贴板里的图片
- *   —— 这是微信自己的输入实现（它只认相册/自己的媒体），不是网页能控制的。
- * ⇒ 于是阶梯停在第①档（clipboard）就 return 了，**永远到不了分享面板与预览层**，
- *   而用户真正需要的出口（分享面板直发微信 / 预览层长按转发）恰恰在后面。
- *
- * 🔴🔴 这就是"移动浏览器访问"这条链路的**真因**（已由下面的 EXPORT-W02 实测钉住）：
- *   剪贴板成功 ≠ 用户能把它送进微信，而阶梯把"成功"当成了终点。
- *
- * 修法（与老项目的差别，必须写清楚）：
- *   老项目假设"移动端剪贴板不可用"，所以没这个问题；
- *   bj 的用户实测"移动端剪贴板可用但没用"，所以必须给剪贴板档补一条**明示**：
- *   触屏上剪贴板成功时，**额外打开全屏预览层**，让"长按转发给微信"这条路真的存在。
- *   这不是推翻老项目阶梯 —— 阶梯顺序一分不变，只是在第①档之后**多开一个出口**。
+ * 演进史（改判据前必读，三段都是实测不是推理）：
+ *   · 第 5 条报障时代（v3.2.3 前）：触屏走复制阶梯，"剪贴板成功 ≠ 送得进微信"
+ *     —— 阶梯停在第①档，分享/预览永远轮不到。当时的修法是"剪贴板成功后
+ *     补开预览层"（A1 拍板又删，判据 EXPORT-W02 旧版）。
+ *   · v3.2.2/v3.2.3 实锤：壳内 WebView 写剪贴板图是**假成功**（Chromium
+ *     ClipboardImpl 静默丢弃），真写进去微信也不认（微信 Android 不支持
+ *     粘贴剪贴板图片）—— "复制"在移动端只剩小米笔记一个目的地。
+ *   · v3.2.4 用户逐字拍板第 4 条：PC 端保持"生成图片并复制到剪贴板"；
+ *     **移动端弹窗接管**——上预览图、下左「保存到相册」右「分享」（系统分享
+ *     组件，同诊断报告）、右上角叉可关、点其他位置/外围都不关。
+ *     ⇒ 触屏在渲染成功后分岔（exportNotePng 的 isTouchDevice 分支），
+ *       复制阶梯整体不再参与；判据从"阶梯怎么修"翻案为"弹窗怎么长"。
  * ═══════════════════════════════════════════════════════════════════════ */
 
-test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) => {
+test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
   const browser = h.browser();
 
   await t.test('EXPORT-W01 🔴 触屏上下文里`(hover:none) and (pointer:coarse)` 必须为真（否则下面全是空转）', async () => {
@@ -368,21 +352,24 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
     }
   });
 
-  await t.test('EXPORT-W02 🔴🔴🔴 触屏剪贴板成功后**不许**开预览层（A1：老项目零后续动作）', async () => {
+  await t.test('EXPORT-W02 🔴🔴🔴 触屏导出 = 弹窗接管，剪贴板零调用（v3.2.4 拍板：复制语义在移动端退场）', async () => {
+    // 🔴🔴 本条曾钉"触屏剪贴板成功后不许开预览层"（A1）。v3.2.4 用户逐字拍板
+    //   第 4 条后整个翻案：触屏渲染成功**根本不走复制阶梯**，弹窗接管
+    //   （壳内剪贴板写图是假成功 v3.2.2、微信又不认剪贴板图 v3.2.3 ——
+    //   "复制"在移动端只剩小米笔记一个目的地，用户要的是把图发出去）。
+    //   判据因此加强：不只是"成功后不开预览"，而是**剪贴板一次都不许被碰**。
     const page = await openEditorTouch(browser, h.baseUrl(), 'expW02', PASS);
     try {
       await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
       await page.tap('#editor-host');
-      await page.keyboard.type('导出到微信验证。');
+      await page.keyboard.type('导出弹窗接管验证。');
       await withTimeout(
         page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
         10_000, '等输入落真源',
       );
 
-      // 🔴🔴 装一个**会成功**的剪贴板替身 —— 这正是用户手机上的真实情况
-      //   （「可以正常复制到系统自带笔记app 里」⇒ 剪贴板档成功）。
-      //   🔴 替身必须**忠实于外部规范**、绝不能忠实于我们的实现（判据纪律）：
-      //   这里模拟的是 WebClipboard 接口的契约（write 接受 ClipboardItem[] 并 resolve）。
+      // 装一个**会成功**的剪贴板替身 —— 与用户真机同形态（小米笔记能粘）。
+      // 🔴 替身忠实于 WebClipboard 接口契约，不忠实于我们的实现（判据纪律）。
       await page.evaluate(() => {
         window.__W_CLIP_CALLS__ = [];
         Object.defineProperty(navigator, 'clipboard', {
@@ -400,33 +387,211 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
 
       await page.tap('#exportImgBtn');
 
-      // 前置自证：替身确实被调到了（否则"没开预览层"可能只是因为压根没走到剪贴板档）
+      // 触屏必须落到弹窗（不是预览、不是提示条收场）
       await withTimeout(
-        page.waitForFunction(() => (window.__W_CLIP_CALLS__ || []).length > 0, null, { timeout: 30_000 }),
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
         35_000,
-        '触屏剪贴板替身应被调用（前置自证）',
+        '触屏导出必须弹窗接管（复制语义已退场）',
       );
+      // 🔴🔴 核心判据：剪贴板**零调用**。若有人把复制阶梯接回触屏，
+      //   这个"会成功"的替身就会被调到 —— 弹窗照出但判据红。
       const clip = await page.evaluate(() => window.__W_CLIP_CALLS__);
-      assert.deepEqual(clip[0], [['image/png']], '剪贴板里必须装的是 PNG');
-
-      // 🔴🔴 再等一段足够长的时间，覆盖"渲染完成后才开预览层"那条路径
-      //   （被删掉的那段代码正是 await blobP 之后再 showPreview，渲染要好几秒）。
-      await new Promise((r) => setTimeout(r, 6000));
-
-      const st = await page.evaluate(() => ({
-        mask: document.getElementById('imgPreviewMask') !== null,
-        // 屏上也不该有离屏卡残留（导出 finally 会 dispose；这里钉"没有第二次可见出口"）
-        strayCards: document.querySelectorAll('.ns-export').length,
-      }));
-      // 🔴 核心判据：剪贴板成功之后**不许**盖预览层。
-      //   症状与用户原话一一对应：「导出图片并复制我希望体验还是和老版本一样，
-      //   不要现在这样下载什么的」—— 用户看到的是点了复制后屏上盖来一层带下载按钮的图。
+      assert.equal(clip.length, 0, '🔴 触屏导出绝不许碰剪贴板（假成功 + 微信不认），实际调用=' + JSON.stringify(clip));
       assert.equal(
-        st.mask,
-        false,
-        '🔴 触屏剪贴板成功后不许开预览层（老项目 index.html:2896-2963 剪贴板成功后直接 return）',
+        await page.evaluate(() => document.querySelectorAll('.ns-export').length),
+        0, '离屏导出卡必须已拆（老项目 v10.0.2 泄漏事故）',
       );
-      assert.equal(st.strayCards, 0, '离屏导出卡必须已拆（老项目 v10.0.2 泄漏事故）');
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-M01 🔴🔴 弹窗结构：预览图 data:URL + 右上角叉；无相册桥时保存按钮不显示；提示条已清', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expM01', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('弹窗结构验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '等弹窗',
+      );
+      const st = await page.evaluate(() => {
+        const img = document.querySelector('#exportModalMask img');
+        return {
+          hasImg: !!img,
+          imgIsData: img ? String(img.src).startsWith('data:image/png;base64,') : false,
+          hasX: !!document.getElementById('exportModalClose'),
+          // 🔴 网页触屏没有 ImgSave 桥 ⇒ 保存按钮必须隐藏（不给点了必失败的按钮）
+          hasSave: !!document.getElementById('exportModalSave'),
+          hasShare: !!document.getElementById('exportModalShare'),
+          // 🔴 弹窗盖着提示条（zIndex 40）⇒ doing 提示条必须已被清掉
+          doingNote: document.getElementById('uploadNote')?.textContent || '',
+          strayCards: document.querySelectorAll('.ns-export').length,
+        };
+      });
+      assert.equal(st.hasImg, true, '弹窗里没有预览图');
+      assert.equal(st.imgIsData, true, '预览图必须用 data: URL（壳内长按存图兜底；blob: 长按菜单不给保存）');
+      assert.equal(st.hasX, true, '缺右上角关闭叉');
+      assert.equal(st.hasSave, false, '无相册桥的环境不许显示「保存到相册」按钮');
+      assert.equal(st.hasShare, true, '「分享」按钮必须显示');
+      assert.notEqual(st.doingNote, '正在生成图片…', '弹窗打开后「正在生成图片…」提示条必须已被清掉');
+      assert.equal(st.strayCards, 0, '离屏卡必须已拆');
+
+      // ── 反向场景：模拟原生壳（Capacitor + ImgSave 桥）⇒ 按钮必须显示 ──
+      //   （e2e 上下文是纯净网页 isNativeApp=false；真壳里 main.ts 会注入
+      //   saveToAlbum。这里用替身走同一条真导出路径，钉"有桥时显示"。）
+      await page.evaluate(() => {
+        window.Capacitor = {
+          isNativePlatform: () => true,
+          Plugins: { ImgSave: { saveImage: async () => ({ ok: true }) } },
+        };
+      });
+      await page.tap('#exportModalClose');
+      await withTimeout(
+        page.waitForFunction(() => !document.getElementById('exportModalMask'), null, { timeout: 5000 }),
+        8_000, '关闭第一轮弹窗',
+      );
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '第二轮（模拟原生）等弹窗',
+      );
+      assert.equal(
+        await page.evaluate(() => !!document.getElementById('exportModalSave')),
+        true, '模拟原生（有 ImgSave 桥）时保存按钮必须显示（显隐必须真的随桥走）',
+      );
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-M02 🔴🔴 外围/弹窗内其他位置点击都不关；只有右上角叉能关（用户逐字拍板）', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expM02', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('弹窗关闭纪律验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '等弹窗',
+      );
+      // ① 外围（mask 空白区，box 外的角落）
+      await page.tap('#exportModalMask', { position: { x: 6, y: 6 } });
+      await page.waitForTimeout(300);
+      assert.equal(
+        await page.evaluate(() => !!document.getElementById('exportModalMask')),
+        true, '🔴 点外围不许关（用户原话「包括外围位置，都没法关闭」）',
+      );
+      // ② 弹窗内其他位置（预览图本身）
+      await page.tap('#exportModalMask img');
+      await page.waitForTimeout(300);
+      assert.equal(
+        await page.evaluate(() => !!document.getElementById('exportModalMask')),
+        true, '🔴 点弹窗内其他位置（预览图）不许关',
+      );
+      // ③ 右上角叉：唯一关闭出口
+      await page.tap('#exportModalClose');
+      await withTimeout(
+        page.waitForFunction(() => !document.getElementById('exportModalMask'), null, { timeout: 5000 }),
+        8_000, '点叉必须关闭弹窗',
+      );
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-M03 🔴🔴 分享走系统分享组件；用户在面板点取消必须静默（弹窗留着、无失败反馈）', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expM03', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('分享取消静默验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '等弹窗',
+      );
+      // mock 网页系统分享：记录调用 + 模拟用户在面板点取消（AbortError）
+      await page.evaluate(() => {
+        window.__SHARE_CALLS__ = [];
+        Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true });
+        Object.defineProperty(navigator, 'share', {
+          configurable: true,
+          value: async (d) => {
+            window.__SHARE_CALLS__.push(d.files.map((f) => f.type));
+            const err = new Error('user cancelled');
+            err.name = 'AbortError';
+            throw err;
+          },
+        });
+      });
+      await page.tap('#exportModalShare');
+      await withTimeout(
+        page.waitForFunction(() => (window.__SHARE_CALLS__ || []).length > 0, null, { timeout: 8000 }),
+        10_000, '系统分享组件应被调起（前置自证）',
+      );
+      const st = await page.evaluate(() => ({
+        files: window.__SHARE_CALLS__,
+        maskOpen: !!document.getElementById('exportModalMask'),
+        failNoteVisible: (() => {
+          const n = document.querySelector('#exportModalMask .diag-note');
+          return !!n && !n.hidden && /无法调起分享/.test(n.textContent || '');
+        })(),
+      }));
+      assert.deepEqual(st.files, [['image/png']], '分享的必须是 PNG 文件');
+      assert.equal(st.maskOpen, true, '取消分享后弹窗必须还在（用户可继续保存/再分享）');
+      assert.equal(st.failNoteVisible, false, '🔴 用户取消分享不许弹"失败"（取消不是失败，诊断分享同款口径）');
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-M04 🔴 分享不可用（无桥 canShare=false）⇒ 弹窗内可见失败反馈，绝不静默', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expM04', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('分享失败反馈验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '等弹窗',
+      );
+      // 桥（网页环境本就没有）与 canShare 都不可用
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => false });
+        Object.defineProperty(navigator, 'share', { configurable: true, value: async () => {} });
+      });
+      await page.tap('#exportModalShare');
+      await withTimeout(
+        page.waitForFunction(
+          () => {
+            const n = document.querySelector('#exportModalMask .diag-note');
+            return !!n && !n.hidden && (n.textContent || '').includes('无法调起分享');
+          },
+          null, { timeout: 5000 },
+        ),
+        8_000, '分享不可用必须在弹窗内给出可见失败反馈（v3.1.3「点了没反应」同款事故不许重演）',
+      );
     } finally {
       await closeTouch(page);
     }
@@ -464,99 +629,6 @@ test('EXPORT-W 移动端导出图片到微信（报障第 5 条）', async (t) =
       );
     } finally {
       await page.close();
-    }
-  });
-
-  await t.test('EXPORT-W04 🔴 触屏剪贴板被拒 → 仍必须落到分享/预览（阶梯不许被改坏）', async () => {
-    const page = await openEditorTouch(browser, h.baseUrl(), 'expW04', PASS);
-    try {
-      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
-      await page.tap('#editor-host');
-      await page.keyboard.type('剪贴板被拒的回退验证。');
-      await withTimeout(
-        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
-        10_000, '等输入落真源',
-      );
-      // 剪贴板全拒（老项目注释里说的"Android WebView 长期不可用"那种内核）
-      await page.evaluate(() => {
-        Object.defineProperty(navigator, 'clipboard', {
-          configurable: true,
-          value: { write: async () => { throw new Error('not allowed'); } },
-        });
-        window.ClipboardItem = class {
-          constructor(types) { this.types = types; }
-        };
-      });
-      await page.tap('#exportImgBtn');
-      // 必须落到最后一档：全屏预览
-      await withTimeout(
-        page.waitForSelector('#imgPreviewMask', { timeout: 30_000 }),
-        35_000,
-        '剪贴板被拒后必须落到全屏预览（唯一不依赖权限的出口）',
-      );
-      assert.equal(
-        await page.evaluate(() => !!document.querySelector('#imgPreviewMask img')),
-        true,
-        '预览层里必须有图',
-      );
-    } finally {
-      await closeTouch(page);
-    }
-  });
-
-  await t.test('EXPORT-W05 🔴 成功文案按档位分档，且不许出现桌面专属的「Ctrl+V」', async () => {
-    const page = await openEditorTouch(browser, h.baseUrl(), 'expW05', PASS);
-    try {
-      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
-      await page.tap('#editor-host');
-      await page.keyboard.type('成功文案验证。');
-      await withTimeout(
-        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
-        10_000, '等输入落真源',
-      );
-      // 收集状态条上出现过的所有文案（它会一闪而过，必须全程监听）
-      const seen = await page.evaluate(async () => {
-        const out = [];
-        const mo = new MutationObserver(() => {
-          const el = document.querySelector('#uploadNote, .ns-note, #uploadStatus');
-          if (el) {
-            const t = (el.textContent || '').trim();
-            if (t && !out.includes(t)) out.push(t);
-          }
-        });
-        mo.observe(document.body, { childList: true, subtree: true, characterData: true });
-        Object.defineProperty(navigator, 'clipboard', {
-          configurable: true,
-          value: { write: async () => {} },
-        });
-        window.ClipboardItem = class {
-          constructor(types) { this.types = types; }
-        };
-        document.getElementById('exportImgBtn').click();
-        await new Promise((r) => setTimeout(r, 12000));
-        mo.disconnect();
-        return out;
-      });
-      const joined = seen.join(' | ');
-      // 🔴 手机上没有 Ctrl+V 这个动作，给它就是给一句做不到的指引
-      assert.ok(
-        !joined.includes('Ctrl+V'),
-        '触屏成功文案里绝不许出现「Ctrl+V」（手机上没这个动作），实际=' + joined,
-      );
-      // 🔴🔴 A1 删掉触屏预览层之后，"长按下方图片"就成了谎报 —— 屏上根本没有图。
-      //   这条与上面那条互补：上面钉"不许给做不到的指引"，这条钉"不许谎报有图可长按"。
-      assert.ok(
-        !/下方图片|长按下方/.test(joined),
-        '触屏成功文案里绝不许出现「长按下方图片」（A1 下剪贴板成功后不开预览层，屏上没有图），实际=' + joined,
-      );
-      // 🔴 必须至少有一条**做得到**的指引（"可直接粘贴"），否则用户不知道该干嘛
-      assert.ok(
-        joined.includes('可直接粘贴'),
-        '触屏剪贴板成功必须给一句做得到的指引「可直接粘贴」，实际=' + joined,
-      );
-      assert.ok(seen.length > 0, '导出过程中必须至少有一条状态提示（否则是"点了没反应"），实际=' + JSON.stringify(seen));
-    } finally {
-      await closeTouch(page);
     }
   });
 });

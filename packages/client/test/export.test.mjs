@@ -19,6 +19,8 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { stripComments } from './rem-native.test.mjs';
+
 import {
   EXPORT_FOLD_CSS,
   EXPORT_MAX_WIDTH,
@@ -473,4 +475,259 @@ test('EXPORT-20 🔴 gitignore 不得把静态资源源目录排除掉', () => {
     !/packages\/client\/static/.test(gi),
     '静态资源源目录被 gitignore 了（CI 产物必然缺文件）',
   );
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * EXPORT-27/28：导出提速（2026-10-13 用户报障「生成图片的时间太长了」）
+ *
+ * 实测（4400 字笔记、桌面 Chromium）：html2canvas 本体渲染 225–268ms、
+ *   toBlob 135–208ms，**冷启动首次导出还要先等一个 198KB 脚本的网络往返**
+ *   （移动端几百毫秒到一秒），期间屏幕没有任何反馈。
+ * 两项落地（都补自老项目已有而 bj 缺失的东西）：
+ *   ① render.ts 补 prefetchHtml2CanvasIdle（老项目 index.html:2877 就有；
+ *      bj 只给扫码做了同款预热，导出这条一次都没预热）；
+ *   ② exportNotePng 把「正在生成图片…」提示条提到组件加载**之前**
+ *      （文件头顺序第 2 条本来就这么写，代码却违反了它）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('EXPORT-27 🔴🔴 导出组件必须空闲预热，且 boot 必须真的调用它（否则预热是死代码）', async () => {
+  const { prefetchHtml2CanvasIdle } = await import('../src/export/render.ts');
+  const MAIN_SRC = readFileSync(resolve(HERE, '..', 'src', 'main.ts'), 'utf8');
+
+  // ── 源码级：结构要件 ──
+  // Node 守卫：本文件直接 import render.ts，无 window 环境不许碰 document
+  assert.match(RENDER_SRC, /typeof window === 'undefined'\) return/, '缺 Node 守卫（单测 import 会崩）');
+  // 只在预热函数体内断言（文件尾还有别的函数，切片防误伤）
+  const fn = RENDER_SRC.slice(
+    RENDER_SRC.indexOf('export function prefetchHtml2CanvasIdle'),
+    RENDER_SRC.indexOf('export function loadHtml2Canvas'),
+  );
+  assert.ok(fn.includes('requestIdleCallback'), '缺 rIC 预热');
+  assert.ok(fn.includes('{ timeout: 4000 }'), 'rIC 缺 timeout 兜底（移动内核可能永远不调 rIC）');
+  assert.ok(fn.includes('loadHtml2Canvas('), '预热必须复用 loadHtml2Canvas（自带 in-flight 去重与失败重试）');
+
+  // ── 行为级：rIC + setTimeout 双保险都注册；两次触发只建一个 script（去重）──
+  const ricCbs = [];
+  const timers = [];
+  const scripts = [];
+  const fakeWindow = {
+    requestIdleCallback: (cb, opts) => {
+      ricCbs.push({ cb, opts });
+      return 0;
+    },
+  };
+  const realSetTimeout = globalThis.setTimeout;
+  const realDocument = globalThis.document;
+  const hadWindow = 'window' in globalThis;
+  const realWindow = globalThis.window;
+  globalThis.window = fakeWindow;
+  globalThis.document = {
+    createElement: () => ({}),
+    head: { appendChild: (s) => scripts.push(s) },
+  };
+  globalThis.setTimeout = (cb, ms) => {
+    timers.push({ cb, ms });
+    return 0;
+  };
+  try {
+    prefetchHtml2CanvasIdle();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  assert.equal(ricCbs.length, 1, 'rIC 预热未注册');
+  assert.equal(ricCbs[0].opts && ricCbs[0].opts.timeout, 4000, 'rIC timeout 不是 4000');
+  const dup = timers.find((t) => t.ms === 8000);
+  assert.ok(dup, '缺 setTimeout(go, 8000) 双保险（国产 WebView 的 rIC 可能永远不来）');
+  assert.equal(dup.cb, ricCbs[0].cb, '双保险与 rIC 不是同一个 go（两条路拉的东西不一致）');
+
+  ricCbs[0].cb(); // 第一次触发：真的发起脚本加载
+  assert.equal(scripts.length, 1, '预热没有真正发起脚本加载');
+  assert.equal(scripts[0].src, '/html2canvas.min.js', '预热拉的路径不对（必须同源自托管）');
+  dup.cb(); // 第二次触发（用户此刻点了导出 = 并发）：in-flight 去重
+  assert.equal(scripts.length, 1, '预热与用户点导出并发会拉两次（in-flight 去重失效）');
+
+  // 清理：让 pending 的 loadPromise 落地置回 null，不污染后续测试
+  if (typeof scripts[0].onerror === 'function') scripts[0].onerror();
+  globalThis.document = realDocument;
+  if (hadWindow) globalThis.window = realWindow;
+  else delete globalThis.window;
+
+  // ── boot 必须真的调用 ──
+  // 🔴 import 了却没调用 = 预热是死代码，用户点导出照样冷加载。
+  //   锚行首（^\s*）：注释里提到这个名字（解释来历的注释）不算调用。
+  assert.match(MAIN_SRC, /^\s*prefetchHtml2CanvasIdle\(\);\s*$/m, 'boot 没有调用导出预热');
+});
+
+test('EXPORT-28 🔴🔴 提示条必须先于组件加载上屏（看不见的等待 = 「点了没反应」）', async () => {
+  // 🔴 行为级：真跑 exportNotePng，记录事件序列 —— 源码 indexOf 比顺序
+  //   钉不住"将来有人把整段搬进 try 换个写法"这类等价回退，行为序列才钉得住。
+  //   script 桥在 appendChild 时同步走 onerror ⇒ loadHtml2Canvas 立刻 resolve(false)
+  //   ⇒ exportNotePng 走 loadfail 分支收场，正好覆盖"加载失败也要有反馈"这条路。
+  const events = [];
+  const realDocument = globalThis.document;
+  const hadWindow = 'window' in globalThis;
+  const realWindow = globalThis.window;
+  globalThis.window = {}; // loadHtml2Canvas 要读 window.html2canvas；Node 无 window
+  globalThis.document = {
+    createElement: () => ({}),
+    head: {
+      appendChild: (s) => {
+        events.push('script');
+        if (typeof s.onerror === 'function') s.onerror();
+      },
+    },
+  };
+  let result;
+  try {
+    const { exportNotePng } = await import('../src/export/index.ts');
+    result = await exportNotePng({
+      editorHost: {},
+      noteId: 'n',
+      brandSvg: null,
+      dismissKeyboard: () => events.push('keyboard'),
+      onStatus: (kind) => events.push('status:' + kind),
+      hideStatus: () => events.push('hide'),
+      okMs: 3000,
+      failMs: 3000,
+      isNativeApp: true,
+      nativeCopyImage: async () => true,
+    });
+  } finally {
+    globalThis.document = realDocument;
+    if (hadWindow) globalThis.window = realWindow;
+    else delete globalThis.window;
+  }
+  assert.equal(result, 'loadfail', 'script onerror 后应走 loadfail 收场');
+  const at = (e) => events.indexOf(e);
+  assert.ok(at('keyboard') >= 0, '触屏收键盘没跑（顺序第 1 条没了）');
+  assert.ok(at('status:doing') >= 0, "'正在生成图片…' 提示条没开");
+  assert.ok(
+    at('status:doing') < at('script'),
+    `提示条跑到了组件加载之后（序列：${events.join(' → ')}）—— 冷启动首次导出要先等 198KB 脚本往返，期间屏幕无任何反馈`,
+  );
+  assert.ok(at('status:bad') >= 0, '加载失败必须给可见失败提示，不许静默');
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * EXPORT-29/30/31：导出后提示分平台（2026-10-13 用户报障第 4 条，逐字拍板）
+ *
+ * 用户原话：
+ *   - PC端：还是像现在一样，生成图片并复制到剪贴板。
+ *   - 移动端：弹出一个弹窗，上面是生成图片的预览图；下面左边是"保存到相册"
+ *     按钮，右边是"分享"按钮。点击分享后，就会调用系统分享组件，跟分享整个
+ *     诊断报告一样。弹窗右上角是关闭按钮，点击那个叉叉可以关闭；点击弹窗
+ *     其他位置，包括外围位置，都没法关闭。
+ *
+ * 🔴🔴 为什么移动端必须换成交互而不是继续复制链路：
+ *   微信 Android 不支持从剪贴板粘贴图片（v3.2.3 实锤），"复制"在移动端
+ *   只剩小米笔记一个目的地 —— 用户要的是把图发出去，不是复制。
+ * 🔴 为什么判据是源码级（去注释后结构断言）+ e2e 行为级兜底：
+ *   弹窗是 DOM 重活，单测无真浏览器；本项目 DOM 构建类组件的既有形态
+ *   就是 diag-panel.test.mjs 这套（DIAG-17/18 同款），e2e 09-export 补真交互。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+// 🔴 keepStrings：本组判据大量断言字符串字面量（'modal' / 'box-x' /
+//   'data:image/png;base64,'），stripComments 默认把字符串内容剥掉 ——
+//   不开它，"缺东西"的红全是判据自己剥出来的（diag-panel 的 cleanKeepStr 同款）。
+const IDX_CLEAN = stripComments(INDEX_SRC, { keepStrings: true });
+
+/** 切出 showExportModal 函数体（去注释；到下一个顶层 export 声明为止）。 */
+const modalFn = () => {
+  const start = IDX_CLEAN.indexOf('export async function showExportModal');
+  const next = IDX_CLEAN.indexOf('export async function exportNotePng');
+  return IDX_CLEAN.slice(start, next > start ? next : undefined);
+};
+
+test('EXPORT-29 🔴🔴 触屏渲染成功必须交给弹窗接管，不许再走复制阶梯', () => {
+  // 🔴 分岔点必须在 deliverPng 之前：桌面才走四档阶梯，触屏在渲染成功后分岔
+  const touchAt = IDX_CLEAN.indexOf('if (isTouchDevice())');
+  const deliverAt = IDX_CLEAN.indexOf('await deliverPng(');
+  assert.ok(touchAt > 0, 'exportNotePng 里缺触屏分岔');
+  assert.ok(deliverAt > touchAt, '触屏分岔必须排在 deliverPng 之前（先分岔，桌面才走阶梯）');
+  const branch = IDX_CLEAN.slice(touchAt, deliverAt);
+  // 🔴🔴 复制语义在移动端退场：分支内不许出现任何复制调用
+  //   （壳内 WebView 剪贴板写图片本来就是假成功，v3.2.2 实锤；微信又不认剪贴板图）
+  assert.ok(
+    !/nativeCopyImage|clipboard/i.test(branch),
+    '触屏分支里不许出现复制相关调用（移动端走弹窗，不走复制）',
+  );
+  // 🔴 弹窗打开前必须清「正在生成图片…」提示条：否则提示条在弹窗底下挂一整场
+  //   （预览层 zIndex 40 盖住提示条 —— 与"预览档不给提示条"同一实锤）
+  const hideAt = branch.indexOf('hideStatus()');
+  const modalAt = branch.indexOf('showExportModal(');
+  assert.ok(hideAt >= 0 && modalAt > hideAt, '弹窗打开前必须调 hideStatus() 清提示条');
+  // 返回类型必须单列 'modal'（调用方能分辨"已交弹窗接管"）
+  // 🔴 用原始源码判：stripComments keepStrings 保留内容但**去引号**，'modal' 会查不到
+  assert.ok(INDEX_SRC.includes("'modal'"), "ExportResult 缺 'modal'");
+});
+
+test('EXPORT-30 🔴🔴 弹窗结构：预览图 + 左保存右分享 + 右上角叉；外围/其他位置不关', () => {
+  const fn = modalFn();
+  // 弹窗 id（e2e 与关闭去重都靠它）
+  assert.ok(fn.includes('exportModalMask'), '弹窗 mask 缺 id=exportModalMask');
+  // 🔴🔴 用户逐字拍板「点击弹窗其他位置，包括外围位置，都没法关闭」：
+  //   对照组 showPreview 有 `e.target === overlay` 外围关闭 —— 弹窗绝不许有
+  assert.ok(!/e\.target\s*===\s*mask/.test(fn), '外围点击不许关闭弹窗（用户拍板）');
+  assert.ok(!/mask\.addEventListener\('click'/.test(fn), 'mask 不许绑任何点击关闭');
+  // 右上角关闭叉：全站同一枚 ICON_X（box-x 类），不用字形 ×
+  assert.ok(fn.includes('box-x'), '缺右上角叉（box-x）');
+  assert.ok(fn.includes('ICON_X()'), '叉必须用全站 ICON_X SVG（不用字形 ×）');
+  // 🔴 预览图必须用 data: URL 而不是 blob:：壳内 WebView 长按菜单对 blob: 图
+  //   常不给保存项，data: 才有"长按存图"这条最后兜底（编辑器内图片同形态实锤）
+  assert.ok(fn.includes('data:image/png;base64,'), '预览图必须用 data: URL（长按可存兜底）');
+  // 🔴🔴 保存按钮**整个**（创建+上屏）必须包在 `if (deps.saveToAlbum) {` 块里：
+  //   只在 handler 里守卫是假显隐 —— 按钮照样显示，点了才失败（e2e EXPORT-M01
+  //   抓过这个：按钮无条件 append，判据被 handler 里的同名守卫骗绿）。
+  assert.ok(/if \(deps\.saveToAlbum\) \{/.test(fn), '保存按钮必须由 saveToAlbum 桥存在与否决定显示');
+  assert.ok(/row\.append\(saveBtn, shareBtn\)/.test(fn), '缺 row.append(saveBtn, shareBtn)（左保存右分享）');
+  assert.ok(/row\.append\(shareBtn\)/.test(fn), '无桥时必须只上分享按钮');
+  // 左保存右分享（append 顺序）
+  const append = fn.match(/\.append\((\w+),\s*(\w+)\)/);
+  assert.ok(append, '按钮行缺 append');
+  assert.equal(append[1], 'saveBtn', 'append 第一个必须是保存（左）');
+  assert.equal(append[2], 'shareBtn', 'append 第二个必须是分享（右）');
+  // 🔴 反馈必须收进弹窗自己的 DOM（diagNote 同款纪律）：弹窗 zIndex 40 盖住
+  //   #uploadNote，把反馈写进提示条 = 用户看不见 = 「点了没反应」
+  assert.ok(/aria-live|role.*status|'status'/.test(fn), '弹窗内缺反馈条（role=status/aria-live）');
+});
+
+test('EXPORT-31 🔴🔴 分享阶梯：壳内 ImgShare 桥 → 网页 navigator.share；取消静默；失败弹窗内反馈', () => {
+  const fn = modalFn();
+  const shareStart = fn.indexOf('const onShare');
+  const share = shareStart >= 0 ? fn.slice(shareStart) : fn;
+  // ① 壳内桥在前（WebView 无 navigator.share —— MainActivity 注释双实锤）
+  const bridgeAt = share.indexOf('hasNativeShare()');
+  const webAt = share.indexOf('nav.share');
+  assert.ok(bridgeAt > 0, '分享缺壳内 ImgShare 桥路径');
+  assert.ok(webAt > bridgeAt, '网页 navigator.share 必须排在壳内桥之后');
+  // ② 用户在系统面板点取消（AbortError）⇒ 静默收场，不给"失败"（诊断分享同款口径）
+  assert.ok(/AbortError/.test(share), '分享取消未单列（不许把用户取消当失败）');
+  // ③ 真失败必须弹窗内可见反馈
+  assert.ok(/exportShareFail/.test(share), '分享失败缺可见反馈文案');
+  // ④ 保存按钮点击：成功/失败都必须有弹窗内反馈，不许静默
+  assert.ok(/exportAlbumOk/.test(fn), '保存成功缺反馈');
+  assert.ok(/exportAlbumFail/.test(fn), '保存失败缺反馈');
+
+  // ⑤ 原生桥文件：现读 Capacitor.Plugins.ImgShare（diag/ImgSave 同款纪律）
+  const NIS = resolve(HERE, '..', 'src', 'image', 'native-img-share.ts');
+  assert.ok(existsSync(NIS), 'native-img-share.ts 不存在');
+  const nis = stripComments(readFileSync(NIS, 'utf8'));
+  assert.ok(/ImgShare/.test(nis), 'native-img-share.ts 没有现读 ImgShare 桥');
+
+  // ⑥ 原生侧：桥文件 + MainActivity 注册（缺注册 = 桥永远读不到 = 死代码）
+  const KT = resolve(
+    HERE, '..', '..', '..', 'android', 'app', 'src', 'main', 'java',
+    'cn', 'xuyinji', 'bj', 'img', 'ImgSharePlugin.kt',
+  );
+  assert.ok(existsSync(KT), 'ImgSharePlugin.kt 不存在');
+  const kt = readFileSync(KT, 'utf8');
+  assert.ok(kt.includes('@CapacitorPlugin(name = "ImgShare")'), 'KT 缺 CapacitorPlugin 注册名');
+  assert.ok(kt.includes('Intent.ACTION_SEND'), 'KT 缺 ACTION_SEND（系统分享面板）');
+  assert.ok(kt.includes('FLAG_GRANT_READ_URI_PERMISSION'), 'KT 缺 URI 授权（接收方读不到图片）');
+  const MA = resolve(
+    HERE, '..', '..', '..', 'android', 'app', 'src', 'main', 'java',
+    'cn', 'xuyinji', 'bj', 'MainActivity.java',
+  );
+  const ma = readFileSync(MA, 'utf8');
+  assert.ok(ma.includes('registerPlugin(ImgSharePlugin.class)'), 'MainActivity 缺 ImgShare 注册（桥永远读不到）');
 });

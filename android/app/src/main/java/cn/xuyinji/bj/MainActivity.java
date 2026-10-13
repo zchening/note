@@ -36,6 +36,7 @@ import java.net.URL;
 import cn.xuyinji.bj.rem.RemPlugin;
 import cn.xuyinji.bj.img.ImgClipPlugin;
 import cn.xuyinji.bj.img.ImgSavePlugin;
+import cn.xuyinji.bj.img.ImgSharePlugin;
 import cn.xuyinji.bj.link.LinkOpenPlugin;
 import cn.xuyinji.bj.update.UpdatePlugin;
 
@@ -165,6 +166,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(RemPlugin.class);
         registerPlugin(ImgClipPlugin.class); // v7.7.0：图片写系统剪贴板原生桥
         registerPlugin(ImgSavePlugin.class); // v9.2.0：正文图片保存到相册原生桥（零新权限，壳内 a[download] 是哑弹）
+        registerPlugin(ImgSharePlugin.class); // v3.2.4：导出长图分享原生桥（ACTION_SEND + FileProvider；壳内无 navigator.share）
         registerPlugin(LinkOpenPlugin.class); // v8.1.0：链接打开方式（外跳默认浏览器/应用内子 WebView）
         registerPlugin(UpdatePlugin.class); // v9.3.0：应用内升级原生桥（DownloadManager 下 APK + FileProvider 拉安装）
         registerPlugin(cn.xuyinji.bj.diag.DiagExportPlugin.class); // v3.1.4：诊断日志导出 .txt 原生桥（落 Download/NoteSync，同 a[download] 哑弹实锤）

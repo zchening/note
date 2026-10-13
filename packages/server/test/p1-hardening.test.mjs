@@ -205,6 +205,50 @@ test('SRV-08 HTML 文档响应必须带 CSP，且不得放行 unsafe-eval', asyn
   assert.doesNotMatch(csp, /unsafe-eval/, 'CSP 不得放行 unsafe-eval（全仓无 eval，需要它就应该换库）');
 });
 
+test('SRV-08b 🔴🔴🔴 img-src 必须放行图床投递域名（用户报障：上传成功但图片是一条横线）', async () => {
+  // 🔴🔴 真因（v3.2.3 真机报障第 5 条「上传/拍照后图片显示成一条横线」）：
+  //   图片上传是**直传 Cloudinary**（client/image/upload.ts），插入笔记的就是
+  //   云端返回的 secure_url；而 CSP 的 img-src 此前只有 `'self' data: blob:`，
+  //   connect-src 却又给了 `https:` ⇒ 上传请求过得去（用户看到"上传成功"），
+  //   **图片本身被 CSP 挡死** ⇒ `<img>` 加载失败 ⇒ 零高度 + 1px 边框 = 一条横线。
+  //
+  // 🔴🔴 为什么把客户端上传主机**读出来**再比，而不是在判据里写死域名：
+  //   写死的话，将来有人把 upload.ts 的图床换掉（或换成自建 OSS），
+  //   CSP 这条会**静静地继续放行一个再也不用的域名**，而新域名照旧被挡 ——
+  //   症状与本次一模一样（上传成功、图是一条线），且没有任何判据会红。
+  //   两边互相绑定后，改任何一边另一边必须红。
+  const uploadSrc = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'client', 'src', 'image', 'upload.ts'),
+    'utf8',
+  );
+  const host = /https:\/\/([a-z0-9.-]+\.[a-z]{2,})\/v1_1\//.exec(uploadSrc);
+  assert.ok(host, '应从 upload.ts 读出上传主机（读不到说明直传 URL 形态变了，本判据需同步更新）');
+  const uploadHost = host[1];
+  // 投递域名：Cloudinary 的 secure_url 是 res.cloudinary.com/<cloud_name>/...
+  //   —— 与上传主机（api.cloudinary.com）不是同一个，必须分别放行。
+  const deliverHost = 'res.cloudinary.com';
+
+  const r = await fetch(`${base}/`);
+  const csp = r.headers.get('content-security-policy') || '';
+  const imgSrc = /(?:^|; )img-src ([^;]+)/.exec(csp);
+  assert.ok(imgSrc, 'CSP 必须含 img-src，实际：' + csp);
+  const allow = imgSrc[1];
+  assert.ok(
+    allow.includes(deliverHost),
+    `img-src 必须放行图床投递域名 ${deliverHost}（笔记内图片就是它的 secure_url，` +
+      `不放行 ⇒ <img> 加载失败 ⇒ 屏幕上一条横线）。实际 img-src：${allow}`,
+  );
+  // 反向自证：上传主机本身靠 connect-src 放行，不能误加到 img-src 里充数
+  assert.ok(
+    !allow.includes(uploadHost),
+    `img-src 里不该出现上传主机 ${uploadHost}（那是 connect-src 的职责；` +
+      `放它只会让判据看起来像过了，图片照旧是一条横线）`,
+  );
+  const connSrc = /(?:^|; )connect-src ([^;]+)/.exec(csp);
+  assert.ok(connSrc && connSrc[1].includes('https:'),
+    'connect-src 必须放行 https:（上传直传图床走它）');
+});
+
 /* ============ P1-9：已存在但未认领的档，首次写只登记不覆盖正文 ============ */
 
 test('SRV-09 full 档下未认领档的首次带凭据写：只登记、正文一字不动', async () => {

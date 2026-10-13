@@ -102,6 +102,7 @@ import {
 import { collectDiagLines, type DiagDeps } from './diag/collect.ts';
 import { buildEggDraw } from './egg/draw.ts';
 import { exportNotePng } from './export/index.ts';
+import { prefetchHtml2CanvasIdle } from './export/render.ts';
 import { copyNoteToClipboard, docToClipboardPayload } from './export/copy.ts';
 import { buildPairPanel, closePairPanel } from './scan/panel.ts';
 import { buildScanLayer } from './scan/layer.ts';
@@ -1426,8 +1427,13 @@ function onTopbar(act: TopbarAction): void {
         nativeCopyImage,
         // 🔴 复制之后读回验证：桥说成功不算数，剪贴板里真有图才算（见 render.ts 头部）
         verifyClipboardImage: nativeClipboardHasImage,
-        // 🔴 微信不认剪贴板图片 ⇒ 复制成功后顺手存一份相册，文案据此指路
-        saveToAlbum: saveExportImageToAlbum,
+        // 🔴🔴 条件注入（v3.2.4）：只有原生壳才给相册桥 —— 触屏弹窗的
+        //   「保存到相册」按钮以它存在为前提（没桥的手机浏览器不显示该按钮，
+        //   不给一个点了必失败的按钮）；桌面走复制阶梯，native 档本就不进，
+        //   传不传都一样。判据 EXPORT-30 钉"按钮随桥显隐"。
+        saveToAlbum: isNativeApp() ? saveExportImageToAlbum : undefined,
+        // 🔴 触屏弹窗接管时要清「正在生成图片…」（弹窗 zIndex 40 盖着提示条）
+        hideStatus: hideUploadNote,
         okMs: COPY.exportOkMs,
         failMs: COPY.exportFailMs,
       });
@@ -3933,6 +3939,18 @@ async function handleScanRaw(raw: string): Promise<void> {
   //   挂载编辑器却不改 URL，刷新一下会回到原来那页 —— 看着像"内容自己跑了"。
   history.replaceState({}, '', '/' + encodeURIComponent(noteId));
   mountEditor(noteId, r.doc);
+  // 🔴🔴 v3.2.4：落地提示从"常驻"改成"开了就倒计时收起"（用户报障：
+  //   「打开笔记之后，这条提示过几秒钟帮我消掉，不要一直显示在那里」）。
+  //   文案一字不改，只是把 autoHideMs 从 0 换成一个正的驻留时间。
+  //   🔴 为什么必须放在 mountEditor **之后**：unlock 可能要等网络，
+  //     那期间这条是唯一的过程反馈，提前收掉用户会以为卡住了；
+  //     而 mountEditor 返回时笔记已经在屏幕上，此刻起"正在打开笔记"
+  //     已经说完，该收了。
+  //   🔴 为什么用同一句文案重发而不是新加一个 hideUploadNote()：
+  //     showUploadNote 会先清掉旧计时器再按新值重设，重发同一句文本
+  //     在视觉上是零变化（用户看不出"它又被设了一次"），却顺带拿到了
+  //     "换文案前清旧计时器"这道既有守卫。
+  showUploadNote('doing', COPY.pairLanded, COPY.pairLandedMs);
 }
 
 /**
@@ -5453,6 +5471,9 @@ async function landPairFragment(noteId: string, passphrase: string | null): Prom
   pendingFresh = r.fresh;
   rememberLastNote(noteId);
   mountEditor(noteId, r.doc);
+  // 🔴 v3.2.4：与 handleScanRaw 的配对分支逐条对齐（该文件头"两条入口不许分叉"）——
+  //   落地提示同样改为"开了就倒计时收起"，原因见那边的长注释。
+  showUploadNote('doing', COPY.pairLanded, COPY.pairLandedMs);
   tryShowInstallBar();
   // 🔴 此处**不**兑现开奖（DR-07b 钉着全项目恰两处 consume：手输口令 + 记忆解锁）。
   //   老版 `#k=` 直链是「存密钥 → location.replace 整页重载 → 自动解锁分支」，
@@ -5619,6 +5640,12 @@ function boot(): void {
   //   放在 boot 末尾：route() 之后，首屏该做的都做了，才让出主线程。
   //   内部自带 requestIdleCallback + setTimeout 双保险与去重，失败静默（见 engine.ts 注释）。
   prefetchJsQrIdle();
+  // 🔴🔴 v3.2.4：同款预热补到**导出**这条路上（用户报障「生成图片的时间太长」）。
+  //   老项目 index.html:2877 那行 `prefetchHtml2CanvasIdle` 在 bj 一直没有对应物 ——
+  //   导出组件（html2canvas 198KB）只在用户点「导出为图片并复制」时才下载，
+  //   冷启动后第一次导出第一件事就是干等那个网络往返，而那段等待屏幕没有反馈。
+  //   两条预热各管一条路，互不影响（不同 URL、各自的 in-flight 去重）。
+  prefetchHtml2CanvasIdle();
   document.getElementById('boot')?.remove();
 }
 

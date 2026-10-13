@@ -57,6 +57,27 @@ export {
 export const DIAG_OVERLAY_MS = 250;
 
 /**
+ * 🔴🔴 打开模态后的**输入宽限期**（毫秒）。
+ *
+ * 为什么必须有（用户报障第 1 条「App 里点 4 下关于标题，诊断弹窗不出现」实锤：
+ * 关于页确实关了 —— 说明 4 连点判定成功、`openDiagModal()` 也跑了，
+ * 但弹窗没露面）：连点是一个**手势**，第 4 下命中时用户的手指往往还悬在
+ * 屏幕上，第 5 下"是不是没点上"的补点在 ~150-400ms 后落在刚展开的
+ * `#diagMask` 空白处，被 `mask.onclick` 的 `e.target === mask` 分支秒关；
+ * 真机上的 incidental scroll（软键盘收起 / 视口变化 / 手指微小拖动都被
+ * Chromium 算成 scroll 事件）经 `onScroll` 同样致命。
+ *
+ * 这两类输入的共同点：都发生在 `.box` 的 `nsRise` 入场动画（.5s）结束之前 ——
+ * 用户**根本没见过那个弹窗**，"滚动即视为离开诊断"（v3.1.2 用户拍板）
+ * 这条规则在这段时间里无从谈起，它保护的是"看完了滚走"，不是"还没看清就没了"。
+ *
+ * 取 700ms：长于 500ms 的入场动画（保证先被看见），也长过"补点第 5 下"的
+ * 典型间隔。代价是"故意点遮罩空白处关弹窗"要晚 700ms 生效 —— 用户仍可
+ * **立刻**用右上角 × 关闭，所以这个代价不换任何功能。
+ */
+export const DIAG_INPUT_GRACE_MS = 700;
+
+/**
  * `?diag` 查询参数判定（老项目 :2079 `location.search.indexOf('diag') !== -1` 的**收紧版**）。
  *
  * 🔴🔴 为什么不用 indexOf：老项目那样写的话，路径里含 "diag" 的**笔记名**
@@ -257,12 +278,27 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
     void onExport();
   };
 
-  box.append(head, pre, exportBtn, copyBtn, diagNote);
+  // 🔴🔴 v3.2.4：按钮顺序改为「复制」在前、「分享导出」在后 —— 用户报障第 2 条
+  //   「诊断报告上面有两个按钮，一个是复制什么的，一个是分享什么的，你把这
+  //    两个按钮的位置给我换一换」。判据 DIAG-17 正向钉死这个顺序。
+  //   （v3.1.4 之前是 exportBtn 在前，那之前只有 copyBtn 一个键。）
+  box.append(head, pre, copyBtn, exportBtn, diagNote);
   mask.append(box);
   host.append(mask);
 
   let open = false;
   let lastText = '';
+  /** 打开时刻（`Date.now()`）。宽限期与"滚动即离开"两条规则都从它算起。 */
+  let openedAt = 0;
+
+  /**
+   * 是否还在打开后的输入宽限期内。
+   *
+   * 🔴 用 `Date.now() - openedAt` 而不是"记一个 setTimeout 到点置 false"：
+   *   后者在页面被挂起（切后台）时定时器不跑，回来时宽限期已经"过期"了，
+   *   而真机上切后台再回来恰恰是 scroll 噪声最多的时候。
+   */
+  const inInputGrace = (): boolean => Date.now() - openedAt < DIAG_INPUT_GRACE_MS;
 
   const close = (): void => {
     if (!open) return;
@@ -335,10 +371,13 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   copyBtn.onclick = () => {
     onCopy();
   };
+  // 🔴🔴 v3.2.4：打开后的**输入宽限期**。详见 DIAG_INPUT_GRACE_MS 的注释。
+  //   mask.onclick 与 onScroll 这两条"用户走了"的关闭路径都必须过它 ——
+  //   否则连点第 4 下刚展开的弹窗会被同一手势的第 5 下补点秒关。
   mask.onclick = (e) => {
     // 🔴 点遮罩空白处才关（老项目 :8244 `if (e.target === diagMask)`）。
     //   无条件 close 会让"点按钮时事件冒泡到遮罩"把刚打开的面板秒关。
-    if (e.target === mask) close();
+    if (e.target === mask && !inInputGrace()) close();
   };
 
   /* ---------------- 常驻浮层（老项目 #caretDiag） ---------------- */
@@ -387,9 +426,17 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
   //   pre 的滚动一起收 ⇒ "点一下/滑一下弹窗就秒关、想下滑看底部也不行"。
   //   滚动目标在模态内（pre/box）一律忽略，只有模态**之外**的滚动
   //   （滚笔记正文）才视为离开。
+  // 🔴🔴🔴 v3.2.4：再加一道**输入宽限期**（用户报障第 1 条「点 4 下关于标题，
+  //   诊断弹窗不出现」实锤）。4 连点命中时用户的手指往往还悬在屏幕上，
+  //   第 5 下"是不是没点上"的补点在 ~150-400ms 后落在刚展开的 #diagMask
+  //   空白处，被 mask.onclick 秒关；真机的 incidental scroll（软键盘收起 /
+  //   视口变化 / 手指微小拖动都被 Chromium 算成 scroll 事件）同样致命。
+  //   这两类输入都发生在 `.box` 的 nsRise 入场动画（.5s）结束之前 ——
+  //   用户**根本没见过那个弹窗**，"滚动即离开"根本无从谈起。
   const onScroll = (e: Event): void => {
     if (!open) return;
     if (e.target instanceof Node && mask.contains(e.target)) return;
+    if (inInputGrace()) return;
     close();
   };
   document.addEventListener('scroll', onScroll, true);
@@ -403,6 +450,10 @@ export function buildDiagPanel(host: HTMLElement, deps: DiagDeps, hooks: {
       pre.textContent = lastText;
       mask.classList.remove('hidden');
       open = true;
+      // 🔴 必须在最后一行：宽限期从"弹窗真的可见"这一刻起算。
+      //   写在前面的话，生成读数（400 条飞行日志的字符串拼接）耗掉的时间
+      //   会凭空吃掉宽限期 —— 而那正是最需要被保护的那一段。
+      openedAt = Date.now();
     },
     close,
     isOpen: () => open,

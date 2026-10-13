@@ -178,3 +178,95 @@ test('MTG-E03 🔴🔴 滚动手势不许被当成点击（位移超阈值必须
     await page.context().close();
   }
 });
+
+/**
+ * MTG-E04 🔴🔴🔴 关于页标题连点 4 次 ⇒ 诊断模态弹出**且不被同一手势秒关**
+ *
+ * 用户报障第 1 条（v3.2.3 真机）：「App 里点 4 下『关于』标题，诊断报告弹窗不出现了」。
+ *
+ * 🔴 真因（本用例守的就是它）：连点是一个**手势**。第 4 下命中时
+ *   `closeAbout()` 先把关于页关掉、`openDiagModal()` 再展开 `#diagMask` ——
+ *   而用户的手指往往还悬在屏幕上，第 5 下「是不是没心上」的补点在 ~150-400ms
+ *   后落在刚展开的 `#diagMask` 空白处，被 `mask.onclick` 的
+ *   `e.target === mask` 分支秒关；真机的 incidental scroll（软键盘收起 /
+ *   视口变化 / 手指微小拖动都被 Chromium 算成 scroll 事件）经 `onScroll` 同样致命。
+ *   这两类输入都发生在 `.box` 的 nsRise 入场动画（.5s）结束之前 ——
+ *   用户**根本没见过那个弹窗**。症状正是用户描述的那样：
+ *   「关于页关了（说明 4 连点判定成功了）但诊断没出」。
+ *
+ * 🔴 为什么必须跑在真触屏上下文：整条链路的入口是 `h1.onclick`，
+ *   而彩蛋计数状态机用真实 `setTimeout` 走 800ms 滑动窗口。
+ *
+ * 🔴 双向自证（缺一条就是"能骗过测试的测试"）：
+ *   ① 宽限期内点空白 / 派发 scroll **不关**（守的是新行为）；
+ *   ② 宽限期过后点空白 / 派发 scroll **照旧关**（守的是 v3.1.2 用户拍板的
+ *      「滚动即视为离开诊断」，防止为了修 bug 把功能整个焊死）。
+ */
+test('MTG-E04 🔴🔴🔴 连点 4 下关于标题：诊断模态弹出，且不被同一手势的余 taps / incidental scroll 秒关', async () => {
+  const page = await openTouch(false);
+  try {
+    await openMenu(page);
+    await page.tap('#menuAbout');
+    await withTimeout(
+      page.waitForSelector('#aboutMask .about-title', { state: 'visible', timeout: 10_000 }),
+      12_000,
+      '等关于页',
+    );
+
+    // 4 连点，间隔 120ms —— 合起来 480ms，落在 800ms 滑动窗口内。
+    for (let i = 0; i < 4; i++) {
+      await page.tap('#aboutMask .about-title');
+      await page.waitForTimeout(120);
+    }
+
+    // ① 紧接连点（此刻距 open() 只有一两次 evaluate 的往返，必在 700ms 宽限期内）
+    //    连发两类"秒关"输入，再一次性读状态。
+    //    🔴 必须赶在宽限期内发：等一圈再发就跑到窗口外，测的就不是要守的东西了。
+    const early = await page.evaluate(() => {
+      const d = document.getElementById('diagMask');
+      const a = document.getElementById('aboutMask');
+      const openedBefore = !!d && !d.classList.contains('hidden');
+      const aboutClosed = !!a && a.classList.contains('hidden');
+      // 第 5 下"补点"：落在刚展开的 #diagMask 空白处
+      document.getElementById('diagMask')?.click();
+      // incidental scroll：目标在 modal 之外（软键盘收起/视port变化/手指微拖都算）
+      const host = document.getElementById('editor-host') || document.body;
+      host.dispatchEvent(new Event('scroll', { bubbles: true }));
+      const openedAfter = !!d && !d.classList.contains('hidden');
+      return { openedBefore, aboutClosed, openedAfter };
+    });
+    assert.ok(early.aboutClosed, '连点 4 次后关于页必须关闭（用户报障的症状正是"关于页关了但诊断没出"）');
+    assert.ok(early.openedBefore, '连点 4 次后诊断模态必须弹出');
+    assert.ok(
+      early.openedAfter,
+      '宽限期内连点空白 + 派发 scroll 都不该关闭诊断模态（这正是用户报障的秒关路径）',
+    );
+
+    // ② 必须**保持可见**跨过 500ms 入场动画与 700ms 宽限期。
+    //    只看"打开了"会发现不了秒关 —— 那正是用户报障的形状。
+    await page.waitForTimeout(1100);
+    const st = await page.evaluate(() => {
+      const d = document.getElementById('diagMask');
+      return !!d && !d.classList.contains('hidden');
+    });
+    assert.ok(st, '诊断模态必须在约 1.1s 后仍然可见（跨过入场动画与宽限期）');
+
+    // ③ 反向：宽限期过后，两条关闭路径必须照旧工作
+    //    （v3.1.2 用户拍板「滚动即视为离开诊断」+ 老项目 :8244 点空白关闭）。
+    //    缺这一条，修 bug 就可能把"用户看完了滚走"整个焊死。
+    await page.waitForTimeout(400);
+    await page.evaluate(() => {
+      const host = document.getElementById('editor-host') || document.body;
+      host.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await withTimeout(
+      page.waitForFunction(() => document.getElementById('diagMask')?.classList.contains('hidden'), {
+        timeout: 3000,
+      }),
+      4000,
+      '宽限期过后，滚动笔记必须照旧关闭诊断模态（v3.1.2 用户拍板）',
+    );
+  } finally {
+    await page.context().close();
+  }
+});

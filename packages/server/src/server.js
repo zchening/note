@@ -1026,9 +1026,19 @@ async function route(req, res) {
  * 🔴 取值依据（都是**真实用到**的，不是拍脑袋）：
  *   - `'unsafe-inline'`（style）：`www/index.html` 内联了 162KB CSS；UI 还写 style 属性。
  *   - `img-src data:`：笔记内图片就是 data URL；`blob:`：导出长图用 canvas.toBlob。
- *   - `worker-src blob:`：P0-4 的 PBKDF2 Worker 是 Blob URL 起的。
- *   - `connect-src 'self'`：SSE（`/api/stream/`）与全部 `/api/*` 都同源；
+ *   - 🔴🔴 v3.2.4 补 `https://res.cloudinary.com`：**图片上传直传 Cloudinary**
+ *     （client/image/upload.ts:185），插入笔记的就是云端返回的 secure_url。
+ *     此前 img-src 只有 `'self' data: blob:`，而 connect-src 给了 `https:`
+ *     ⇒ 上传请求过得去（用户看到"上传成功"），**图片本身被 CSP 挡死**：
+ *     `<img>` 加载失败 ⇒ 零高度 + `.ns-img img` 的 1px 边框
+ *     ⇒ 屏幕上就是**一条横线**（用户报障第 5 条，PC 上传与移动端拍照必现）。
+ *     🔴 为什么当初会漏：P1-12 写这条时按"笔记内图片是 data URL"推的
+ *     （那句注释至今还在上面），而 data: 只是**导出预览**那条路的形态，
+ *     真正的图片链路从 v10.0.0 起就是 Cloudinary 直传。两条事实漂了三个月。
+ *   - `connect-src 'self' https:`：SSE（`/api/stream/`）与全部 `/api/*` 都同源；
  *     额外给 `https:` 是因为 App 内 WebView 可能走 https 直连（不是放宽，是防误伤）。
+ *     上传直传 Cloudinary 也靠这一条（`api.cloudinary.com`）。
+ *   - `worker-src blob:`：P0-4 的 PBKDF2 Worker 是 Blob URL 起的。
  *   - `object-src 'none'` / `base-uri 'none'` / `frame-ancestors 'none'`：老三样。
  *
  * 🔴 不加 `'unsafe-eval'`：全仓无 eval / new Function（零依赖打包，无需运行时求值）。
@@ -1038,7 +1048,9 @@ const CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  // 🔴 res.cloudinary.com 是 Cloudinary 的**投递域名**，与 cloud_name 无关
+  //   （cloud_name 只决定 URL 路径第一段），所以这里写域名而不写某个账号。
+  "img-src 'self' data: blob: https://res.cloudinary.com",
   "font-src 'self' data:",
   "connect-src 'self' https:",
   "worker-src 'self' blob:",

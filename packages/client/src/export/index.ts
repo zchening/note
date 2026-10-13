@@ -31,6 +31,11 @@ import {
 } from './render.ts';
 import { COPY } from '../ui/copy.ts';
 import { isTouchDevice } from '../platform/touch.ts';
+import { ICON_X } from '../ui/icons.ts';
+import {
+  hasNativeImgShare as hasNativeShare,
+  nativeShareImage,
+} from '../image/native-img-share.ts';
 
 export interface ExportDeps {
   editorHost: HTMLElement;
@@ -50,6 +55,14 @@ export interface ExportDeps {
    *   于是"传给调用方的数字"和"实际用的数字"可能不一致，且没有任何测试能发现。
    */
   onStatus: (kind: 'doing' | 'ok' | 'bad', text: string, autoHideMs: number) => void;
+  /**
+   * 收掉状态提示（v3.2.4 移动端弹窗用）。
+   *
+   * 🔴🔴 为什么必须注入而不能只靠 onStatus 覆盖：触屏渲染成功后弹窗接管
+   *   （zIndex 40 盖住提示条），「正在生成图片…」那条 doing 提示条必须**清掉**
+   *   而不是被盖在弹窗底下挂一整场。main.ts 传 hideUploadNote。
+   */
+  hideStatus: () => void;
   /** 状态提示驻留时长（毫秒）；0 = 常驻直到下一条覆盖。 */
   okMs: number;
   failMs: number;
@@ -76,7 +89,7 @@ export interface ExportDeps {
   saveToAlbum?: ((base64: string, mime: string) => Promise<boolean>) | undefined;
 }
 
-export type ExportResult = DeliverKind | 'cancelled' | 'loadfail' | 'renderfail';
+export type ExportResult = DeliverKind | 'cancelled' | 'loadfail' | 'renderfail' | 'modal';
 
 /**
  * 导出长图全流程。
@@ -89,12 +102,21 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
   // ① 触屏先收键盘
   deps.dismissKeyboard();
 
-  // ② 组件加载
+  // ② 先开提示条，**再**做组件加载（v3.2.4 修正顺序）
+  //
+  // 🔴🔴 本文件头把「先开提示条再渲染」列为顺序不能改的第 2 条，而此前的代码
+  //   却把 `loadHtml2Canvas()` 排在提示条**之前** —— 冷启动后的第一次导出，
+  //   要先等一个 198KB 脚本的网络往返（移动端几百毫秒到一秒），那段时间里
+  //   屏幕没有任何反馈，用户看到的就是「点了没反应」。
+  //   而用户这次报障的正是「生成图片的时间太长」：等待不可怕，
+  //   看不见的等待才像坏了。提示条先上，加载与渲染都在它后面。
+  deps.onStatus('doing', COPY.exportDoing, 0);
+
+  // ③ 组件加载
   if (!(await loadHtml2Canvas())) {
     deps.onStatus('bad', COPY.exportLoadFail, deps.failMs);
     return 'loadfail';
   }
-  deps.onStatus('doing', COPY.exportDoing, 0);
 
   let card: ExportCard | null = null;
   try {
@@ -108,6 +130,28 @@ export async function exportNotePng(deps: ExportDeps): Promise<ExportResult> {
     // 🔴🔴 渲染 Promise **立即**开始，交付阶梯同步发起 ——
     //   剪贴板要抢在用户手势窗口内，await 渲染就晚了（见 render.ts 文件头）。
     const blobP = renderCardToPng(card.el);
+
+    // 🔴🔴🔴 触屏（移动端）分岔 —— 渲染成功后**不走复制阶梯**，弹窗接管
+    //   （用户报障第 4 条逐字拍板，v3.2.4；判据 EXPORT-29 钉着分岔位置）。
+    //
+    //   为什么复制语义在移动端退场：壳内 WebView 写剪贴板图片是假成功
+    //   （v3.2.2 Chromium 实锤），真写进去微信也不认（v3.2.3 多来源实锤）——
+    //   "复制"在移动端只剩小米笔记一个目的地，而用户要的是**把图发出去**。
+    //   弹窗给出两条真能用的路：保存到相册（微信相册选图）+ 系统分享面板。
+    //
+    //   🔴 分岔必须在 deliverPng 之前：桌面才走四档阶梯。
+    //   🔴 await blobP 失败继续走下方 catch（渲染失败该弹"导出失败"，不该无声）。
+    if (isTouchDevice()) {
+      const blob = await blobP;
+      // 🔴 先清「正在生成图片…」再开弹窗：弹窗 zIndex 40 会盖住提示条，
+      //   不清就是"弹窗底下挂着一条永远不消失的旧提示"。
+      deps.hideStatus();
+      await showExportModal(blob, {
+        saveToAlbum: deps.saveToAlbum,
+      });
+      return 'modal';
+    }
+
     const out = await deliverPng(blobP, {
       isNativeApp: deps.isNativeApp,
       blobToB64,
@@ -249,4 +293,179 @@ export function showPreview(blob: Blob): void {
     document.removeEventListener('keydown', onEsc);
     close();
   });
+}
+
+/** 移动端导出弹窗的注入口。 */
+export interface ExportModalDeps {
+  /**
+   * 相册桥（main.ts 条件注入：只有 `isNativeApp()` 才给）。
+   *
+   * 🔴 **存在才显示「保存到相册」按钮** —— 手机浏览器 / 旧壳上没有 ImgSave 桥，
+   *   "保存到相册"没有真能落地的路，不给一个点了必失败的按钮（判据 EXPORT-30）。
+   *   桥点了之后 ok:false ⇒ 弹窗内反馈失败，绝不谎报。
+   */
+  saveToAlbum?: ((base64: string, mime: string) => Promise<boolean>) | undefined;
+}
+
+/**
+ * 移动端导出弹窗（v3.2.4，用户报障第 4 条逐字拍板）：
+ *
+ *   上：生成图片的预览图（data: URL，长按可存 = 无桥环境的最后兜底）
+ *   下：左「保存到相册」 + 右「分享」（系统分享面板，与诊断报告同款）
+ *   右上角：关闭叉 —— **唯一**关闭出口
+ *
+ * 🔴🔴 点弹窗其他位置/外围**都不关**（用户逐字拍板）：mask 不绑任何点击关闭。
+ *   对照组 showPreview 有 `e.target === overlay` 外围关闭 —— 本函数绝不许有，
+ *   判据 EXPORT-30 反向钉着这两条（出现即红）。
+ *
+ * 🔴 为什么反馈条收进弹窗自己的 DOM（diagNote 同款纪律）：本弹窗 zIndex 40
+ *   盖住 #uploadNote，把反馈写进提示条 = 用户看不见 = 「点了没反应」
+ *   （v3.1.3 诊断导出真机实锤过同款事故，见 diag/panel.ts 文件头）。
+ *
+ * 🔴 开窗即转 base64（渲染完才进本函数，多等 ~20ms 无感）：预览图 data: URL、
+ *   保存相册、壳内分享三处共用这一份，不再各转各的（长图 base64 可能上 MB）。
+ */
+export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promise<void> {
+  document.getElementById('exportModalMask')?.remove();
+  const b64 = await blobToB64(blob);
+
+  const mask = document.createElement('div');
+  mask.className = 'mask';
+  mask.id = 'exportModalMask';
+  mask.setAttribute('role', 'dialog');
+  mask.setAttribute('aria-modal', 'true');
+  mask.setAttribute('aria-label', COPY.exportModalTitle);
+  // 🔴 老项目 index.html:2967：预览层压在提示条之上（zIndex 40）
+  mask.style.zIndex = '40';
+
+  const box = document.createElement('div');
+  box.className = 'box';
+  box.setAttribute('style', 'text-align:center;max-width:92vw');
+
+  const h = document.createElement('h1');
+  h.className = 'qr-title';
+  h.textContent = COPY.exportModalTitle;
+
+  // 右上角关闭叉：全站同一枚 ICON_X SVG（diag/ota 同款，不写字形 × —— 大小与
+  // 笔画粗细由系统字体决定，并排看明显"轻一号"）。走 innerHTML 安全：ICON_X
+  // 是本项目自产常量，无外部输入。
+  const x = document.createElement('button');
+  x.className = 'box-x';
+  x.type = 'button';
+  x.id = 'exportModalClose';
+  x.title = COPY.exportModalClose;
+  x.setAttribute('aria-label', COPY.exportModalClose);
+  x.innerHTML = ICON_X();
+
+  const img = document.createElement('img');
+  img.alt = COPY.exportPreviewAlt;
+  // 🔴 data: 而不是 blob:：壳内 WebView 长按菜单对 blob: 图常不给保存项，
+  //   data: 才有「长按存图」这条最后兜底（编辑器内图片同形态）。
+  img.src = 'data:image/png;base64,' + b64;
+  img.setAttribute(
+    'style',
+    'max-width:100%;max-height:56vh;border-radius:12px;background:#fff',
+  );
+
+  const note = document.createElement('div');
+  note.className = 'diag-note';
+  note.setAttribute('role', 'status');
+  note.setAttribute('aria-live', 'polite');
+  note.hidden = true;
+
+  let noteTimer: number | undefined;
+  const flash = (msg: string, kind: string): void => {
+    note.textContent = msg;
+    note.dataset.kind = kind;
+    note.hidden = false;
+    if (noteTimer !== undefined) window.clearTimeout(noteTimer);
+    noteTimer = window.setTimeout(() => {
+      // 只有"现在显示的仍是本条"才收（diag/panel.ts 同款守卫）
+      if (note.textContent === msg) note.hidden = true;
+    }, COPY.exportOkMs);
+  };
+
+  const close = (): void => {
+    if (noteTimer !== undefined) window.clearTimeout(noteTimer);
+    mask.remove();
+  };
+  x.addEventListener('click', close);
+  // 🔴🔴 mask **不**绑任何点击关闭 —— 关闭只有右上角叉一条路。
+
+  const shareBtn = document.createElement('button');
+  shareBtn.type = 'button';
+  shareBtn.className = 'row-btn';
+  shareBtn.id = 'exportModalShare';
+  shareBtn.textContent = COPY.exportModalShare;
+
+  const onShare = async (): Promise<void> => {
+    // ① 壳内 ImgShare 桥（ACTION_SEND 系统分享面板，与诊断报告分享同款）。
+    //    壳内 WebView 没有 navigator.share（DiagExportPlugin.kt 注释双实锤），
+    //    这座桥是壳内唯一能拉起系统分享组件的路。
+    if (hasNativeShare()) {
+      try {
+        // ok:true = 面板已拉起；用户在面板里点取消 native 侧收不到回执，
+        // 一律按"已拉起"算，静默不打扰（DiagExport.shareText 同款口径）。
+        if (await nativeShareImage(b64, 'image/png')) return;
+      } catch {
+        /* 落下一级 */
+      }
+    }
+    // ② 网页系统分享面板（移动浏览器；Android Chrome 实测可用）
+    const nav = navigator as Navigator & {
+      canShare?: (data: { files: File[] }) => boolean;
+      share?: (data: { files: File[]; title?: string }) => Promise<void>;
+    };
+    if (typeof nav.share === 'function' && typeof nav.canShare === 'function') {
+      try {
+        const file = new File([blob], 'note.png', { type: 'image/png' });
+        if (nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: COPY.exportModalTitle });
+          return; // 用户在面板点取消（AbortError）也到此为止，静默不打扰
+        }
+      } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') return; // 取消静默
+        /* 真失败 → 落到反馈 */
+      }
+    }
+    // ③ 都不可用：弹窗内可见失败（预览图是 data: URL，长按可存 —— 文案指路）
+    flash(COPY.exportShareFail, 'bad');
+  };
+  shareBtn.addEventListener('click', () => {
+    void onShare();
+  });
+
+  const row = document.createElement('div');
+  row.setAttribute('style', 'display:flex;gap:12px;justify-content:center;margin-top:14px');
+
+  // 🔴🔴 保存按钮**整个**以 saveToAlbum 桥存在为前提（main.ts 只在原生壳注入）：
+  //   手机浏览器 / 旧壳上不创建也不上屏 —— 不给一个点了必失败的按钮。
+  //   判据 EXPORT-30 钉 `if (deps.saveToAlbum) {` 块形态；e2e EXPORT-M01
+  //   行为级双向钉（有桥显示/无桥不显示）。
+  if (deps.saveToAlbum) {
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'row-btn';
+    saveBtn.id = 'exportModalSave';
+    saveBtn.textContent = COPY.exportModalSave;
+    saveBtn.addEventListener('click', () => {
+      if (!deps.saveToAlbum) return; // 双保险：块进了必有桥
+      flash(COPY.exportAlbumDoing, 'doing');
+      void deps
+        .saveToAlbum(b64, 'image/png')
+        .then((ok) => {
+          // 🔴 成败都必须有弹窗内反馈（判据 EXPORT-31）—— 静默 = 「点了没反应」
+          flash(ok ? COPY.exportAlbumOk : COPY.exportAlbumFail, ok ? 'ok' : 'bad');
+        })
+        .catch(() => flash(COPY.exportAlbumFail, 'bad'));
+    });
+    // 🔴 左保存右分享（用户拍板；判据 EXPORT-30 钉 append 顺序）
+    row.append(saveBtn, shareBtn);
+  } else {
+    row.append(shareBtn);
+  }
+
+  box.append(h, x, img, note, row);
+  mask.appendChild(box);
+  document.body.appendChild(mask);
 }

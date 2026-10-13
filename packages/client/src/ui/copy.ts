@@ -655,6 +655,19 @@ export const COPY = {
   pairReveal: '重新显示',
   /** 配对成功落地后的提示 */
   pairLanded: '已扫码解锁，正在打开笔记',
+  /**
+   * 落地提示的驻留毫秒。
+   *
+   * 🔴🔴 为什么必须是正数（用户报障）：v3.2.3 及以前，`handleScanRaw` 与
+   *   `landPairFragment` 两个入口都用 `showUploadNote('doing', …, 0)` 挂这条 ——
+   *   而 0 的语义是**常驻**。于是真机上笔记早已打开、用户已经开始打字，
+   *   屏幕底部还挂着「已扫码解锁，正在打开笔记」，用户原话：
+   *   「打开笔记之后，这条提示过几秒钟帮我消掉，不要一直显示在那里」。
+   *   这条提示描述的是一个**已经结束的动作**，没有理由常驻。
+   * 取 3000：与 exportOkMs / scanOkMs 同级（读完一句话 + 一点余量），
+   *   且明显短于 uploadFailMs 的 4500（失败要比成功多留一会）。
+   */
+  pairLandedMs: 3000,
 
   /* 取景层（老项目原文） */
   scanTitle: '扫一扫',
@@ -801,6 +814,21 @@ export const COPY = {
   exportDone: '完 成',
   /** 编辑器不在时点导出（顶栏还在但笔记已卸载） */
   exportNoEditor: '请先打开一篇笔记再导出',
+
+  /* ── 移动端导出弹窗（v3.2.4，用户报障第 4 条逐字拍板）────────────
+   * 触屏渲染成功后不走复制阶梯，改弹窗接管：上预览图、下「保存到相册」（左）
+   * 与「分享」（右）、右上角关闭叉；点弹窗其他位置/外围都不关。
+   * 反馈一律收进弹窗自己的反馈条（diagNote 同款纪律：弹窗 zIndex 40 盖住
+   * #uploadNote，写进提示条 = 用户看不见 = 「点了没反应」）。 */
+  exportModalTitle: '图片已生成',
+  exportModalClose: '关闭',
+  exportModalSave: '保存到相册',
+  exportModalShare: '分享',
+  exportAlbumDoing: '正在保存到相册…',
+  exportAlbumOk: '已保存到相册',
+  exportAlbumFail: '保存到相册失败，请重试',
+  /** 分享失败（壳内桥与网页 share 都不可用时的最后反馈；预览图是 data: URL，长按可存） */
+  exportShareFail: '当前无法调起分享，可长按图片保存',
   /** 非图片文件的拒绝文案 */
   uploadNotImage: '不是图片文件，图片未插入，请重试',
 
