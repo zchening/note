@@ -49,6 +49,17 @@
 export const EGG_DRAW_KEY = 'notesync_bj_draw';
 /** 每档已用序号数组（localStorage）。老项目 `NS_DRAW_SEEN = 'notesync_draw_seen'`（:5651）。 */
 export const EGG_DRAW_SEEN_KEY = 'notesync_bj_draw_seen';
+/**
+ * 🔴 v3.2.6 每日一卡闸：最近一次**实际兑现**的本地日期 `yyyyMMdd`（localStorage）。
+ *
+ *   老项目没有这道闸 —— 它每次点刷新都抽（权重注释按「每天点十次」定档位，
+ *   但用户实际刷得更勤 ⇒ 报障「每次点右下角刷新都出一张卡，太频繁」）。
+ *   用户拍板：**卡每天只出现一次**。键名沿用 `notesync_bj_` 前缀（同上）。
+ *
+ *   🔴 记账点在**兑现时**（drawConsume 真要弹卡的那一刻），不在抽卡时：
+ *     让位/超时作废都不烧当天机会 —— 用户没看见的奖不算开过。
+ */
+export const EGG_DRAW_DAY_KEY = 'notesync_bj_draw_day';
 
 /* ───────────────────────── 档位与权重 ───────────────────────── */
 
@@ -504,6 +515,8 @@ export interface DrawDeps {
   schedule?: (fn: () => void, ms: number) => void;
   /** 随机源，缺省 `Math.random`。抽卡与选序号都走它，单测才能定住。 */
   rnd?: () => number;
+  /** 时钟，缺省 `new Date`。每日一卡闸用，单测注入跨日场景。 */
+  now?: () => Date;
 }
 
 /* ───────────────────────── 抽卡（老项目 :5660-5691） ───────────────────────── */
@@ -568,15 +581,33 @@ export function drawIdx(
 }
 
 /**
+ * 本地日期串 `yyyyMMdd`（与 fx.ts 的 greetDayKey 同口径 —— **不是 UTC**，
+ * 跨时区会差一天）。每日一卡闸的记账单位。
+ */
+export function drawDayKey(d: Date): string {
+  return (
+    d.getFullYear() +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    String(d.getDate()).padStart(2, '0')
+  );
+}
+
+/**
  * 点刷新时抽一次并落袋。老项目 `nsDrawRoll`（:5680-5691）**逐字**。
  *
  * 🔴 「任何异常都不得挡住刷新本身」是纪律：整段包 try/catch，
  *   抽卡失败时刷新照刷（老项目 :5765/:5766 的 `try{...}catch(e){}` + `reload()`）。
  *
+ * 🔴 v3.2.6 每日一卡闸：今天**已经实际兑现过**一张卡 ⇒ 不再落新券
+ *   （省一次无谓写账；权威闸在 consume）。判不出来（storage 读挂）就照抽 ——
+ *   consume 那道闸兜底，宁可多抽不可漏抽。
+ *
  * @returns 落袋的 {t, i}；没抽到返回 null（给单测看，生产侧忽略）。
  */
 export function drawRoll(deps: DrawDeps): { t: string; i: number } | null {
   try {
+    const now = (deps.now ?? (() => new Date()))();
+    if (deps.local.getItem(EGG_DRAW_DAY_KEY) === drawDayKey(now)) return null;
     const rnd = deps.rnd ?? Math.random;
     const t = drawTierOf(Math.floor(rnd() * 100));
     const pool = DRAW_POOL[t];
@@ -696,7 +727,16 @@ export function drawWaitCount(): number {
  *   后续任何一次误调用都读不到东西，不会把同一张卡弹第二遍。
  *   删袋放在 show 之后则会在 show 抛异常时留下脏袋（下次刷新再兑一次）。
  *
- * @returns 'shown' 兑现了 / 'wait' 让位中 / 'void' 无券或已超时作废（给单测看）。
+ * 🔴🔴 v3.2.6 每日一卡闸（用户报障「每次刷新都出卡，太频繁」，拍板每天一次）：
+ *
+ *   - 判据放**让位之前**：今天已兑现过 ⇒ 券直接作废清袋，连 8 秒轮询都不用等
+ *     （反正等到了也弹不出来）。
+ *   - 记账（写 day key）只发生在**真兑现的那一刻**：让位中、超时作废都不写 ——
+ *     用户没看见的奖不算开过，当天晚些时候刷新仍有机会出卡。
+ *   - 与「删袋在 show 之前」同一位点：先清袋、再记账、再出卡 —— 三个动作
+ *     任一失败（storage 异常整段被 catch）都不会把同一张卡弹两遍。
+ *
+ * @returns 'shown' 兑现了 / 'wait' 让位中 / 'void' 无券、越界、超时作废或今日已开（给单测看）。
  */
 export function drawConsume(deps: DrawDeps): 'shown' | 'wait' | 'void' {
   try {
@@ -709,8 +749,16 @@ export function drawConsume(deps: DrawDeps): 'shown' | 'wait' | 'void' {
       deps.session.removeItem(EGG_DRAW_KEY);
       return 'void';
     }
+    // 🔴🔴 v3.2.6 每日一卡闸：今天已经实际兑现过 ⇒ 作废清袋，不弹第二张。
+    const now = (deps.now ?? (() => new Date()))();
+    const today = drawDayKey(now);
+    if (deps.local.getItem(EGG_DRAW_DAY_KEY) === today) {
+      deps.session.removeItem(EGG_DRAW_KEY);
+      return 'void';
+    }
     const busy = deps.busy ?? (() => drawBusy());
     // 🔴 让位时绝不删袋：等泳道空出来再兑现，最多等 8 秒，超时才作废。
+    //   （让位期间 day key 未写 —— 当天机会没烧。）
     if (busy()) {
       if (waitCount++ >= WAIT_LIMIT) {
         waitCount = 0;
@@ -723,6 +771,8 @@ export function drawConsume(deps: DrawDeps): 'shown' | 'wait' | 'void' {
     }
     waitCount = 0;
     deps.session.removeItem(EGG_DRAW_KEY);
+    // 🔴 v3.2.6：真兑现了才记「今天已开」—— 失败/让位/超时都不烧当天机会
+    deps.local.setItem(EGG_DRAW_DAY_KEY, today);
     const show = deps.show ?? renderDrawCard;
     // 上面的越界守卫已保证 t 命中池、i 在 [0, pool.length)，这里取值得当。
     show(d.t as string, pool[d.i as number] as string);
@@ -825,6 +875,7 @@ export function buildEggDraw(overrides: Partial<DrawDeps> = {}): EggDraw {
   if (overrides.busy) deps.busy = overrides.busy;
   if (overrides.schedule) deps.schedule = overrides.schedule;
   if (overrides.rnd) deps.rnd = overrides.rnd;
+  if (overrides.now) deps.now = overrides.now;
   // 🔴 busy 的 doc 也要能被注入：默认走全局 document。
   const busy = deps.busy ?? (() => drawBusy());
   return {

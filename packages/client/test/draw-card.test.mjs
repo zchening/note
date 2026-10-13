@@ -31,11 +31,13 @@ import {
   DRAW_HOLD,
   DRAW_POOL,
   DRAW_W,
+  EGG_DRAW_DAY_KEY,
   EGG_DRAW_KEY,
   EGG_DRAW_SEEN_KEY,
   __resetDrawWait,
   drawBusy,
   drawConsume,
+  drawDayKey,
   drawIdx,
   drawPoolSize,
   drawRoll,
@@ -503,3 +505,127 @@ test('DR-07e 抽卡异常不挡住刷新：storage 写死抛异常时 roll 静�
   const r = drawRoll({ session: bad, local: bad, rnd: () => 0 });
   assert.equal(r, null, '写盘炸了应静默返回 null，而不是把异常抛给刷新按钮');
 });
+
+/* ═══════════════════════════════════════════════════════════════════════
+   🔴🔴 DR-08 每日一卡闸（v3.2.6 用户报障「每次刷新都出卡，太频繁」，
+        拍板：卡每天只出现一次。老项目无此闸，属用户批准的刻意偏离。）
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** 固定时钟：本地 2026-10-13 10:00 与次日 09:00（用本地构造，防 UTC 偏一天）。 */
+const NOW = () => new Date(2026, 9, 13, 10, 0, 0);
+const NEXT = () => new Date(2026, 9, 14, 9, 0, 0);
+
+test('DR-08a 🔴🔴 当日已兑现 ⇒ 再兑新券不弹且清袋（核心：卡每天只出现一次）', () => {
+  __resetDrawWait();
+  const session = memStore();
+  const local = memStore({ [EGG_DRAW_DAY_KEY]: '20261013' });
+  // 手动塞一张新券（绕过 roll 的同款闸，专测 consume 这道权威闸）
+  session.setItem(EGG_DRAW_KEY, JSON.stringify({ t: 'r', i: 1 }));
+  const shown = [];
+  const r = drawConsume({
+    session, local, now: NOW,
+    show: (t, x) => shown.push([t, x]),
+  });
+  assert.equal(r, 'void', '当日已开 ⇒ 不弹');
+  assert.equal(shown.length, 0, '当日已开 ⇒ 不该出第二张卡');
+  assert.ok(!session._has(EGG_DRAW_KEY), '券应作废清袋（不留到明天误弹）');
+});
+
+test('DR-08b 🔴🔴 兑现即记账当日；同日再兑不弹、次日新券照常弹', () => {
+  __resetDrawWait();
+  const session = memStore();
+  const local = memStore();
+  drawRoll({ session, local, rnd: () => 0, now: NOW });
+  const shown = [];
+  const r1 = drawConsume({
+    session, local, now: NOW, busy: () => false,
+    show: (t, x) => shown.push([t, x]),
+  });
+  assert.equal(r1, 'shown');
+  assert.equal(local.getItem(EGG_DRAW_DAY_KEY), '20261013', '兑现必须记「今天已开」账');
+  // 同日再塞新券 ⇒ 不弹
+  session.setItem(EGG_DRAW_KEY, JSON.stringify({ t: 'sr', i: 0 }));
+  const r2 = drawConsume({
+    session, local, now: NOW, busy: () => false,
+    show: (t, x) => shown.push([t, x]),
+  });
+  assert.equal(r2, 'void');
+  assert.equal(shown.length, 1, '同日不许弹第二张');
+  // 次日 ⇒ 照常弹，记账翻到新的一天
+  session.setItem(EGG_DRAW_KEY, JSON.stringify({ t: 'sr', i: 0 }));
+  const r3 = drawConsume({
+    session, local, now: NEXT, busy: () => false,
+    show: (t, x) => shown.push([t, x]),
+  });
+  assert.equal(r3, 'shown');
+  assert.equal(shown.length, 2, '次日必须能再开');
+  assert.equal(local.getItem(EGG_DRAW_DAY_KEY), '20261014', '记账应翻到次日');
+});
+
+test('DR-08c 🔴 让位期间不记账（当天机会没烧），泳道空出来兑现那刻才记', () => {
+  __resetDrawWait();
+  const session = memStore();
+  const local = memStore();
+  drawRoll({ session, local, rnd: () => 0, now: NOW });
+  let busy = true;
+  const scheduled = [];
+  const deps = {
+    session, local, now: NOW,
+    busy: () => busy,
+    show: () => {},
+    schedule: (fn) => void scheduled.push(fn),
+  };
+  const r1 = drawConsume(deps);
+  assert.equal(r1, 'wait');
+  assert.ok(!local._has(EGG_DRAW_DAY_KEY), '🔴 让位时记账＝用户没看见卡却烧掉当天机会');
+  busy = false;
+  for (const fn of scheduled) fn(); // 重入兑现
+  assert.equal(local.getItem(EGG_DRAW_DAY_KEY), '20261013', '兑现那刻才记账');
+});
+
+test('DR-08d 🔴 让位超时作废也不记账（当天再刷新仍有机会出卡）', () => {
+  __resetDrawWait();
+  const session = memStore();
+  const local = memStore();
+  drawRoll({ session, local, rnd: () => 0, now: NOW });
+  for (let k = 0; k < 40; k++) {
+    const r = drawConsume({
+      session, local, now: NOW,
+      busy: () => true, show: () => {}, schedule: () => {},
+    });
+    if (r === 'void') break;
+  }
+  assert.ok(!local._has(EGG_DRAW_DAY_KEY), '超时作废不许记账 —— 没看见的奖不算开过');
+});
+
+test('DR-08e roll 侧闸：当日已开 ⇒ 不再落新券、已用序号账不动', () => {
+  const session = memStore();
+  const local = memStore({ [EGG_DRAW_DAY_KEY]: '20261013' });
+  const r = drawRoll({ session, local, rnd: () => 0, now: NOW });
+  assert.equal(r, null, '当日已开 ⇒ roll 直接不抽');
+  assert.ok(!session._has(EGG_DRAW_KEY), '不该有新券落袋');
+  assert.ok(!local._has(EGG_DRAW_SEEN_KEY), '已用序号账不许被无谓消耗');
+});
+
+test('DR-08f 日期口径：drawDayKey 输出本地 yyyyMMdd（与 greetDayKey 同口径，不是 UTC）', () => {
+  assert.equal(drawDayKey(new Date(2026, 9, 13, 23, 59)), '20261013');
+  assert.equal(drawDayKey(new Date(2026, 0, 1, 0, 0)), '20260101');
+  assert.equal(EGG_DRAW_DAY_KEY, 'notesync_bj_draw_day', '键名必须用 bj 前缀');
+});
+
+test('DR-08g 源码字面闸：每日闸判定在让位之前；记账在让位之后、出卡之前', () => {
+  const fn = DRAW_CODE.slice(DRAW_CODE.indexOf('export function drawConsume'));
+  const gateAt = fn.indexOf('getItem(EGG_DRAW_DAY_KEY)');
+  const busyAt = fn.indexOf('busy()');
+  const markAt = fn.indexOf('setItem(EGG_DRAW_DAY_KEY');
+  const showAt = fn.indexOf('?? renderDrawCard');
+  assert.ok(gateAt > 0, '每日闸判定应存在');
+  assert.ok(busyAt > gateAt, '每日闸必须在让位判定之前（已开当日连 8s 轮询都省）');
+  assert.ok(markAt > busyAt, '记账必须在让位分支之后（让位/超时不烧当天机会）');
+  assert.ok(showAt > markAt, '记账必须在出卡之前（与「删袋在 show 之前」同位点）');
+  // 让位分支内不许出现记账
+  const branchEnd = fn.lastIndexOf('waitCount = 0;', showAt);
+  const branch = fn.slice(busyAt, branchEnd);
+  assert.ok(!branch.includes('setItem(EGG_DRAW_DAY_KEY'), '让位分支内不许记账');
+});
+
