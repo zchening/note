@@ -2394,6 +2394,13 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     //   🔴🔴 v3.0.8：喂的是 canEditTree()（比 canApply() 更严）—— 除时间窗外还要
     //   躲开"整段改写会话窗口"（豆包「智能整理」大段删除后分批插入的间隙）。
     canEdit: () => (imeGate ? imeGate.canEditTree() : true),
+    // 🔴 v3.2.5 折叠长按删除的门控：**不能复用 canEdit** —— canEditTree 叠了
+    //   typingActive（1.5s 打字活跃期，那是给"远端回灌"推迟用的），用户打完字
+    //   立刻长按折叠标题会被拦成「点了没反应」（e2e 探针实锤：键入后 1.5s 内
+    //   长按必哑）。本手势是用户主动的离散动作，只要躲开 组字 / 语音冷却 /
+    //   整段改写 三个真正的 IME 危险窗即可。
+    canFoldDelete: () =>
+      imeGate ? (!imeGate.composing && !imeGate.composeCooling && !imeGate.bulkActive) : true,
   });
   // 🔴 自定义命令（插入折叠块等）也要注册。漏掉的表现是
   //   「菜单点了没反应、零报错」—— dispatchCommand 进了没有监听者的黑洞，

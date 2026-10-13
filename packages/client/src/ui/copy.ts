@@ -508,6 +508,11 @@ export const COPY = {
   foldDefaultTitle: '折叠块',
   /** 折叠块正文区的无障碍标签 */
   foldBodyAria: '折叠块内容',
+  /** 🔴 v3.2.5 报障⑤：长按折叠标题弹出的删除确认框（此前折叠块没有删除整块的路） */
+  foldDeleteTitle: '删除折叠块',
+  foldDeleteBody: '折叠标题和里面的内容会一起删除。',
+  foldDeleteCancel: '取消',
+  foldDeleteOk: '删 除',
 
   /* 彩蛋层 */
   /** 彩蛋图鉴标题 */
@@ -815,9 +820,11 @@ export const COPY = {
   /** 编辑器不在时点导出（顶栏还在但笔记已卸载） */
   exportNoEditor: '请先打开一篇笔记再导出',
 
-  /* ── 移动端导出弹窗（v3.2.4，用户报障第 4 条逐字拍板）────────────
+  /* ── 移动端导出弹窗（v3.2.4 报障第 4 条逐字拍板；v3.2.5 报障 1/2/3 修订）────
    * 触屏渲染成功后不走复制阶梯，改弹窗接管：上预览图、下「保存到相册」（左）
    * 与「分享」（右）、右上角关闭叉；点弹窗其他位置/外围都不关。
+   * v3.2.5：保存成功/分享拉起/分享取消都自动关弹窗（用户拍板「点完自动关」，
+   * 关窗本身即成功反馈，故无"已保存"成功文案）；失败才留窗 flash 指路。
    * 反馈一律收进弹窗自己的反馈条（diagNote 同款纪律：弹窗 zIndex 40 盖住
    * #uploadNote，写进提示条 = 用户看不见 = 「点了没反应」）。 */
   exportModalTitle: '图片已生成',
@@ -825,7 +832,6 @@ export const COPY = {
   exportModalSave: '保存到相册',
   exportModalShare: '分享',
   exportAlbumDoing: '正在保存到相册…',
-  exportAlbumOk: '已保存到相册',
   exportAlbumFail: '保存到相册失败，请重试',
   /** 分享失败（壳内桥与网页 share 都不可用时的最后反馈；预览图是 data: URL，长按可存） */
   exportShareFail: '当前无法调起分享，可长按图片保存',

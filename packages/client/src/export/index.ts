@@ -342,6 +342,12 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
   box.className = 'box';
   box.setAttribute('style', 'text-align:center;max-width:92vw');
 
+  // 🔴 叉要右上角（v3.2.5 报障）：.box-x 是流内格子（无 absolute），必须放进
+  //   .modal-head（flex + space-between）才与标题同行右对齐 —— 直接挂 box
+  //   会掉到标题下方左侧（v3.2.4 真机实锤）。
+  const head = document.createElement('div');
+  head.className = 'modal-head';
+
   const h = document.createElement('h1');
   h.className = 'qr-title';
   h.textContent = COPY.exportModalTitle;
@@ -356,6 +362,7 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
   x.title = COPY.exportModalClose;
   x.setAttribute('aria-label', COPY.exportModalClose);
   x.innerHTML = ICON_X();
+  head.append(h, x);
 
   const img = document.createElement('img');
   img.alt = COPY.exportPreviewAlt;
@@ -392,10 +399,15 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
   x.addEventListener('click', close);
   // 🔴🔴 mask **不**绑任何点击关闭 —— 关闭只有右上角叉一条路。
 
+  // 🔴🔴 按钮禁用 .row-btn（v3.2.5 报障）：其 flex:none + 通栏
+  //   .box button{width:100%} 叠加 = 两枚各 297px 的不可收缩按钮并排，
+  //   总宽 594px 溢出 297px 的行（探针实测 saveBtn x=-108）。改
+  //   flex:1 1 0;min-width:0 —— 等分且可收缩，不溢出。
+  const btnStyle = 'flex:1 1 0;min-width:0';
   const shareBtn = document.createElement('button');
   shareBtn.type = 'button';
-  shareBtn.className = 'row-btn';
   shareBtn.id = 'exportModalShare';
+  shareBtn.setAttribute('style', btnStyle);
   shareBtn.textContent = COPY.exportModalShare;
 
   const onShare = async (): Promise<void> => {
@@ -406,7 +418,10 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
       try {
         // ok:true = 面板已拉起；用户在面板里点取消 native 侧收不到回执，
         // 一律按"已拉起"算，静默不打扰（DiagExport.shareText 同款口径）。
-        if (await nativeShareImage(b64, 'image/png')) return;
+        if (await nativeShareImage(b64, 'image/png')) {
+          close(); // v3.2.5：点完分享自动关弹窗（用户拍板）
+          return;
+        }
       } catch {
         /* 落下一级 */
       }
@@ -421,10 +436,14 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
         const file = new File([blob], 'note.png', { type: 'image/png' });
         if (nav.canShare({ files: [file] })) {
           await nav.share({ files: [file], title: COPY.exportModalTitle });
-          return; // 用户在面板点取消（AbortError）也到此为止，静默不打扰
+          close(); // v3.2.5：分享面板拉起即算"点完了"，自动关
+          return;
         }
       } catch (e) {
-        if (e instanceof Error && e.name === 'AbortError') return; // 取消静默
+        if (e instanceof Error && e.name === 'AbortError') {
+          close(); // 用户取消面板 = 用完了，同样自动关（真失败才留窗）
+          return;
+        }
         /* 真失败 → 落到反馈 */
       }
     }
@@ -436,7 +455,7 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
   });
 
   const row = document.createElement('div');
-  row.setAttribute('style', 'display:flex;gap:12px;justify-content:center;margin-top:14px');
+  row.setAttribute('style', 'display:flex;gap:12px;margin-top:14px');
 
   // 🔴🔴 保存按钮**整个**以 saveToAlbum 桥存在为前提（main.ts 只在原生壳注入）：
   //   手机浏览器 / 旧壳上不创建也不上屏 —— 不给一个点了必失败的按钮。
@@ -445,8 +464,8 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
   if (deps.saveToAlbum) {
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
-    saveBtn.className = 'row-btn';
     saveBtn.id = 'exportModalSave';
+    saveBtn.setAttribute('style', btnStyle);
     saveBtn.textContent = COPY.exportModalSave;
     saveBtn.addEventListener('click', () => {
       if (!deps.saveToAlbum) return; // 双保险：块进了必有桥
@@ -454,8 +473,10 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
       void deps
         .saveToAlbum(b64, 'image/png')
         .then((ok) => {
-          // 🔴 成败都必须有弹窗内反馈（判据 EXPORT-31）—— 静默 = 「点了没反应」
-          flash(ok ? COPY.exportAlbumOk : COPY.exportAlbumFail, ok ? 'ok' : 'bad');
+          // 🔴 v3.2.5：成功即自动关弹窗（用户拍板「点完自动关」——关窗本身
+          //   就是成功反馈）；失败留窗 flash，指路重试。
+          if (ok) close();
+          else flash(COPY.exportAlbumFail, 'bad');
         })
         .catch(() => flash(COPY.exportAlbumFail, 'bad'));
     });
@@ -465,7 +486,7 @@ export async function showExportModal(blob: Blob, deps: ExportModalDeps): Promis
     row.append(shareBtn);
   }
 
-  box.append(h, x, img, note, row);
+  box.append(head, img, note, row);
   mask.appendChild(box);
   document.body.appendChild(mask);
 }

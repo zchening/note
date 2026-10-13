@@ -220,10 +220,13 @@ export function buildCard(deps: BuildCardDeps): ExportCard {
   );
 
   // 页头：金题线 + 日期；右角 noteId 无框等宽刻印
+  // 🔴 v3.2.5 报障④：flex-end 底对齐时日期(12px/1=12px 盒)与编号(11px/1.6=17.6px
+  //   盒)底边对齐 ⇒ 基线错位，视觉上"不在同一行"。改垂直居中：两盒中心线对齐，
+  //   金线/日期/编号落在同一视觉行（金线在 hdL 内本就 align-items:center）。
   const head = document.createElement('div');
   head.setAttribute(
     'style',
-    'display:flex;align-items:flex-end;justify-content:space-between;gap:12px',
+    'display:flex;align-items:center;justify-content:space-between;gap:12px',
   );
   const hdL = document.createElement('div');
   hdL.setAttribute('style', 'display:flex;align-items:center;gap:10px;flex:none');

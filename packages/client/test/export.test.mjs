@@ -681,11 +681,21 @@ test('EXPORT-30 🔴🔴 弹窗结构：预览图 + 左保存右分享 + 右上�
   assert.ok(/if \(deps\.saveToAlbum\) \{/.test(fn), '保存按钮必须由 saveToAlbum 桥存在与否决定显示');
   assert.ok(/row\.append\(saveBtn, shareBtn\)/.test(fn), '缺 row.append(saveBtn, shareBtn)（左保存右分享）');
   assert.ok(/row\.append\(shareBtn\)/.test(fn), '无桥时必须只上分享按钮');
-  // 左保存右分享（append 顺序）
-  const append = fn.match(/\.append\((\w+),\s*(\w+)\)/);
-  assert.ok(append, '按钮行缺 append');
-  assert.equal(append[1], 'saveBtn', 'append 第一个必须是保存（左）');
-  assert.equal(append[2], 'shareBtn', 'append 第二个必须是分享（右）');
+  // 左保存右分享 + 标题/叉顺序（精确钉各 append，别被通用正则骗绿 —— 现在
+  //   fn 里有 head.append(h, x) 与 row.append(...) 两种两参 append）
+  assert.ok(/row\.append\(saveBtn,\s*shareBtn\)/.test(fn), '缺 row.append(saveBtn, shareBtn)（左保存右分享）');
+  assert.ok(/row\.append\(shareBtn\)/.test(fn), '无桥时必须只上分享按钮');
+  assert.ok(/head\.append\(h,\s*x\)/.test(fn), 'modal-head 内序必须标题在左、叉在右');
+  // 🔴🔴 v3.2.5 报障①：按钮禁用 .row-btn —— 其 flex:none + 通栏
+  //   .box button{width:100%} 叠加 = 两枚各 297px 的不可收缩按钮并排，
+  //   总宽 594px 溢出 297px 的行（真机实锤）。改 inline flex:1 1 0 等分收缩。
+  assert.ok(!fn.includes('row-btn'), '弹窗按钮不许用 .row-btn（flex:none+通栏宽=横向溢出）');
+  assert.ok(fn.includes('flex:1 1 0;min-width:0'), '按钮必须等分且可收缩（flex:1 1 0;min-width:0）');
+  // 🔴 v3.2.5 报障②：叉必须进 .modal-head（右上角）—— .box-x 是流内格子
+  //   （无 absolute），直接挂 box 会掉到标题下方左侧（真机实锤）。
+  assert.ok(fn.includes('modal-head'), '缺 modal-head 包裹（叉要右上角与标题同行）');
+  assert.ok(/head\.append\(h,\s*x\)/.test(fn), '标题与叉必须同进 modal-head');
+  assert.ok(/box\.append\(head,/.test(fn), 'box 必须挂 head（不是裸 h+x）');
   // 🔴 反馈必须收进弹窗自己的 DOM（diagNote 同款纪律）：弹窗 zIndex 40 盖住
   //   #uploadNote，把反馈写进提示条 = 用户看不见 = 「点了没反应」
   assert.ok(/aria-live|role.*status|'status'/.test(fn), '弹窗内缺反馈条（role=status/aria-live）');
@@ -704,8 +714,13 @@ test('EXPORT-31 🔴🔴 分享阶梯：壳内 ImgShare 桥 → 网页 navigator
   assert.ok(/AbortError/.test(share), '分享取消未单列（不许把用户取消当失败）');
   // ③ 真失败必须弹窗内可见反馈
   assert.ok(/exportShareFail/.test(share), '分享失败缺可见反馈文案');
-  // ④ 保存按钮点击：成功/失败都必须有弹窗内反馈，不许静默
-  assert.ok(/exportAlbumOk/.test(fn), '保存成功缺反馈');
+  // 🔴🔴 v3.2.5 报障③：分享成功（桥 ok / nav.share resolve）与用户取消
+  //   （AbortError = 面板用完了）三条路都必须自动关弹窗 —— 点完就走
+  assert.ok(/nativeShareImage\([\s\S]{0,120}?close\(\)/.test(share), '壳内桥拉起成功必须 close()');
+  assert.ok(/await nav\.share\(\{[\s\S]{0,200}?close\(\)/.test(share), '网页分享成功必须 close()');
+  assert.ok(/AbortError[\s\S]{0,120}?close\(\)/.test(share), '用户取消分享面板必须 close()');
+  // ④ 保存按钮点击：成功自动关弹窗（关窗本身即成功反馈）；失败弹窗内可见反馈
+  assert.ok(/if \(ok\) close\(\)/.test(fn), '保存成功必须自动关弹窗（用户拍板「点完自动关」）');
   assert.ok(/exportAlbumFail/.test(fn), '保存失败缺反馈');
 
   // ⑤ 原生桥文件：现读 Capacitor.Plugins.ImgShare（diag/ImgSave 同款纪律）

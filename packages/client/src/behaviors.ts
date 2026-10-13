@@ -118,6 +118,7 @@ import { $createFoldNode, $isFoldNode, type FoldNode } from './nodes.ts';
 import { spansToNodes } from './serialize.ts';
 import { registerLinkify } from './linkify/deferred.ts';
 import { dismissKeyboardForTouch } from './platform/touch.ts';
+import { COPY } from './ui/copy.ts';
 import type { Span } from '@bj/shared-schema';
 
 /**拖拽高亮用的 class。与 styles.css `.ns-editor.dragover` 一一对应（改一处必须改两处）。 */
@@ -157,6 +158,14 @@ export interface BehaviorDeps {
    *   否则 Android 输入法按旧偏移提交 ⇒ 整段正文被替换（语音丢字报障）。
    */
   canEdit?: () => boolean;
+  /**
+   * 🔴 v3.2.5 折叠长按删除专用门控：**不能复用 canEdit** —— canEditTree 叠了
+   *   typingActive（1.5s 打字活跃期），那是给"远端回灌"推迟用的；用户
+   *   打完字立刻长按折叠标题会被它拦成「点了没反应」（e2e 探针实锤：
+   *   键入后 1.5s 内长按必哑）。本手势是用户主动的离散动作，只要躲开
+   *   组字 / 语音冷却 / 整段改写 三个真正的 IME 危险窗即可。
+   */
+  canFoldDelete?: () => boolean;
 }
 
 /**
@@ -240,7 +249,8 @@ export function registerBehaviors(editor: LexicalEditor, deps: BehaviorDeps): Be
   // 折叠块：点标题行开合 + 光标在折叠块内按 Enter 自动展开。
   // 🔴🔴 必须注册在 list 之后、richText 之前：Lexical 的命令是「后注册者先询问」，
   //   折叠的点击处理若排在 richText 之后，会被 richText 的兜底抢走。
-  const unregisterFold = registerFoldBehavior(editor);
+  //   v3.2.5：长按删除整块走同一入口，canEdit 门控一并喂进去。
+  const unregisterFold = registerFoldBehavior(editor, deps.canFoldDelete);
 
   // 🔴 行首 `[折叠]` /`[/折叠]` 自动转成FoldNode（老项目 applyFolds 的等价物）。
   //   缺它= 折叠功能对真实用户完全不可达（只有 e2e 钩子能造）。
@@ -416,7 +426,7 @@ function registerImageFileInput(editor: LexicalEditor, uploadImage: (file: File)
  *   这里实现为「点标题只切换开合，不移动光标」，与老项目一致。
  *   吞掉焦点的话，用户想接着在正文里打字就必须多点一次，体感明显变差。
  */
-function registerFoldBehavior(editor: LexicalEditor): () => void {
+function registerFoldBehavior(editor: LexicalEditor, canDelete?: () => boolean): () => void {
   const onClick = editor.registerCommand<MouseEvent>(
     CLICK_COMMAND,
     (event) => {
@@ -506,11 +516,244 @@ function registerFoldBehavior(editor: LexicalEditor): () => void {
   //   优先级与 ENTER 同档（HIGH）。
   const unregisterFoldBackspace = registerFoldBackspace(editor);
 
+  // 🔴🔴 v3.2.5 报障⑤：折叠块删除整块 —— 长按标题文字 ≥600ms → 确认弹窗 →
+  //   FoldNode.remove()。缺它= 折叠块一旦创建就永远躺在正文里（见下函数长注释）。
+  const unregisterFoldLongPress = registerFoldLongPress(editor, canDelete);
+
   return () => {
     onClick();
     unregisterEnter();
     unregisterFoldBackspace();
+    unregisterFoldLongPress();
   };
+}
+
+/**
+ * 🔴🔴 v3.2.5 报障⑤：折叠块**没有"删除整块"的路**。
+ *
+ *   症状（用户原话）：「我在笔记正文里面输入一个折叠标题。如果想把这个折叠列表
+ *   删掉，该怎么删？现在好像没办法把这个列表删掉。」
+ *
+ *   病根：展开态按键一律不拦（FOLD-BS2 纪律），收起态的拦截又全是"并入"语义
+ *   （Backspace=下一行并进标题 / Delete=标题并进正文），标题上删字只能删字。
+ *   正文块在收起态 display:none 没有光标入口，展开态里全选正文再删也只会
+ *   掏空正文、留下标题壳。整块 FoldNode 没有任何出口。
+ *
+ * 手势：**长按标题文字 ≥600ms** → 确认弹窗 → FoldNode.remove()（标题+正文整块）。
+ *   - 与 CLICK 的三角判据互补：左 22px 三角区留给点按开合，长按只认**文字**区
+ *     —— 慢按三角不会误触删除确认。
+ *   - 只认 touch/pen 指针：桌面鼠标的按住拖选、右键零影响。
+ *   - 移动 >10px 视为滚动意图，取消；up/cancel 取消。
+ *   - contextmenu：触屏长按多数内核会弹系统选择菜单——指针仍按在折叠标题上时
+ *     preventDefault 吞掉（桌面右键不设 touchDown，原生菜单不受影响）。
+ *   - 删除走 editor.update：进撤销栈（桌面 Ctrl+Z 整块找回），正常走真源同步。
+ *   - canDelete 门控**两处**判：按下时 + 确认时（组字/语音冷却/整段改写窗不许动刀）。
+ */
+const FOLD_LONG_PRESS_MS = 600;
+const FOLD_LONG_PRESS_SLOP_PX = 10;
+
+function registerFoldLongPress(editor: LexicalEditor, canDelete?: () => boolean): () => void {
+  const root = editor.getRootElement();
+  if (!root) return () => {};
+
+  let timer: number | undefined;
+  let startX = 0;
+  let startY = 0;
+  let touchDown = false;
+  let firedAt = 0;
+  let pressHeadEl: HTMLElement | null = null;
+
+  const cancel = (): void => {
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+
+  /** 命中判据：指针落点在折叠**标题行**内（DOM 形状与 CLICK 同款）。 */
+  const hitFoldHead = (target: EventTarget | null): boolean => {
+    const el = target as HTMLElement | null;
+    if (!el || typeof el.closest !== 'function' || !root.contains(el)) return false;
+    if (!el.closest('.ns-fold')) return false;
+    const head = el.closest('.ns-fold > :first-child');
+    return !!head && head.contains(el);
+  };
+
+  const onDown = (event: PointerEvent): void => {
+    // 🔴 只认触屏/笔。桌面鼠标按住不放是拖选，与长按无关。
+    if (event.pointerType === 'mouse') return;
+    if (canDelete && !canDelete()) return;
+    if (!hitFoldHead(event.target)) return;
+    // 🔴 三角区（左 22px）留给点按开合（CLICK 同款几何判据），长按不认
+    const head = (event.target as HTMLElement).closest(
+      '.ns-fold > :first-child',
+    ) as HTMLElement;
+    const hr = head.getBoundingClientRect();
+    if (event.clientX - hr.left <= 22) return;
+    // 🔴🔴 这里**只记 DOM 元素，不解 Lexical 节点**：$getNearestNodeFromDOMNode
+    //   内部走的是"活跃编辑器"上下文（getEditor()），裸 DOM 事件处理器里没有
+    //   活跃编辑器 ⇒ 直接抛 Lexical #337（prod 压缩报错，e2e 探针实锤，
+    //   2026-10-13）。节点解析延到**确认时**在 editor.update() 里做 ——
+    //   CLICK 命令处理器能直接调它，正是因为命令跑在 update 上下文里。
+    cancel();
+    touchDown = true;
+    pressHeadEl = head;
+    startX = event.clientX;
+    startY = event.clientY;
+    timer = window.setTimeout(() => {
+      timer = undefined;
+      firedAt = Date.now();
+      touchDown = false; // 已触发；up 只负责收尾
+      if (pressHeadEl) openFoldDeleteConfirm(editor, pressHeadEl, canDelete);
+      pressHeadEl = null;
+    }, FOLD_LONG_PRESS_MS);
+  };
+
+  const onMove = (event: PointerEvent): void => {
+    if (timer === undefined) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    if (dx * dx + dy * dy > FOLD_LONG_PRESS_SLOP_PX * FOLD_LONG_PRESS_SLOP_PX) cancel();
+  };
+
+  const onUp = (): void => {
+    cancel();
+    touchDown = false;
+  };
+
+  const onMenu = (event: MouseEvent): void => {
+    // 触屏长按的系统选择菜单：指针还按着（或确认框刚拉起）时吞掉。
+    // 🔴 桌面右键没有 touchDown ⇒ 原生菜单不受影响。
+    if ((touchDown || Date.now() - firedAt < 800) && hitFoldHead(event.target)) {
+      event.preventDefault();
+    }
+  };
+
+  root.addEventListener('pointerdown', onDown);
+  root.addEventListener('pointermove', onMove);
+  root.addEventListener('pointerup', onUp);
+  root.addEventListener('pointercancel', onUp);
+  root.addEventListener('contextmenu', onMenu);
+  return () => {
+    cancel();
+    root.removeEventListener('pointerdown', onDown);
+    root.removeEventListener('pointermove', onMove);
+    root.removeEventListener('pointerup', onUp);
+    root.removeEventListener('pointercancel', onUp);
+    root.removeEventListener('contextmenu', onMenu);
+  };
+}
+
+/**
+ * 折叠块删除确认框（v3.2.5 报障⑤）。
+ *
+ * 🔴 为什么自建而不用 window.confirm：壳内 WebView 的 confirm 样式不可控且部分
+ *   内核被禁（本项目全项目零 confirm 调用），弹窗走全站 .mask/.box 同一套样式
+ *   （diag/导出弹窗同款）。
+ * 🔴 外围点击**不**关：确认框必须给明确答案——误触长按也只多点一下「取消」
+ *   （导出弹窗同款纪律：关闭只有按钮一条路）。
+ * 🔴 节点解析在**确认时**做（不在长按触发时）：长按处只记了标题 DOM 元素，
+ *   这里在 editor.update() 里从 DOM 反查 FoldNode —— update 上下文里
+ *   $getNearestNodeFromDOMNode 才可用（活跃编辑器已置，Lexical #337 教训）。
+ *   中间若被远端合并换掉 DOM，isConnected 反查会失败 → 静默放弃，绝不误删。
+ * 🔴 删除是 editor.update 里的 FoldNode.remove()：进撤销栈（桌面 Ctrl+Z 整块找回），
+ *   并走正常真源同步（canonical 里 fold 块消失 → 远端同删）。
+ */
+function openFoldDeleteConfirm(
+  editor: LexicalEditor,
+  headEl: HTMLElement,
+  canDelete?: () => boolean,
+): void {
+  // 收一次键盘：手机上长按多半发生在软键盘弹起时，不收会盖住弹窗下半
+  try {
+    dismissKeyboardForTouch();
+  } catch {
+    /* 收键盘失败不影响删除流程 */
+  }
+  // 长按可能已带出系统选区（部分内核不 fire contextmenu 只起选择）：清掉
+  try {
+    window.getSelection()?.removeAllRanges();
+  } catch {
+    /* 无选区可清 */
+  }
+
+  const mask = document.createElement('div');
+  mask.className = 'mask';
+  mask.setAttribute('role', 'dialog');
+  mask.setAttribute('aria-modal', 'true');
+  mask.setAttribute('aria-label', COPY.foldDeleteTitle);
+  // 盖过一切（导出弹窗 40 / 提示条）：确认框是当下唯一要紧的事
+  mask.style.zIndex = '60';
+
+  const box = document.createElement('div');
+  box.className = 'box';
+  box.setAttribute('style', 'max-width:min(86vw,340px);text-align:center');
+
+  const h = document.createElement('h1');
+  h.className = 'qr-title';
+  h.textContent = COPY.foldDeleteTitle;
+
+  const p = document.createElement('p');
+  p.setAttribute('style', 'margin:4px 0 0;font-size:13px;line-height:1.7;color:var(--muted)');
+  p.textContent = COPY.foldDeleteBody;
+
+  const row = document.createElement('div');
+  row.setAttribute('style', 'display:flex;gap:12px;margin-top:16px');
+  // 🔴 同导出弹窗报障①的教训：.row-btn 的 flex:none + 通栏 width:100% 会横向
+  //   溢出（v3.2.4 真机实锤）。两枚按钮一律 inline 等分收缩。
+  const btnStyle = 'flex:1 1 0;min-width:0;padding:10px 0;font-size:15px';
+
+  const close = (): void => {
+    mask.remove();
+  };
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.id = 'foldDeleteCancel';
+  cancelBtn.setAttribute('style', btnStyle);
+  cancelBtn.textContent = COPY.foldDeleteCancel;
+  cancelBtn.addEventListener('click', close);
+
+  const okBtn = document.createElement('button');
+  okBtn.type = 'button';
+  okBtn.id = 'foldDeleteOk';
+  okBtn.setAttribute('style', btnStyle + ';background:var(--danger);color:#fff');
+  okBtn.textContent = COPY.foldDeleteOk;
+  okBtn.addEventListener('click', () => {
+    close();
+    // 🔴 确认期间可能进了整段改写窗口（远端大合并）：此刻动刀会和回灌打架，放弃
+    if (canDelete && !canDelete()) return;
+    // 长按到确认之间块可能已被远端合并换掉/删掉：DOM 反查失败就静默放弃
+    const root = editor.getRootElement();
+    const foldDom = headEl.isConnected ? headEl.closest('.ns-fold') : null;
+    if (!root || !foldDom || !root.contains(foldDom)) return;
+    editor.update(() => {
+      // update 上下文里才能 $getNearestNodeFromDOMNode（活跃编辑器已置）
+      const node = $getNearestNodeFromDOMNode(foldDom);
+      // 确认框开着的时候，块可能已被远端合并/撤销删掉：不在了就什么都不做
+      if (!node || !$isFoldNode(node) || !node.isAttached()) return;
+      const next = node.getNextSibling();
+      const prev = node.getPreviousSibling();
+      node.remove();
+      // 🔴 选区钉到删除点的邻块：当前选区若指向被删块内部，reconcile 后会
+      //   变成无效选区（症状：删完打字没反应）。优先下一块开头，其次上一块
+      //   结尾；整篇只剩这一块时补一个空段落兜底。
+      if (next && $isElementNode(next)) {
+        next.selectStart();
+      } else if (prev && $isElementNode(prev)) {
+        prev.selectEnd();
+      } else if ($getRoot().isEmpty()) {
+        const para = $createParagraphNode();
+        $getRoot().append(para);
+        para.selectStart();
+      }
+    });
+  });
+
+  row.append(cancelBtn, okBtn);
+  box.append(h, p, row);
+  mask.appendChild(box);
+  document.body.appendChild(mask);
 }
 
 /**

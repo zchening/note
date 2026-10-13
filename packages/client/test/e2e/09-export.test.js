@@ -423,6 +423,21 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
       );
       const st = await page.evaluate(() => {
         const img = document.querySelector('#exportModalMask img');
+        const geo = (sel) => {
+          const b = document.querySelector('#exportModalMask .box');
+          const el = document.querySelector(sel);
+          if (!b || !el) return null;
+          const br = b.getBoundingClientRect();
+          const er = el.getBoundingClientRect();
+          return {
+            inBox: er.left >= br.left - 1 && er.right <= br.right + 1,
+            boxRight: br.right,
+            elRight: er.right,
+            elTop: er.top,
+            boxTop: br.top,
+            boxH: br.height,
+          };
+        };
         return {
           hasImg: !!img,
           imgIsData: img ? String(img.src).startsWith('data:image/png;base64,') : false,
@@ -430,6 +445,10 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
           // 🔴 网页触屏没有 ImgSave 桥 ⇒ 保存按钮必须隐藏（不给点了必失败的按钮）
           hasSave: !!document.getElementById('exportModalSave'),
           hasShare: !!document.getElementById('exportModalShare'),
+          // 🔴 v3.2.5 报障①：按钮必须整体落在弹窗内（.row-btn 曾横向溢出 594px）
+          shareGeo: geo('#exportModalShare'),
+          // 🔴 v3.2.5 报障②：叉必须在右上角（modal-head 右对齐，与标题同行）
+          xGeo: geo('#exportModalClose'),
           // 🔴 弹窗盖着提示条（zIndex 40）⇒ doing 提示条必须已被清掉
           doingNote: document.getElementById('uploadNote')?.textContent || '',
           strayCards: document.querySelectorAll('.ns-export').length,
@@ -440,6 +459,12 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
       assert.equal(st.hasX, true, '缺右上角关闭叉');
       assert.equal(st.hasSave, false, '无相册桥的环境不许显示「保存到相册」按钮');
       assert.equal(st.hasShare, true, '「分享」按钮必须显示');
+      assert.equal(st.shareGeo && st.shareGeo.inBox, true, '分享按钮必须整体落在弹窗内（v3.2.4 曾横向溢出）');
+      assert.equal(
+        st.xGeo && st.xGeo.inBox && st.xGeo.elTop <= st.xGeo.boxTop + st.xGeo.boxH * 0.5,
+        true,
+        '关闭叉必须整体在弹窗内且落在上半部（右上角，与标题同行）',
+      );
       assert.notEqual(st.doingNote, '正在生成图片…', '弹窗打开后「正在生成图片…」提示条必须已被清掉');
       assert.equal(st.strayCards, 0, '离屏卡必须已拆');
 
@@ -466,6 +491,25 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
         await page.evaluate(() => !!document.getElementById('exportModalSave')),
         true, '模拟原生（有 ImgSave 桥）时保存按钮必须显示（显隐必须真的随桥走）',
       );
+      // 🔴 v3.2.5 报障①：两枚按钮并排时也必须整体在弹窗内（等分收缩不溢出），
+      //   且保持左保存右分享的顺序
+      const geo = await page.evaluate(() => {
+        const b = document.querySelector('#exportModalMask .box');
+        const s = document.getElementById('exportModalShare');
+        const v = document.getElementById('exportModalSave');
+        if (!b || !s || !v) return { ok: false, leftIsSave: false };
+        const br = b.getBoundingClientRect();
+        const sr = s.getBoundingClientRect();
+        const vr = v.getBoundingClientRect();
+        return {
+          ok:
+            sr.left >= br.left - 1 && sr.right <= br.right + 1 &&
+            vr.left >= br.left - 1 && vr.right <= br.right + 1,
+          leftIsSave: vr.left < sr.left,
+        };
+      });
+      assert.equal(geo.ok, true, '两按钮必须整体落在弹窗内（等分收缩，不许横向溢出）');
+      assert.equal(geo.leftIsSave, true, '左保存右分享的顺序必须保持');
     } finally {
       await closeTouch(page);
     }
@@ -511,7 +555,7 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
     }
   });
 
-  await t.test('EXPORT-M03 🔴🔴 分享走系统分享组件；用户在面板点取消必须静默（弹窗留着、无失败反馈）', async () => {
+  await t.test('EXPORT-M03 🔴🔴 分享走系统分享组件；面板取消 = 用完了 → 弹窗自动关（v3.2.5 拍板）', async () => {
     const page = await openEditorTouch(browser, h.baseUrl(), 'expM03', PASS);
     try {
       await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
@@ -547,15 +591,14 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
       );
       const st = await page.evaluate(() => ({
         files: window.__SHARE_CALLS__,
-        maskOpen: !!document.getElementById('exportModalMask'),
-        failNoteVisible: (() => {
-          const n = document.querySelector('#exportModalMask .diag-note');
-          return !!n && !n.hidden && /无法调起分享/.test(n.textContent || '');
-        })(),
       }));
       assert.deepEqual(st.files, [['image/png']], '分享的必须是 PNG 文件');
-      assert.equal(st.maskOpen, true, '取消分享后弹窗必须还在（用户可继续保存/再分享）');
-      assert.equal(st.failNoteVisible, false, '🔴 用户取消分享不许弹"失败"（取消不是失败，诊断分享同款口径）');
+      // 🔴🔴 v3.2.5 拍板「点完自动关」：用户在面板点取消 = 用完了，弹窗自动收起
+      //   （v3.2.4 是"取消静默留窗"，本条是行为反转的判据）
+      await withTimeout(
+        page.waitForFunction(() => !document.getElementById('exportModalMask'), null, { timeout: 5000 }),
+        8_000, '取消分享后弹窗必须自动关闭（v3.2.5 点完自动关）',
+      );
     } finally {
       await closeTouch(page);
     }
@@ -591,6 +634,74 @@ test('EXPORT-M 移动端导出弹窗（报障第 4 条）', async (t) => {
           null, { timeout: 5000 },
         ),
         8_000, '分享不可用必须在弹窗内给出可见失败反馈（v3.1.3「点了没反应」同款事故不许重演）',
+      );
+    } finally {
+      await closeTouch(page);
+    }
+  });
+
+  await t.test('EXPORT-M05 🔴🔴 保存到相册：失败留窗可见反馈；成功自动关弹窗（v3.2.5 拍板点完自动关）', async () => {
+    const page = await openEditorTouch(browser, h.baseUrl(), 'expM05', PASS);
+    try {
+      await withTimeout(page.waitForSelector('#editor-host', { state: 'attached' }), 10_000, '等编辑器');
+      await page.tap('#editor-host');
+      await page.keyboard.type('保存自动关验证。');
+      await withTimeout(
+        page.waitForFunction(() => (window.__NOTESYNC_DOC__?.()?.blocks?.length ?? 0) > 0, null, { timeout: 8000 }),
+        10_000, '等输入落真源',
+      );
+      // 模拟原生壳（ImgSave 桥，点击时才构造 deps ⇒ 先注入再点导出即可）：
+      // 记录调用次数，成败由 __SAVE_OK__ 控制
+      await page.evaluate(() => {
+        window.__SAVE_CALLS__ = 0;
+        window.__SAVE_OK__ = true;
+        window.Capacitor = {
+          isNativePlatform: () => true,
+          Plugins: {
+            ImgSave: {
+              saveImage: async () => {
+                window.__SAVE_CALLS__ += 1;
+                return { ok: window.__SAVE_OK__ !== false };
+              },
+            },
+          },
+        };
+      });
+      await page.tap('#exportImgBtn');
+      await withTimeout(
+        page.waitForSelector('#exportModalMask', { state: 'visible', timeout: 30_000 }),
+        35_000, '等弹窗',
+      );
+      assert.equal(
+        await page.evaluate(() => !!document.getElementById('exportModalSave')),
+        true, '有 ImgSave 桥时保存按钮必须显示',
+      );
+
+      // ① 失败：弹窗留着 + 弹窗内可见失败反馈（绝不静默）
+      await page.evaluate(() => { window.__SAVE_OK__ = false; });
+      await page.tap('#exportModalSave');
+      await withTimeout(
+        page.waitForFunction(() => {
+          const n = document.querySelector('#exportModalMask .diag-note');
+          return !!n && !n.hidden && (n.textContent || '').includes('保存到相册失败');
+        }, null, { timeout: 5000 }),
+        8_000, '保存失败必须有弹窗内可见反馈',
+      );
+      assert.equal(
+        await page.evaluate(() => !!document.getElementById('exportModalMask')),
+        true, '保存失败时弹窗必须留着（用户可重试）',
+      );
+
+      // ② 成功：弹窗自动关闭（关窗本身即成功反馈，无"已保存"成功文案）
+      await page.evaluate(() => { window.__SAVE_OK__ = true; });
+      await page.tap('#exportModalSave');
+      await withTimeout(
+        page.waitForFunction(() => !document.getElementById('exportModalMask'), null, { timeout: 5000 }),
+        8_000, '保存成功后弹窗必须自动关闭（v3.2.5 点完自动关）',
+      );
+      assert.equal(
+        await page.evaluate(() => window.__SAVE_CALLS__),
+        2, 'ImgSave 桥必须被真实调用两次（失败+成功各一次，不是 mock 替身路径）',
       );
     } finally {
       await closeTouch(page);

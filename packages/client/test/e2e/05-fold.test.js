@@ -688,3 +688,137 @@ test('FOLD-BS3 🔴🔴 Android 形状：beforeinput deleteContentBackward 并�
     await page.close();
   }
 });
+
+/**
+ * FOLD-LP 系（v3.2.5 报障第 5 条）：折叠块删除整块。
+ *
+ * 🔴 此前折叠块没有任何"删除整块"的路（展开态按键不拦、收起态拦截全是并入
+ *   语义、正文收起时无光标入口）。新交互 = **长按标题文字 ≥600ms → 确认弹窗
+ *   → 整块删除**。e2e 用合成 PointerEvent（pointerType 'touch'）从最外层
+ *   真实入口进 —— 监听器不挑 isTrusted，但形状与真机一致（长按中不抬起）。
+ */
+/** 合成长按：在 .ns-fold 标题行 (dx,dy) 处 pointerdown（不抬起）。 */
+const foldLongPressDown = (page, dx) =>
+  page.evaluate((dx) => {
+    const head = document.querySelector('.ns-fold > :first-child');
+    const r = head.getBoundingClientRect();
+    head.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      pointerType: 'touch',
+      clientX: r.left + dx,
+      clientY: r.top + 10,
+    }));
+  }, dx);
+/** 抬起（结束按住）。 */
+const foldPointerUp = (page) =>
+  page.evaluate(() => {
+    const head = document.querySelector('.ns-fold > :first-child');
+    head.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }));
+  });
+
+test('FOLD-LP1 🔴🔴 长按标题文字 → 确认弹窗；点「取消」→ 折叠块还在', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'flp1', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_BODY_START__());
+    await page.keyboard.type('正文内容');
+    await new Promise((r) => setTimeout(r, 300));
+
+    // 长按标题文字（dx=80，避开左 22px 三角区），800ms 内不抬起
+    await foldLongPressDown(page, 80);
+    await withTimeout(
+      page.waitForSelector('#foldDeleteOk', { timeout: 5000 }),
+      6000, '长按标题必须弹出删除确认框',
+    );
+    // 点「取消」→ 弹窗关，块原样
+    await page.click('#foldDeleteCancel');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(
+      await page.evaluate(() => !!document.querySelector('.ns-fold')),
+      true, '取消后折叠块必须还在',
+    );
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    assert.ok(
+      (doc.blocks || []).some((b) => b.t === 'fold'),
+      '取消后真源里 fold 块必须还在',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('FOLD-LP2 🔴🔴 长按 → 点「删 除」→ 标题+正文整块消失，真源同步', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'flp2', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.keyboard.type('BODY');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+    await page.evaluate(() => window.__NOTESYNC_CARET_FOLD_BODY_START__());
+    await page.keyboard.type('正文内容');
+    await new Promise((r) => setTimeout(r, 300));
+
+    await foldLongPressDown(page, 80);
+    await withTimeout(
+      page.waitForSelector('#foldDeleteOk', { timeout: 5000 }),
+      6000, '长按标题必须弹出删除确认框',
+    );
+    await page.click('#foldDeleteOk');
+    await withTimeout(
+      page.waitForFunction(() => !document.querySelector('.ns-fold'), null, { timeout: 5000 }),
+      6000, '确认删除后 DOM 里折叠块必须整块消失',
+    );
+
+    const doc = await page.evaluate(() => window.__NOTESYNC_DOC__());
+    const blocks = doc.blocks || [];
+    const folds = blocks.filter((b) => b.t === 'fold');
+    assert.equal(folds.length, 0, '真源里 fold 块必须删干净：' + JSON.stringify(blocks.map((b) => b.t)));
+    const allText = JSON.stringify(blocks);
+    assert.ok(!allText.includes('正文内容'), '折叠正文必须整块消失，实际=' + allText);
+    assert.ok(allText.includes('BODY'), '折叠块外的段落必须毫发无损');
+    assert.equal(
+      await page.evaluate(() => !!document.getElementById('foldDeleteOk')),
+      false, '确认框必须已关闭',
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('FOLD-LP3 反向闸：短按文字 / 长按三角区，都不许弹删除确认框', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'flp3', PASS);
+  try {
+    await page.click('#editor-host');
+    await page.evaluate(() => window.__NOTESYNC_INSERT_FOLD__());
+    await page.waitForSelector('.ns-fold', { timeout: 10_000 });
+
+    // ① 短按文字（150ms 就抬起）：是编辑标题的路径，不是删除
+    await foldLongPressDown(page, 80);
+    await new Promise((r) => setTimeout(r, 150));
+    await foldPointerUp(page);
+    await new Promise((r) => setTimeout(r, 700)); // 越过 600ms 窗口
+    assert.equal(
+      await page.evaluate(() => !document.getElementById('foldDeleteOk')),
+      true, '短按标题文字不许弹删除确认框',
+    );
+
+    // ② 长按三角区（dx=10 < 22）：三角留给点按开合，长按不认
+    await foldLongPressDown(page, 10);
+    await new Promise((r) => setTimeout(r, 800));
+    await foldPointerUp(page);
+    assert.equal(
+      await page.evaluate(() => !document.getElementById('foldDeleteOk')),
+      true, '长按三角区不许弹删除确认框（开合与删除手势不许打架）',
+    );
+    assert.equal(
+      await page.evaluate(() => !!document.querySelector('.ns-fold')),
+      true, '两种误触后折叠块必须原样还在',
+    );
+  } finally {
+    await page.close();
+  }
+});
