@@ -21,6 +21,8 @@ import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installHarness, openEditor, withTimeout } from './harness.mjs';
+// 🔴 v3.3.5 笔记名全链归一小写：mountEditor 会把地址栏拉正（/eggPet11 → /eggpet11），
+// 下面所有 page.url().replace 的锚一律用小写——大写锚匹配不上会静默停在笔记页。
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 🔴 必须是 4 级（e2e → test → client → packages → 仓库根）。
@@ -332,7 +334,7 @@ test('EGG-E 彩蛋层全链路', async (t) => {
 test('EGG-E10🔴🔴 dragon 进入后有 3 秒 intro（不立刻死）且物理与老项目同款', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'eggDragon10', 'pw');
   try {
-    await page.goto(page.url().replace('/eggDragon10', '/dragon'));
+    await page.goto(page.url().replace('/eggdragon10', '/dragon'));
     await page.waitForSelector('#nsCv', { timeout: 15_000 });
     // 探针用同一个挂钟点采样：intro 3 秒内必须**还没结束**
     for (const wait of [1200, 1200, 900]) {
@@ -359,7 +361,7 @@ test('EGG-E10🔴🔴 dragon 进入后有 3 秒 intro（不立刻死）且物理
 test('EGG-E11 🔴 桌宠本体是老项目那只 SVG 小螃蟹（不是 🐾 字形）', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'eggPet11', 'pw');
   try {
-    await page.goto(page.url().replace('/eggPet11', '/pet'));
+    await page.goto(page.url().replace('/eggpet11', '/pet'));
     await page.waitForSelector('.ns-pet', { timeout: 15_000 });
     const p = await page.evaluate(() => {
       const pet = document.querySelector('.ns-pet');
@@ -402,7 +404,7 @@ test('EGG-E11 🔴 桌宠本体是老项目那只 SVG 小螃蟹（不是 🐾 �
 test('EGG-E12 🔴🔴 tank 玩法提示必须写出怎么开火（用户报障「tank 不一样」）', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'eggTank12', 'pw');
   try {
-    await page.goto(page.url().replace('/eggTank12', '/tank'));
+    await page.goto(page.url().replace('/eggtank12', '/tank'));
     await page.waitForSelector('#nsCv', { timeout: 15_000 });
     const txt = await page.evaluate(() => document.body.innerText || '');
     // 老项目 index.html:12149逐字
@@ -430,7 +432,7 @@ test('EGG-E13 🔴🔴 顶栏常驻螃蟹：领养后骑在 header 下沿且真�
     //   那一页**根本没有 header**（老项目的彩蛋是 mask 覆盖在编辑器上，header 一直在）。
     //   螃蟹是"任何笔记页都常驻在顶栏下沿"的那只 ⇒ 必须先回笔记页。
     //   判据写成"进门牌就有螃蟹"会把正确的实现判成错的。
-    await page.goto(page.url().replace('/eggPet13', '/pet'));
+    await page.goto(page.url().replace('/eggpet13', '/pet'));
     await page.waitForSelector('.ns-pet', { timeout: 15_000 });
     assert.equal(
       await page.evaluate(() => !!document.getElementById('nsPet')),
@@ -438,7 +440,7 @@ test('EGG-E13 🔴🔴 顶栏常驻螃蟹：领养后骑在 header 下沿且真�
       '/pet 那一页没有 header，不该挂顶栏螃蟹（挂不上去才是对的）',
     );
     // 回笔记页 ⇒ mountEditor 建好 header ⇒ 螃蟹挂上
-    await page.goto(page.url().replace('/pet', '/eggPet13'));
+    await page.goto(page.url().replace('/pet', '/eggpet13'));
     await page.waitForSelector('#nsPet', { timeout: 15_000 });
     await page.waitForTimeout(400);
 

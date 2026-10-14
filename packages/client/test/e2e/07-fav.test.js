@@ -144,7 +144,7 @@ test('FAV-E 收藏夹全链路', async (t) => {
       const raw = await readRawFavs(page);
       assert.ok(Array.isArray(raw), `收藏应写成 JSON 数组，实得${JSON.stringify(raw)}`);
       assert.equal(raw.length, 1);
-      assert.equal(raw[0], 'favE02');
+      assert.equal(raw[0], 'fave02');
 
       //🔴 老项目的键必须**不存在**。同域 localStorage 是共享的，
       //   写错前缀会让两个项目互相污染，而症状只是"收藏多出几篇"。
@@ -169,7 +169,7 @@ test('FAV-E 收藏夹全链路', async (t) => {
       const rows = await page.$$('.list-row[data-name]');
       assert.equal(rows.length, 1, '收藏夹应有一行');
       const name = await page.getAttribute('.list-row[data-name]', 'data-name');
-      assert.equal(name, 'favE03');
+      assert.equal(name, 'fave03');
     } finally {
       await page.close();
     }
@@ -231,7 +231,7 @@ test('FAV-E 收藏夹全链路', async (t) => {
       const raw = await readRawFavs(page);
       assert.ok(Array.isArray(raw), '收藏列表应仍是数组');
       assert.equal(raw.length, 100, `上限应截到 100，实得 ${raw.length}`);
-      assert.equal(raw[0], 'favE06last', '新收藏应排最前');
+      assert.equal(raw[0], 'fave06last', '新收藏应排最前');
       // unshift 之后尾部才是最旧的，截断从尾部砍⇒ 砍掉 old99
       assert.ok(!raw.includes('old99'), '最旧的一条（old99）应被挤掉');
       assert.ok(raw.includes('old98'), '次旧的（old98）应还在');

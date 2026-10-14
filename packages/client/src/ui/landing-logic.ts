@@ -18,7 +18,18 @@ import { RESERVED_ROUTES, isEggRoute } from '../egg/registry.ts';
 
 export { RESERVED_ROUTES, isEggRoute };
 
-/** 输入净化：只留英文/数字/下划线/短横线。老项目原文 `replace(/[^A-Za-z0-9_-]/g, '')`。 */
+/**
+ * 输入净化：只留英文/数字/下划线/短横线，并**归一小写**。
+ *
+ * 🔴 v3.3.5（用户报障）：服务端 ID_RE 只认小写（^[a-z0-9][a-z0-9_-]{0,63}$），
+ *   旧版这里保留大小写，大写名一路进到 GET /api/note/MyNote → 400 bad id →
+ *   fetchRemote 把一切非 2xx 当 offline → 用户看到「连不上服务器，请检查网络」
+ *   （报错撒谎：不是网络，是名字）。老项目 v10.1.1 的同款规则是"解析处小写"
+ *   （index.html:901）；bj 归一放在净化器——落地页输入框/URL 预览行/route()
+ *   判定共用本函数，输入即所见即所得，route 的名字判定天然同源。
+ *   大小写变体本就是同一篇笔记，归一无损；彩蛋门牌 id 全小写，不受影响
+ *   （反而修好"手输 /SNAKE 进不了贪吃蛇"的边角）。
+ */
 export function sanitizeNoteName(input: string): string {
-  return input.replace(/[^A-Za-z0-9_-]/g, '');
+  return input.replace(/[^A-Za-z0-9_-]/g, '').toLowerCase();
 }

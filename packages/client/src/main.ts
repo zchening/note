@@ -456,7 +456,7 @@ function applyTheme(): void {
 
 /* ---------------- 路由 ---------------- */
 
-/** 从 pathname 取笔记名（去掉首尾斜杠、URL 解码）。取不到返回空串。 */
+/** 从 pathname 取笔记名（去首尾斜杠、URL 解码、**归一小写**）。取不到返回空串。 */
 function noteNameFromPath(): string {
   const parts = location.pathname.split('/').filter((p) => p !== '');
   const first = parts[0];
@@ -464,10 +464,13 @@ function noteNameFromPath(): string {
   //   这里显式收窄而不是 ! —— 断言会把"以后改了 filter 条件"变成静默 bug。
   if (first === undefined) return '';
   try {
-    return decodeURIComponent(first);
+    // 🔴 v3.3.5（用户报障）：解析点归一小写（老项目 v10.1.1 同规则，index.html:901）——
+    //   服务端 ID_RE 只认小写，手输 /MyNote 这类旁路入口（落地页拦不住）必须在此兜底，
+    //   否则 GET /api/note/MyNote 判 400、解锁谎报「连不上服务器」。
+    return decodeURIComponent(first).toLowerCase();
   } catch {
     // 🔴 非法百分号编码（手敲 %zz 就会遇到）不能让整页崩，回退到原始片段
-    return first;
+    return first.toLowerCase();
   }
 }
 
@@ -1538,6 +1541,10 @@ const eggDraw = buildEggDraw();
 
 function mountEditor(name: string, initialDoc?: Doc): void {
   currentNote = name;
+  // 🔴 v3.3.5：地址栏拉正（philosophy 同 handleScanRaw「落地后把地址栏拉正」）——
+  //   手输 /MyNote → 解锁进编辑器，URL 不改的话地址栏留大写变体、刷新回口令页。
+  //   传参恒为已归一的名字（route/scan 全链 v3.3.5 起小写）；已规范时是无害 no-op。
+  history.replaceState({}, '', '/' + encodeURIComponent(name));
   // 🔴 离线草稿条是常驻 DOM：换笔记先收上一条（是否再弹由 startSyncFor 的裁决决定）。
   hideDraftBar();
   // 🔴 收藏态与收藏夹列表必须在**挂菜单之前**算好：菜单是打开时读这两个值的，
@@ -1647,7 +1654,8 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       void refreshBakNote();
     },
     onOpenFav: (n) => {
-      location.href = '/' + encodeURIComponent(n);
+      // 🔴 v3.3.5：收藏名可能有历史大写值（旧版 URL 未归一时期记下的），跳转源头归一
+      location.href = '/' + encodeURIComponent(n.toLowerCase());
     },
     onSaveHist: async () => {
       // 手动打点：用户明确要的，**不过自动节流**（老项目 :8551 同款）。
@@ -4931,7 +4939,8 @@ function showBakRestoreCard(
       // 🔴 与老项目 :9274-9278 同款：恢复完整页跳第一篇。
       //   理由与老项目一致 —— 只 setStatus 的话，首页页脚会被落地页盖住，
       //   用户看着"粘完没反应"（老项目闸 R2-P1-2 的事故形状）。
-      location.href = '/' + encodeURIComponent(r.first as string);
+      // 🔴 v3.3.5：备份 payload 的 NOTE_ID_RE 允许大写（last-note.ts 口径），跳转源头归一
+      location.href = '/' + encodeURIComponent((r.first as string).toLowerCase());
       return r.message;
     },
     onCancel: () => {
