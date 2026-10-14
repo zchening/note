@@ -3247,10 +3247,12 @@ test('VVW-33 🔴🔴🔴 日夜两态滚动条轨道必须显式定色为 --lin
   }
 });
 
-test('VVW-08b 🔴🔴 关于页 App 版本 / 检查更新两行必须立刻显示（壳内取版本约 1-2s，不得先隐后显闪烁）', async () => {
-  // 🔴🔴 复现真机：壳内 RemBridge.getVersion 桥接耗时约 1-2s。旧实现两行先
-  //   display:none，等桥接返回才 remove('hidden') ⇒ 布局下推、界面闪一下。
-  //   判据：点开关于页后**不等桥接返回**，两行即应可见（占位文本随后填入）。
+test('VVW-08b 🔴🔴 关于页 App 版本行不得显占位符「…」（仿老项目 v10.2.2：先隐后填空）', async () => {
+  // 🔴🔴 复现真机：壳内 RemBridge.getVersion 桥接耗时约 1-2s。v3.3.3 让 App 版本行先显占位符「…」
+  //   再换真值——用户看到"点点点→版本号"的跳变（仍难看）。老项目 v10.2.2 的做法：检查更新行同步
+  //   显形；App 版本行**先隐**，桥接返回后**就地填空显形**（绝不先显占位符）。
+  //   判据：① 检查更新行立刻可见；② App 版本行在**任何时刻**都不出现「…」；③ 桥接返回后 App 版本行
+  //   就地显形并填真值（Version 1.13.1）。
   //   用 addInitScript 在应用 boot 之前种下原生桥，否则判据只能测到恒假的网页分支。
   h.addInitScript(() => {
     const noop = () => Promise.resolve(null);
@@ -3268,24 +3270,37 @@ test('VVW-08b 🔴🔴 关于页 App 版本 / 检查更新两行必须立刻显�
   const page = await openEditor(h.browser(), h.baseUrl(), 'vvw08b', 'pw');
   try {
     await openAbout(page);
-    // 立刻断言（桥接尚未返回，旧实现此处两行仍 hidden）
+    // 立刻断言：检查更新行必须立刻可见（与取版本无关，永远同步）
     const now = await page.evaluate(() => {
       const vis = (id) => {
         const el = document.getElementById(id);
         return !!el && !el.classList.contains('hidden') && getComputedStyle(el).display !== 'none';
       };
-      return { app: vis('aboutAppRow'), upd: vis('aboutUpdRow') };
+      const appSpan = document.querySelector('#aboutAppRow span:last-child');
+      return {
+        upd: vis('aboutUpdRow'),
+        appVisible: vis('aboutAppRow'),
+        appText: appSpan ? (appSpan.textContent || '') : '',
+      };
     });
     assert.equal(now.upd, true, '检查更新行必须立刻可见，不能等桥接返回才显形');
-    assert.equal(now.app, true, 'App 版本行必须立刻可见，不能等桥接返回才显形');
-    // 桥接返回后版本文本应填入（占位 → Version x.y.z）
+    // 🔴 App 版本行此刻要么隐藏（桥未回），要么可见也绝不能是占位符「…」
+    assert.notEqual(now.appText, '…', 'App 版本行的文本在任何时刻都不许是占位符「…」（先隐后填空，不先显占位）');
+    // 桥接返回后：App 版本行就地显形并填真值，全程没出现过「…」
     await page.waitForFunction(
       () => {
+        const el = document.getElementById('aboutAppRow');
         const s = document.querySelector('#aboutAppRow span:last-child');
-        return !!s && /Version/.test(s.textContent || '');
+        return !!el && !el.classList.contains('hidden') && !!s && /Version 1\.13\.1/.test(s.textContent || '');
       },
       { timeout: 5000 },
     );
+    // 再确认真值时刻也没有「…」
+    const final = await page.evaluate(() => {
+      const s = document.querySelector('#aboutAppRow span:last-child');
+      return s ? (s.textContent || '') : '';
+    });
+    assert.equal(final, 'Version 1.13.1', '桥接返回后 App 版本行应填真值 Version 1.13.1，不含占位符');
   } finally {
     await page.close();
   }

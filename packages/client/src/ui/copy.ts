@@ -164,10 +164,6 @@ export const COPY = {
   aboutUpdate: '更新',
   /** 彩蛋入口行的键（老项目 index.html:11123 `<span class="about-k">彩蛋</span>`）。 */
   aboutEgg: '彩蛋',
-  /** 关于页 App 版本号经原生桥异步取到前的占位（桥接约 1-2s）。用占位而非先隐后显，避免布局位移闪烁。 */
-  aboutLoading: '…',
-  /** 原生版本号桥接失败时的回退值（行仍显示，不藏）。 */
-  aboutAppUnknown: '—',
 
   /* 光标诊断面板（老项目 index.html:8217-8246）。
      🔴 标题与按钮文案老项目是硬编码在 HTML 里的（`#diagContent`/`#diagCopy`

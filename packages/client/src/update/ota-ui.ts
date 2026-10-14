@@ -20,7 +20,7 @@ import { ICON_X } from '../ui/icons.ts';
 import { REAL_SCHED, aboutTapHit, createAboutTapper } from '../diag/tap.ts';
 import type { LatestRelease } from './ota.ts';
 import type { CheckResult, NativeDeps, ProgressFn } from './ota-native.ts';
-import { appVersionLine, checkUpdate, runUpdate } from './ota-native.ts';
+import { appVersionLine, checkUpdate, runUpdate, getCachedNativeVersion } from './ota-native.ts';
 
 export interface AboutDeps {
   native: NativeDeps;
@@ -409,18 +409,24 @@ export function buildAboutOverlay(host: HTMLElement, deps: AboutDeps): AboutOver
     open: async () => {
       el.classList.remove('hidden');
       if (deps.native.isNativeApp) {
-        // 🔴🔴 修复关于页闪烁：App 版本 / 检查更新两行**立刻显示**（App 版本值先占位），
-        //   原生版本号经 RemBridge 桥接取到（真机约 1-2s）后再填实值。原写法两行先
-        //   display:none，等桥接返回才 remove('hidden') ⇒ 布局下推、界面闪一下。
-        //   现在两行从一开始就占位在布局里，后续只有文本在变，不再有布局位移。
+        // 🔴🔴 仿老项目 v10.2.2：检查更新行**同步显形**（与取版本无关，永不挡弹窗打开）；
+        //   App 版本行：缓存已有（冷启动预热）→ 同步填真值显形；否则**先隐**，桥接返回后
+        //   **就地填空显形**（绝不先显占位符「…」——用户看到"点点点→版本号"的跳变仍难看）。
         updRow.classList.remove('hidden');
-        const span = appRow.querySelector('span:last-child');
-        if (span) span.textContent = COPY.aboutLoading;
-        appRow.classList.remove('hidden');
-        const v = await appVersionLine(deps.native, deps.webVersion);
-        // 🔴 取不到（桥接失败）也不再藏行——藏行会重新引入"行显形"的位移闪烁；
-        //   改为保留行、值回退占位符，状态一眼可见。
-        if (span) span.textContent = v || COPY.aboutAppUnknown;
+        const nv = getCachedNativeVersion();
+        if (nv) {
+          const span = appRow.querySelector('span:last-child');
+          if (span) span.textContent = 'Version ' + nv;
+          appRow.classList.remove('hidden');
+        } else {
+          appRow.classList.add('hidden');
+          appVersionLine(deps.native, deps.webVersion).then((v) => {
+            if (!v) return; // 取不到：保持隐藏，不显占位符（老项目同款）
+            const span = appRow.querySelector('span:last-child');
+            if (span) span.textContent = v;
+            appRow.classList.remove('hidden');
+          });
+        }
       }
     },
     close: closeAbout,

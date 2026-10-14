@@ -270,10 +270,34 @@ function errText(e: unknown): string {
   return m.slice(0, 60) || '未知原因';
 }
 
+/**
+ * 冷启动预热缓存：原生版本号桥接约 1-2s，若在关于页打开时才现查，App 版本行会姗姗来迟
+ * （v3.3.3 曾用「…」占位先显，仍被用户认为难看）。仿老项目 v10.2.2：壳内在冷启动**无条件**
+ * 预热一次，结果缓存；关于页打开时优先用缓存（同步显形），缓存未回则先隐、桥回就地填空。
+ */
+let cachedNativeVersion: string | null = null;
+let warmUpFired = false;
+
+/** 冷启动调用一次：预取原生版本号并缓存（零成本零权限，失败静默）。 */
+export function warmUpNativeVersion(deps: NativeDeps): void {
+  if (!deps.isNativeApp || warmUpFired) return;
+  warmUpFired = true;
+  deps.getNativeVersion().then((v) => { if (v) cachedNativeVersion = v; }).catch(() => {});
+}
+
+/** 已预取的本地版本号（未回则为 ''）。关于页优先用它同步显形。 */
+export function getCachedNativeVersion(): string {
+  return cachedNativeVersion || '';
+}
+
 /** 关于页要显示的 App 版本行。取不到原生版本时返回 ''（该行隐藏）。 */
 export function appVersionLine(deps: NativeDeps, webVersion: string): Promise<string> {
   if (!deps.isNativeApp) return Promise.resolve('');
-  return deps.getNativeVersion().then((v) => (v ? 'Version ' + v : ''));
+  if (cachedNativeVersion) return Promise.resolve('Version ' + cachedNativeVersion);
+  return deps.getNativeVersion().then((v) => {
+    if (v) { cachedNativeVersion = v; return 'Version ' + v; }
+    return '';
+  });
 }
 
 /** 已在本地，用于 UI 层判断"该不该显示检查更新行" */

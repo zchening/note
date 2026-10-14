@@ -146,7 +146,7 @@ import { createImeGate, TYPE_ACTIVE_MS, type ImeGate } from './sync/ime-gate.ts'
 import { recordFlight, flightLines } from './sync/flight-recorder.ts';
 import { buildBakRestoreCard, closeBakRestoreCard } from './migrate/bak-restore-card.ts';
 import { buildAboutOverlay } from './update/ota-ui.ts';
-import { nativeDepsFromWindow } from './update/ota-native.ts';
+import { nativeDepsFromWindow, warmUpNativeVersion } from './update/ota-native.ts';
 import {
   dismissKeyboardForTouch as dismissKeyboard,
   isTouchDevice as isTouch,
@@ -5752,6 +5752,9 @@ function boot(): void {
   //   冷启动后第一次导出第一件事就是干等那个网络往返，而那段等待屏幕没有反馈。
   //   两条预热各管一条路，互不影响（不同 URL、各自的 in-flight 去重）。
   prefetchHtml2CanvasIdle();
+  // 🔴🔴 v3.3.4：冷启动预热原生版本号（仿老项目 v10.2.2）—— 关于页 App 版本行优先用缓存同步显形，
+  //   避免"点点点→版本号"或"等 1-2s 才冒出"的闪动。桥零成本零权限，壳内无条件预热一次。
+  warmUpNativeVersion(nativeDepsFromWindow(window));
   document.getElementById('boot')?.remove();
 }
 
