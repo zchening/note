@@ -3246,3 +3246,47 @@ test('VVW-33 🔴🔴🔴 日夜两态滚动条轨道必须显式定色为 --lin
     }
   }
 });
+
+test('VVW-08b 🔴🔴 关于页 App 版本 / 检查更新两行必须立刻显示（壳内取版本约 1-2s，不得先隐后显闪烁）', async () => {
+  // 🔴🔴 复现真机：壳内 RemBridge.getVersion 桥接耗时约 1-2s。旧实现两行先
+  //   display:none，等桥接返回才 remove('hidden') ⇒ 布局下推、界面闪一下。
+  //   判据：点开关于页后**不等桥接返回**，两行即应可见（占位文本随后填入）。
+  //   用 addInitScript 在应用 boot 之前种下原生桥，否则判据只能测到恒假的网页分支。
+  h.addInitScript(() => {
+    const noop = () => Promise.resolve(null);
+    // 🔴 故意慢 1.5s，复现真机取版本号的延迟。
+    const remBridge = {
+      getVersion: () => new Promise((res) => setTimeout(() => res({ nativeVersion: '1.13.1' }), 1500)),
+    };
+    // 其余桥一律返回带 noop 方法的对象，避免 boot 因缺桥抛错。
+    const plugins = new Proxy({ RemBridge: remBridge }, {
+      get: (t, k) => (k in t ? t[k] : { downloadApk: noop, getVersion: noop }),
+    });
+    const cap = { isNativePlatform: () => true, Plugins: plugins };
+    Object.defineProperty(window, 'Capacitor', { value: cap, configurable: true });
+  });
+  const page = await openEditor(h.browser(), h.baseUrl(), 'vvw08b', 'pw');
+  try {
+    await openAbout(page);
+    // 立刻断言（桥接尚未返回，旧实现此处两行仍 hidden）
+    const now = await page.evaluate(() => {
+      const vis = (id) => {
+        const el = document.getElementById(id);
+        return !!el && !el.classList.contains('hidden') && getComputedStyle(el).display !== 'none';
+      };
+      return { app: vis('aboutAppRow'), upd: vis('aboutUpdRow') };
+    });
+    assert.equal(now.upd, true, '检查更新行必须立刻可见，不能等桥接返回才显形');
+    assert.equal(now.app, true, 'App 版本行必须立刻可见，不能等桥接返回才显形');
+    // 桥接返回后版本文本应填入（占位 → Version x.y.z）
+    await page.waitForFunction(
+      () => {
+        const s = document.querySelector('#aboutAppRow span:last-child');
+        return !!s && /Version/.test(s.textContent || '');
+      },
+      { timeout: 5000 },
+    );
+  } finally {
+    await page.close();
+  }
+});
