@@ -79,6 +79,8 @@ import { buildMenu, type MenuState } from './ui/menu.ts';
 import { applyThemeVars, resolveTheme, type SkinName, type ThemeName } from './ui/theme.ts';
 import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { blockFingerprintsOf, chooseRewritePath, planLocalMarkRewrite } from './reminder/local-mark.ts';
+// 🔴 重建前后的光标保位（用户报障「加完提醒光标跳到正文最后」），见 ./caret.ts 文件头
+import { $readCaretOffset, $restoreCaretAt } from './caret.ts';
 import { reconcileReminders } from './reminder/reconcile.ts';
 import { ensureExactAlarmPermission } from './reminder/native-rem.ts';
 import { ReminderUI, lastNativeSyncOutcome } from './reminder/ui.ts';
@@ -2587,7 +2589,12 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       latestDoc = marked.doc;
       editor?.update(
         () => {
+          // 🔴🔴 重建前记下光标偏移、重建后按**内容坐标**放回去。
+          //   docToLexical 换掉每一个节点 key ⇒ 按 key 恢复必然落空，
+          //   光标就被甩到 root 末尾 —— 即用户报障的「跳到正文最后一行」。
+          const remCaret = $readCaretOffset();
           docToLexical(marked.doc);
+          $restoreCaretAt(remCaret);
         },
         { discrete: true },
       );
@@ -3120,7 +3127,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
           recordFlight('tree:rw', 'full blocks=' + before.length);
           const snapshot = latestDoc;
           ed.update(() => {
+            // 🔴 同 setDoc：整篇重建换光 key，必须按内容坐标保住光标
+            const rwCaret = $readCaretOffset();
             docToLexical(snapshot);
+            $restoreCaretAt(rwCaret);
           }, { discrete: true, tag: EGG_NOFX_TAG });
         } else if (path === 'local') {
           const snapshot = latestDoc;
@@ -3131,7 +3141,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             //   光标/选区/折叠状态在**别的块**上原封不动。
             //   replaceBlocksAt 越界会抛（不静默跳过），异常会冒到
             //   update listener 外 —— 由 ed 自己的错误处理兜住，不会静默失败。
+            // 🔴 同整篇重建：被替换块内的光标会随块重写一起丢，按内容坐标放回去
+            const locCaret = $readCaretOffset();
             replaceBlocksAt(snapshot, idx);
+            $restoreCaretAt(locCaret);
           }, { discrete: true, tag: EGG_NOFX_TAG });
         }
       }
