@@ -256,11 +256,15 @@ async function run() {
   const watch = process.argv.includes('--watch');
   const { version, date } = await readVersion();
   await ensureDirs();
-  // 🔴 v3.2.6/v3.2.8：Lexical 组字零宽后缀补丁（实验已证伪，默认撤销态）。
-  //   NS_ZSP_PATCH=1 才启用；否则每次构建都归一化到撤销态——保证任何机器
-  //   上构建出的产物状态确定（见 tools/patch-lexical.mjs 头部的实验结论）。
+  // 🔴 v3.2.6→v3.3.1：Lexical 组字零宽后缀补丁——**默认启用**。
+  //   实验结论修正（2026-10-14）：补丁不治塌方（v3.2.7 日志实证塌方照旧），
+  //   但**修好了豆包润色**——真机对比：v3.2.5（有零宽）文本重复未润色、
+  //   v3.2.7（无零宽）文本是润色后的干净版、v3.3.0（零宽回归）又重复。
+  //   豆包的整段润色替换按自己的文本长度计算几何，DOM 里多一个零宽字符
+  //   替换就静默失败。NS_ZSP_NO_PATCH=1 可临时回退（任何机器上构建产物
+  //   状态确定——默认打、opt-out 撤，双向归一化）。
   const { execSync } = await import('node:child_process');
-  const zspArg = process.env.NS_ZSP_PATCH === '1' ? '' : ' --revert';
+  const zspArg = process.env.NS_ZSP_NO_PATCH === '1' ? ' --revert' : '';
   execSync(`node "${join(ROOT, 'tools', 'patch-lexical.mjs')}"${zspArg}`, { stdio: 'inherit' });
 
   const opts = {
