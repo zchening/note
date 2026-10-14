@@ -219,6 +219,7 @@ test('WD-E2E-05 🔴🔴 锚点死亡自愈：4 帧空转 ⇒ wd:reboot 结束�
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(false));
     await page.click('.ns-editor');
     // 组字会话到峰值 108（分两次 evaluate——形状纪律）
     await page.evaluate(() => {
@@ -278,6 +279,7 @@ test('WD-E2E-06 🔴🔴 机制收尾后锚点死亡：空转 4 帧必须仍触�
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(false));
     await page.click('.ns-editor');
     // 组字会话到峰值 108（分两次 evaluate——形状纪律）
     await page.evaluate(() => {
@@ -331,6 +333,7 @@ test('WD-E2E-07 🔴🔴 reboot 本身不得 blur（拆会话＝掐断用户语�
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(false));
     await page.click('.ns-editor');
     // 🔴 blur/focus 计数器挂在 editorHost 上（真机宿主=Android InputConnection，
     //   桌面等价物=contenteditable 焦点变化——DOM 事件真实派发才可断言）
@@ -522,6 +525,7 @@ test('WD-E2E-10 🔴🔴 reboot 连续救不活必须升级 blur/focus（无塌�
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(false));
     await page.click('.ns-editor');
     await page.evaluate(() => {
       window.__nsBlurCount = 0;
@@ -621,6 +625,52 @@ test('WD-E2E-11 🔴🔴 组字心跳：组字串过阈值即 ce+重建，内容
     assert.ok(!flight.includes('gate:collapse'), '心跳切段后不得有塌方（无长组字即无触发）');
     assert.ok(!flight.includes('wd:reconnect'), '心跳后不得触发懒重连（会话活着）');
     assert.ok(!flight.includes('wd:escalate'), '心跳后不得触发升级重连');
+  } finally {
+    await page.close();
+  }
+});
+
+// ── v3.2.9：组字接管——浏览器不上场，长组字帧由我们应用 ────────────────────
+//   真机判决链：塌方发生在「浏览器把组字文本应用到文档」这一步（输入法数据
+//   完美、应用后文档腰斩）。接管 = beforeinput 捕获相位 preventDefault +
+//   ed.update 应用输入法完整串 ⇒ 树恒等于输入法串 ⇒ 守卫判据根本不命中。
+//   短组字（<TAKEOVER_MIN_LEN=12）留给浏览器（拼音 caret 语义）。
+test('WD-E2E-13 🔴🔴 组字接管：长组字帧由我们应用，树恒等于输入法串、无塌方、口述继续', async () => {
+  const page = await openEditor(h.browser(), h.baseUrl(), 'wde13', 'pw');
+  try {
+    await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
+    await page.click('.ns-editor');
+    // 隔离心跳（本测试只钉接管）；接管显式开（生产默认 true）
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(true));
+    await page.evaluate(() => {
+      const t = window.__NOTESYNC_COMPOSE_TEST__;
+      for (let n = 10; n <= 100; n += 10) t.growTo(n);
+    });
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 100,
+      null,
+      { timeout: 5000 },
+    );
+    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:takeover'),
+      '🔴🔴 长组字帧（≥12 字）必须走接管（wd:takeover 留痕）——浏览器不再应用组字');
+    assert.ok(!flight.includes('gate:collapse'),
+      '接管后树恒等于输入法串，不得有塌方可拦（无分歧即无塌方）');
+    assert.equal(
+      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
+      100,
+      '树必须等于输入法串（100）',
+    );
+    assert.equal(await textLen(page), 100, '真源等于输入法串');
+    // 接管不打断口述：继续长下去照样落地
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(130));
+    await page.waitForFunction(
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 130,
+      null,
+      { timeout: 5000 },
+    );
+    assert.equal(await textLen(page), 130, '接管后继续口述必须落地（130）');
   } finally {
     await page.close();
   }

@@ -207,6 +207,8 @@ declare global {
       /** v3.2.0：心跳阈值运行时改写（e2e 隔离机制用——其他判据关心跳钉自己的
        *  形状，WD-E2E-11 专门钉心跳）。生产路径从不调用。 */
       setHeartbeatAt: (n: number) => void;
+      /** v3.2.9：组字接管开关（e2e 隔离用）。生产默认 true（实验版）。 */
+      setTakeover: (on: boolean) => void;
     };
     /** 当前页面名（landing / pass / home / editor）。e2e 与 S5 同步都读它。 */
     __NOTESYNC_PAGE__?: () => string;
@@ -1997,6 +1999,30 @@ function mountEditor(name: string, initialDoc?: Doc): void {
    *  e2e 隔离各自机制用（关掉心跳钉撤稿/塌方形状，WD-E2E-11 专门钉心跳）。
    *  生产代码路径从不写它，恒为 COMPOSE_HEARTBEAT_AT。 */
   let wdHeartbeatThreshold = COMPOSE_HEARTBEAT_AT;
+  /** 🔴🔴🔴 v3.2.9 组字接管（实验）：insertCompositionText 的浏览器应用步骤
+   *  就是随机塌方的故障点（真机判决：输入法数据完美、浏览器应用后文档腰斩）。
+   *  接管 = beforeinput 捕获相位 preventDefault + 我们自己 ed.update 应用
+   *  输入法的完整串 ⇒ 浏览器永远不应用 ⇒ 塌方无从发生。
+   *  阈值 TAKEOVER_MIN_LEN：短组字（拼音输入法等，caret 语义敏感）留给浏览器，
+   *  长组字（语音口述）才接管。探针 setTakeover 可开关（e2e 隔离用）。 */
+  let wdTakeoverEnabled = true;
+  const TAKEOVER_MIN_LEN = 12;
+  /** 把输入法的完整组字串直接写进选区所在的 TextNode（模型层应用）。
+   *  在 ed.update 内调用；找不到 TextNode 选区就安静返回（下一帧再来）。 */
+  const applyCompositionTakeover = (text: string): void => {
+    ed.update(() => {
+      const sel = $getSelection();
+      let node = $isRangeSelection(sel) ? sel.anchor.getNode() : null;
+      if (node === null || !$isTextNode(node)) {
+        // 选区不在 TextNode 上（整篇重建后等）⇒ 退到根下第一个 TextNode
+        //   （口述场景的唯一文本节点）。
+        const first = $getRoot().getFirstDescendant();
+        node = first !== null && $isTextNode(first) ? first : null;
+      }
+      if (node === null || !$isTextNode(node)) return;
+      node.setTextContent(text);
+    });
+  };
   /** 🔴🔴🔴 v3.1.6：懒重连——只有 knock-back 实锤（重建后组字帧真把树打回，
    *  宿主视图确实没对齐）才拆会话。blur 会 tear down 输入法连接、豆包识别
    *   会话当场死（用户 2026-10-12 真机日志实证：没点停止键也被掐断），
@@ -2151,6 +2177,20 @@ function mountEditor(name: string, initialDoc?: Doc): void {
             return !!aTop && !!fTop && aTop.getKey() !== fTop.getKey();
           });
           composeGuard.noteComposingInput(multi);
+        }
+        // 🔴🔴🔴 v3.2.9 组字接管（实验）：浏览器不上场。塌方故障点就在它的
+        //   「把组字文本应用到文档」这一步（真机判决：输入法数据完美、浏览器
+        //   应用后文档随机腰斩）。capture 相位 preventDefault + stopPropagation
+        //   （后者挡住 Lexical 的 bubble 相位 beforeinput——它期待浏览器已应用），
+        //   然后用 ed.update 把输入法的完整串写进模型。树恒等于输入法串
+        //   ⇒ 守卫的 mismatch/stall 判据根本不会命中 ⇒ 无塌方、无空转。
+        //   短组字（<TAKEOVER_MIN_LEN）留给浏览器：拼音等短组字的 caret 语义
+        //   由浏览器管，别接管。
+        if (wdTakeoverEnabled && ie.data != null && ie.data.length >= TAKEOVER_MIN_LEN) {
+          e.preventDefault();
+          e.stopPropagation();
+          applyCompositionTakeover(ie.data);
+          recordFlight('wd:takeover', 'd=' + ie.data.length);
         }
       } else {
         // 🔴🔴 v3.0.14：comp=0 的 insertCompositionText = 孤儿组字帧（宿主报了
@@ -3265,6 +3305,9 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     // 🔴 v3.2.0：心跳阈值运行时改写（e2e 隔离机制用）。生产路径从不调用。
     setHeartbeatAt: (n: number): void => {
       wdHeartbeatThreshold = n;
+    },
+    setTakeover: (on: boolean): void => {
+      wdTakeoverEnabled = on;
     },
     flightLines: (): string[] => flightLines(),
     guardActive: (): boolean => composeGuard.isActive,
