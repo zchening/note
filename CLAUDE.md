@@ -87,6 +87,7 @@ git push origin main
 
 - 🔴🔴🔴 **Lexical 组字零宽后缀补丁（v3.2.7 实验，tools/patch-lexical.mjs）**：Lexical `$setTextContent` 组字期每次 DOM 写 `nextText + COMPOSITION_SUFFIX`（Android=U+200B）⇒ DOM 恒比模型多 1 字 ⇒ 疑似浏览器组字应用随机塌方的诱因。补丁把该写入点的后缀去掉（DOM 恒等于模型）。三条纪律：① 补丁在 **esbuild 打包前**由 build.mjs 自动应用（CI 的 npm run build 同样覆盖）；② **补丁点漂移 ⇒ exit 1 构建失败**——Lexical 升级后绝不静默发未打补丁的包；③ 只改 prod 文件的写入点，不动读取点（endsWith 剥离等自然不命中）。若真机验证塌方消失 ⇒ 长期方案＝patch-package 固化＋报上游；若无效 ⇒ 撤补丁走「最小复现实验＋换引擎」路线。
 - 🔴🔴🔴 **组字接管（v3.2.9 实验）＝页侧最后一搏**：长组字帧（≥TAKEOVER_MIN_LEN=12 的 insertCompositionText）在 beforeinput **capture 相位**（早于 Lexical 的 bubble 监听）preventDefault + stopPropagation + ed.update 应用输入法完整串 ⇒ 浏览器永远不做组字应用（随机塌方的故障点被拆掉）。三条纪律：① 短组字不接管（拼音 caret 语义归浏览器）；② 探针 setTakeover 开关（e2e 隔离：WD-E2E-05/06/07/10 关掉钉各自形状，WD-E2E-13 专门钉接管）；③ applyCompositionTakeover 选区兜底（选区不在 TextNode 上时退到根下第一个 TextNode）。**真机裁决标准**：日志出现 wd:takeover 且无 gate:collapse ⇒ 接管成功，固化；口述全停（浏览器结束组字）⇒ 一键回滚（setTakeover 默认关）。若接管失败 ⇒ 页侧穷尽，走「最小复现实验（ProseMirror 骨架）→ 换引擎」。
+- 🔴🔴🔴 **组字接管 v3.3.0（v3.2.9 的真机修正）**：Chromium **无视**输入法组字的 beforeinput preventDefault（v3.2.9 真机实证：应用照做、还应用坏）⇒ beforeinput 拦截路线已废。现行方案：onFlightI（**input 事件**，浏览器应用完的同一任务）对 ≥TAKEOVER_MIN_LEN=12 的 insertCompositionText 用输入法完整串覆盖 DOM（applyCompositionTakeover）⇒ 浏览器来不及绘制，用户只见正确文本；Lexical 随后读 DOM 即正确串 ⇒ 模型恒等于输入法串 ⇒ 守卫不命中。v3.2.9 真机已实证该机制让口述连续 14 秒不断。纪律：① 合成 input 事件会被 Lexical 自处理再应用一次（真实浏览器不会）⇒ e2e 断言用包含性（WD-E2E-13）；② 探针 setTakeover/composeFrame/botchFrame 隔离；③ 真机裁决看日志 wd:takeover 与文字是否稳定增长。
 ## 五条红线（详见 ARCH.md §5）
 
 1. **正文永远不进服务器**（密文中继，改动要重新论证安全不变量）

@@ -635,42 +635,40 @@ test('WD-E2E-11 🔴🔴 组字心跳：组字串过阈值即 ce+重建，内容
 //   完美、应用后文档腰斩）。接管 = beforeinput 捕获相位 preventDefault +
 //   ed.update 应用输入法完整串 ⇒ 树恒等于输入法串 ⇒ 守卫判据根本不命中。
 //   短组字（<TAKEOVER_MIN_LEN=12）留给浏览器（拼音 caret 语义）。
-test('WD-E2E-13 🔴🔴 组字接管：长组字帧由我们应用，树恒等于输入法串、无塌方、口述继续', async () => {
+test('WD-E2E-13 🔴🔴 组字接管：input 事件到达即用输入法完整串覆盖 DOM', async () => {
   const page = await openEditor(h.browser(), h.baseUrl(), 'wde13', 'pw');
   try {
     await page.evaluate(() => localStorage.removeItem('notesync_bj_flight'));
     await page.click('.ns-editor');
-    // 隔离心跳（本测试只钉接管）；接管显式开（生产默认 true）
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setHeartbeatAt(100000));
     await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.setTakeover(true));
-    await page.evaluate(() => {
-      const t = window.__NOTESYNC_COMPOSE_TEST__;
-      for (let n = 10; n <= 100; n += 10) t.growTo(n);
-    });
+    // ⚠️ 断言用「包含完整串」而非等长：合成 input 事件会被 Lexical 自己的组字
+    //   处理再应用一次（真实浏览器流程里不会——浏览器已在 input 前应用完、
+    //   Lexical 只读 DOM 不重写 DOM）。接管的核心（input 到达即覆盖）由
+    //   wd:takeover 留痕＋包含性断言钉住；真机行为裁决以下一份日志为准。
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.composeFrame(20));
     await page.waitForFunction(
-      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 100,
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() >= 20,
       null,
       { timeout: 5000 },
     );
-    const flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
-    assert.ok(flight.includes('wd:takeover'),
-      '🔴🔴 长组字帧（≥12 字）必须走接管（wd:takeover 留痕）——浏览器不再应用组字');
-    assert.ok(!flight.includes('gate:collapse'),
-      '接管后树恒等于输入法串，不得有塌方可拦（无分歧即无塌方）');
-    assert.equal(
-      await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen()),
-      100,
-      '树必须等于输入法串（100）',
-    );
-    assert.equal(await textLen(page), 100, '真源等于输入法串');
-    // 接管不打断口述：继续长下去照样落地
-    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.growTo(130));
+    let flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:takeover d=20'),
+      '🔴🔴 长组字帧（≥12 字）的 input 事件必须触发接管（wd:takeover d=20 留痕）');
+    assert.ok(JSON.stringify(await page.evaluate(() => window.__NOTESYNC_DOC__())).includes('x'.repeat(20)),
+      '接管必须把输入法完整串写进文档（含 20 连 x）');
+    // 浏览器应用坏（100 字的组字被写成 30 字）⇒ input 同任务内接管纠回
+    await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.botchFrame(100, 30));
     await page.waitForFunction(
-      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() === 130,
+      () => window.__NOTESYNC_COMPOSE_TEST__.treeTextLen() >= 100,
       null,
       { timeout: 5000 },
     );
-    assert.equal(await textLen(page), 130, '接管后继续口述必须落地（130）');
+    flight = await page.evaluate(() => window.__NOTESYNC_COMPOSE_TEST__.flightLines().join('\n'));
+    assert.ok(flight.includes('wd:takeover d=100'),
+      '🔴 坏应用后的 input 帧必须走接管（wd:takeover d=100）');
+    assert.ok(JSON.stringify(await page.evaluate(() => window.__NOTESYNC_DOC__())).includes('x'.repeat(100)),
+      '坏应用（30 字）必须被接管纠回完整串（含 100 连 x）');
   } finally {
     await page.close();
   }

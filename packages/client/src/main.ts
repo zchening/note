@@ -190,6 +190,15 @@ declare global {
       probeSynthCompose: () => boolean;
       /** v3.0.14 回归钩子：模拟豆包语音组字增长帧（comp=1 全量替换到 n 字）。 */
       growTo: (n: number) => void;
+      /** v3.3.0：真实浏览器组字流程探针——beforeinput(comp=1,d=n) + input(comp=1)，
+       *  **不自己动树**：树由接管（onFlightI 应用输入法串）或浏览器负责。用于钉
+       *  组字接管（WD-E2E-13）。与 growTo 的差别：growTo 自带 ed.update 模拟
+       *  「浏览器的应用」（含塌方形状），不派发 input 事件（接管不 engage）。 */
+      composeFrame: (n: number) => void;
+      /** v3.3.0：真实浏览器组字流程的**坏应用**探针——beforeinput(d=n) +
+       *  ed.update(树=botchedLen，模拟浏览器应用坏) + input(d=n)。用于钉
+       *  「浏览器应用坏 ⇒ 接管在 input 同任务内用完整串覆盖」这条链。 */
+      botchFrame: (n: number, botchedLen: number) => void;
       /** v3.0.14 回归钩子：模拟撤稿帧（comp=0 替换到 n 字，组字态转假）。 */
       withdrawTo: (n: number) => void;
       /** v3.0.15 回归钩子：读**编辑器树**的文本长度（区别于真源 latestDoc）。
@@ -2013,13 +2022,26 @@ function mountEditor(name: string, initialDoc?: Doc): void {
     ed.update(() => {
       const sel = $getSelection();
       let node = $isRangeSelection(sel) ? sel.anchor.getNode() : null;
-      if (node === null || !$isTextNode(node)) {
-        // 选区不在 TextNode 上（整篇重建后等）⇒ 退到根下第一个 TextNode
-        //   （口述场景的唯一文本节点）。
-        const first = $getRoot().getFirstDescendant();
+      // 选区落在元素节点（空段落）⇒ 找它的第一个 TextNode 后代
+      if (node !== null && !$isTextNode(node)) {
+        const first = node.getFirstDescendant();
         node = first !== null && $isTextNode(first) ? first : null;
       }
-      if (node === null || !$isTextNode(node)) return;
+      if (node === null) {
+        // 选区丢了 ⇒ 退到根下第一个 TextNode
+        const rootFirst = $getRoot().getFirstDescendant();
+        node = rootFirst !== null && $isTextNode(rootFirst) ? rootFirst : null;
+      }
+      if (node === null) {
+        // 整棵树没有 TextNode（全新空编辑器）⇒ 在第一个段落里建一个
+        const para = $getRoot().getFirstChild();
+        if (para === null || !$isElementNode(para)) return;
+        const tn = $createTextNode(text);
+        para.append(tn);
+        tn.select(text.length, text.length);
+        return;
+      }
+      if (!$isTextNode(node)) return;
       node.setTextContent(text);
     });
   };
@@ -2178,20 +2200,11 @@ function mountEditor(name: string, initialDoc?: Doc): void {
           });
           composeGuard.noteComposingInput(multi);
         }
-        // 🔴🔴🔴 v3.2.9 组字接管（实验）：浏览器不上场。塌方故障点就在它的
-        //   「把组字文本应用到文档」这一步（真机判决：输入法数据完美、浏览器
-        //   应用后文档随机腰斩）。capture 相位 preventDefault + stopPropagation
-        //   （后者挡住 Lexical 的 bubble 相位 beforeinput——它期待浏览器已应用），
-        //   然后用 ed.update 把输入法的完整串写进模型。树恒等于输入法串
-        //   ⇒ 守卫的 mismatch/stall 判据根本不会命中 ⇒ 无塌方、无空转。
-        //   短组字（<TAKEOVER_MIN_LEN）留给浏览器：拼音等短组字的 caret 语义
-        //   由浏览器管，别接管。
-        if (wdTakeoverEnabled && ie.data != null && ie.data.length >= TAKEOVER_MIN_LEN) {
-          e.preventDefault();
-          e.stopPropagation();
-          applyCompositionTakeover(ie.data);
-          recordFlight('wd:takeover', 'd=' + ie.data.length);
-        }
+        // 🔴🔴 v3.2.9→v3.3.0：组字接管**不在 beforeinput 做**——真机实证
+        //   Chromium 无视输入法组字的 beforeinput preventDefault（应用照做、
+        //   还应用坏），在 beforeinput 里 apply 只会被浏览器的坏应用覆盖、
+        //   屏幕在正确值/坏值之间跳。接管改到 onFlightI（input 事件，浏览器
+        //   应用完的同一任务里用正确值覆盖，浏览器来不及绘制 ⇒ 用户只见正确文本）。
       } else {
         // 🔴🔴 v3.0.14：comp=0 的 insertCompositionText = 孤儿组字帧（宿主报了
         //   组字输入类型却说不在组字态）。v3.0.13 真机日志里丢字发生在所有标记
@@ -2213,6 +2226,16 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   const onFlightI = (e: Event): void => {
     const ie = e as InputEvent;
     recordFlight('in:i', (ie.inputType ?? '?') + ' comp=' + (ie.isComposing ? 1 : 0));
+    // 🔴🔴🔴 v3.3.0 组字接管（v3.2.9 的修正）：浏览器刚把组字文本应用完
+    //   （这一步就是随机塌方的故障点——应用后文档随机腰斩），input 事件在
+    //   **同一个任务**里到达、浏览器尚未绘制。此刻用输入法的完整串覆盖 DOM
+    //   ⇒ 用户绘到的永远是正确文本；Lexical 随后读 DOM 拿到的也是正确串
+    //   ⇒ 模型=输入法串 ⇒ 守卫判据不命中 ⇒ 无塌方、无空转、会话不断。
+    //   长组字（≥TAKEOVER_MIN_LEN）才接管；短组字（拼音 caret 语义）不接管。
+    if (wdTakeoverEnabled && ie.inputType === 'insertCompositionText' && ie.isComposing === true && ie.data != null && ie.data.length >= TAKEOVER_MIN_LEN) {
+      applyCompositionTakeover(ie.data);
+      recordFlight('wd:takeover', 'd=' + ie.data.length);
+    }
     // 🔴🔴 v3.0.12：input 也按 isComposing 反推（某些宿主 beforeinput 时序不稳定）。
     if (ie.isComposing === true) {
       if (ed.isComposing() !== true) {
@@ -3238,6 +3261,35 @@ function mountEditor(name: string, initialDoc?: Doc): void {
         p.append($createTextNode('x'.repeat(n)));
         root.append(p);
       });
+    },
+    composeFrame: (n: number): void => {
+      const init = {
+        inputType: 'insertCompositionText',
+        data: 'x'.repeat(n),
+        isComposing: true,
+        bubbles: true,
+      } as InputEventInit;
+      editorHost.dispatchEvent(new InputEvent('beforeinput', init));
+      editorHost.dispatchEvent(new InputEvent('input', init));
+    },
+    botchFrame: (n: number, botchedLen: number): void => {
+      const init = {
+        inputType: 'insertCompositionText',
+        data: 'x'.repeat(n),
+        isComposing: true,
+        bubbles: true,
+      } as InputEventInit;
+      editorHost.dispatchEvent(new InputEvent('beforeinput', init));
+      // 模拟「浏览器把组字应用坏」：树被写成 botchedLen 字（< 完整串）
+      ed.update(() => {
+        const root = $getRoot();
+        root.clear();
+        const p = $createParagraphNode();
+        p.append($createTextNode('x'.repeat(botchedLen)));
+        root.append(p);
+      });
+      // input 事件（浏览器应用完的同一任务）⇒ 接管在此用完整串覆盖
+      editorHost.dispatchEvent(new InputEvent('input', init));
     },
     // 🔴🔴 v3.0.14 回归钩子：模拟**撤稿帧**——comp=0 的 insertCompositionText
     //   （宿主撤稿形状：组字输入类型但 isComposing=false）+ 真源被啃到 n 字。
