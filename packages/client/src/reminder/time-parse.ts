@@ -135,7 +135,15 @@ export function collectRelTimeMatches(text: string, now: number | Date): TimeMat
     const len = m[0].length;
     // 🔴 无效 match 也占位：否则「本月31日 10点」判无效后，同串里的裸「10点」会二次命中
     taken.push([start, start + len]);
-    if (text.slice(0, start).indexOf('　') !== -1) continue;
+    // 🔴🔴 v3.3.7（用户报障）：原判据"前缀里出现过全角空格就跳过"是**整段前缀**级别的——
+    //   面板插入行「时间　事项」带全角空格 ⇒ 它**后面每一行**的相对时间
+    //   （"明天下午4:30"）全部作废 ⇒ 对账在正文里找不到 ⇒ 刚添的提醒立刻被判死、
+    //   那串永远没有下划线（同一根因同时解释了"添加失败"与"无下划线"两条报障）。
+    //   本意只是"**同一行**的事项区里别再捞时刻（防幽灵提醒）" ⇒ 判据收到行内：
+    //   最后一个全角空格到本匹配之间若没有换行，才算落在事项区。
+    const pre = text.slice(0, start);
+    const lastIdeo = pre.lastIndexOf('　');
+    if (lastIdeo !== -1 && pre.slice(lastIdeo + 1).indexOf('\n') === -1) continue;
     let seg = m[0];
     const dm = seg.match(reDateSeg);
     if (dm) seg = seg.slice(dm[0].length);
