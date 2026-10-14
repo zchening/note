@@ -24,6 +24,13 @@
  *
  * 🔴 幂等 + 失效即响：已打过则跳过；找不到补丁点 ⇒ exit 1（Lexical 升级后
  *   模式漂移时**必须**让构建失败，绝不能静默发未打补丁的包）。
+ *
+ * 🔴🔴🔴 v3.2.8 实验结论（真机 2026-10-14 09:37 日志）：**补丁生效但假设证伪**。
+ *   补丁确实去掉了零宽字符（tree:frag zw=[0] div=+0），但塌方照旧发生
+ *   （93→11，与带零宽时的 127→32 同量级）⇒ 零宽字符不是塌方诱因，它是在
+ *   补偿**输入法自带的多 1 字**（豆包组字串恒比可见文本长 1——它自己的收尾
+ *   字符；带零宽时 DOM=94=输入法计数，反而对齐）。已撤销（--revert），脚本
+ *   保留备用：将来若定位到新的写入点假设，NS_ZSP_PATCH=1 一键重启用。
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -37,12 +44,23 @@ const MARKER = 'NS_ZSP_PATCH';
 const OLD = 'r=t+(o?M:""),i=Eu()';
 const NEW = 'r=t/*' + MARKER + '*/,i=Eu()';
 
+const REVERT = process.argv.includes('--revert');
+/** 反向替换：把打过补丁的代码还原（r=t 标记 → 原始 r=t+(o?M:"")）。 */
+const UNPATCH = { OLD: 'r=t/*' + MARKER + '*/,i=Eu()', NEW: 'r=t+(o?M:""),i=Eu()' };
+
 if (!existsSync(TARGET)) {
   console.error('[patch-lexical] node_modules/lexical 不存在——先 npm ci');
   process.exit(1);
 }
 const src = readFileSync(TARGET, 'utf8');
-if (src.includes(MARKER)) {
+if (REVERT) {
+  if (src.includes(UNPATCH.OLD)) {
+    writeFileSync(TARGET, src.replace(UNPATCH.OLD, UNPATCH.NEW), 'utf8');
+    console.log('[patch-lexical] 补丁已撤销（恢复 Lexical 原始后缀行为）');
+  } else {
+    console.log('[patch-lexical] 未打过补丁，无需撤销');
+  }
+} else if (src.includes(MARKER)) {
   console.log('[patch-lexical] 已打过，跳过');
 } else if (!src.includes(OLD)) {
   console.error('[patch-lexical] 🔴 找不到补丁点（Lexical 版本已变？）——拒绝构建');
