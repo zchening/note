@@ -270,6 +270,14 @@ export class WithdrawGuard {
    *  （e2e 探针实测：in:ce → upd len=108 d=0 → upd len=13 d=-95），会话结束
    *  帧看到的还是峰值长度 ⇒ 判定必须再宽限 2 帧，等撤稿落地。 */
   private evalsLeft = 0;
+  /** 🔴🔴🔴 v3.3.2：ending 宽限窗口的**时间**收口时刻。豆包润色是用户说完隔数秒
+   *  才点豆包触发的非组字整段替换（insertText comp=0，121→44），它会作为 cmp:end
+   *  之后下一个 comp=0 帧落进 ending 窗口被误判「撤稿」回滚、润色被吃掉。原窗口
+   *  按帧计数（evalsLeft）无法区分「cmp:end 同帧 flush 延迟掉字（<33ms）」与
+   *  「数秒后的刻意润色」，所以这里再按时间收口：超 endingWindowMs 的 comp=0 掉字
+   *  是刻意编辑（润色/手删），不回滚。 */
+  private endingEnteredAt = 0;
+  private readonly endingWindowMs = 1500;
   private readonly cfg: WithdrawGuardConfig;
 
   constructor(cfg: WithdrawGuardConfig = DEFAULT_WITHDRAW_GUARD) {
@@ -347,9 +355,26 @@ export class WithdrawGuard {
       // 同时进入 ending 宽限（ce 的 flush 先到、撤稿后到的情况靠这两帧兜住）。
       this.phase = 'ending';
       this.evalsLeft = 2;
+      this.endingEnteredAt = Date.now();
       return this.evaluate(currentLen);
     }
     if (this.phase === 'ending') {
+      // 🔴🔴🔴 v3.3.2：时间窗外（>endingWindowMs）的 comp=0 掉字 = 用户/豆包
+      //  刻意编辑（润色或手删），不是 IME 同步塌方 ⇒ 直接判 idle、不回滚。
+      //  cmp:end 同步塌方在 <33ms 内落地（远小于窗口）；豆包润色隔数秒才来。
+      if (Date.now() - this.endingEnteredAt > this.endingWindowMs) {
+        this.phase = 'idle';
+        this.peakLen = 0;
+        this.peakDoc = null;
+        this.evalsLeft = 0;
+        return {
+          restore: false,
+          doc: null,
+          peakLen: 0,
+          currentLen,
+          reason: 'ending-window-expired t=' + (Date.now() - this.endingEnteredAt),
+        };
+      }
       this.evalsLeft -= 1;
       if (this.evalsLeft <= 0) {
         this.phase = 'idle';

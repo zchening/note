@@ -310,3 +310,46 @@ test('COMPOSE-12 🔴🔴 真机 v3.1.4 形状：帧间仅掉 12 字 + prevLen<m
   const d6 = decideCollapseRestore({ currentLen: 50, prevLen: 50, multiBlock: false, cfg: CFG, composingDataLen: 200 });
   assert.equal(d6.restore, false, '长文档冻住同样不拦（prevLen≥minPrev 也走 drop<abs 放行）');
 });
+
+/* ── v3.3.2：豆包润色 = 数秒后 comp=0 整段替换，ending 窗口必须按时间收口 ──
+ * 🔴🔴 真机 v3.3.1 日志钉死：豆包润色作为 insertText comp=0（121→44）落在撤稿闸
+ *   ending 宽限窗口（原按帧计数 evalsLeft=2，豆包润色是用户说完隔数秒才点豆包
+ *   触发的下一个 comp=0 帧）被误判「IME 同步塌方」回滚 ⇒ 润色被吃掉。修复：
+ *   ending 窗口按时间收口（endingWindowMs=1500），cmp:end 同步塌方在 <33ms 内
+ *   落地、数秒后的润色在时间窗外 ⇒ 不回滚。本判据直接驱动守卫状态机复现该时序。
+ * 🔴 先红后改：撤掉时间收口（compose-guard.ts 的 ending 时间检查）⇒ 本判定红
+ *   （1700ms 后 comp=0 掉字仍被回滚到峰值）；恢复时间收口 ⇒ 绿（不回滚）。 */
+test('WD-11 🔴🔴 数秒后 comp=0 整段替换（豆包润色）必须不回滚（ending 窗口时间收口）', async () => {
+  const g = new WithdrawGuard(WCFG);
+  const peakDoc = fakeDoc(121);
+  // 组字会话涨到峰值 121
+  for (let n = 1; n <= 121; n += 1) {
+    g.observe(n, true, n - 1, n === 121 ? peakDoc : fakeDoc(n));
+  }
+  // 组字结束帧（cmp:end）：composing=false，长度还是 121（flush，无掉幅）⇒ 进入 ending 宽限
+  const flush = g.observe(121, false, 121, fakeDoc(121));
+  assert.equal(flush.restore, false, 'flush 帧长度未变，不得触发');
+  assert.equal(g.isSessionActive, true, '必须处于 ending 宽限态');
+  // 用户说完、隔数秒才点豆包润色（豆包整段替换 121→44）
+  await new Promise((r) => setTimeout(r, 1700)); // > endingWindowMs(1500)
+  const polish = g.observe(44, false, 121, fakeDoc(44));
+  assert.equal(polish.restore, false,
+    '🔴🔴 数秒后的 comp=0 整段替换是豆包润色，不得回滚到峰值 121（时间窗外刻意编辑）');
+  assert.ok(polish.reason.includes('ending-window-expired'),
+    '时间窗外必须标 expired（区别于真实撤稿回滚）');
+  assert.equal(g.isSessionActive, false, '会话必须已收场，不残留 pending');
+});
+
+test('WD-12 真实撤稿仍须在窗口内回滚（时间收口不误伤 IME 同步塌方）', () => {
+  const g = new WithdrawGuard(WCFG);
+  const peakDoc = fakeDoc(121);
+  for (let n = 1; n <= 121; n += 1) {
+    g.observe(n, true, n - 1, n === 121 ? peakDoc : fakeDoc(n));
+  }
+  // cmp:end flush 帧（无掉幅，进入 ending）
+  g.observe(121, false, 121, fakeDoc(121));
+  // 撤稿在同一窗口内（<1500ms）落地：真源被啃到 44 ⇒ 必须回滚峰值
+  const drop = g.observe(44, false, 121, fakeDoc(44));
+  assert.equal(drop.restore, true, '窗口内撤稿仍须回滚峰值（IME 同步塌方保护不丢）');
+  assert.equal(drop.doc, peakDoc, '回写峰值帧文档');
+});

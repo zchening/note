@@ -3025,6 +3025,10 @@ function mountEditor(name: string, initialDoc?: Doc): void {
       //     超时仍无组字帧 ⇒ 组字真死了，此时重建安全（回写峰值内容上屏）。
       scheduleDeferredTreeSync('peak=' + wd.peakLen + ' cur=' + wd.currentLen, wd.peakLen);
       return;
+    } else if (wd.reason.startsWith('ending-window-expired')) {
+      // 🔴🔴🔴 v3.3.2：豆包润色（数秒后 comp=0 整段替换）落在 ending 时间窗外 ⇒
+      //   不回滚，保留润色结果（这是刻意编辑不是 IME 同步塌方）。
+      recordFlight('wd:defer', wd.reason);
     }
 
     const rec = reconcileReminders(exported);
