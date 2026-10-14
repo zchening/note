@@ -256,6 +256,11 @@ async function run() {
   const watch = process.argv.includes('--watch');
   const { version, date } = await readVersion();
   await ensureDirs();
+  // 🔴 v3.2.6：Lexical 组字零宽后缀补丁必须在 esbuild 打包**之前**应用
+  //   （见 tools/patch-lexical.mjs 头部说明：DOM 恒等于模型，治浏览器组字
+  //   应用随机失败）。补丁点漂移 ⇒ 脚本 exit 1 ⇒ 构建失败（绝不静默发未打补丁的包）。
+  const { execSync } = await import('node:child_process');
+  execSync(`node "${join(ROOT, 'tools', 'patch-lexical.mjs')}"`, { stdio: 'inherit' });
 
   const opts = {
     entryPoints: [ENTRY],

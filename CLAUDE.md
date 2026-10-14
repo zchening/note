@@ -85,6 +85,7 @@ git push origin main
 - 🔴 **提交前先 `git status`**：临时探针（`_probe*` / `_diag*`）会被 `git add -A` 一起带上
 - 版本号唯一源是 `package.json` 的 `version`，改它必须同步改 `README.md` 版本历史表**与 `releases/<tag>.md`**（三处同步点）
 
+- 🔴🔴🔴 **Lexical 组字零宽后缀补丁（v3.2.7 实验，tools/patch-lexical.mjs）**：Lexical `$setTextContent` 组字期每次 DOM 写 `nextText + COMPOSITION_SUFFIX`（Android=U+200B）⇒ DOM 恒比模型多 1 字 ⇒ 疑似浏览器组字应用随机塌方的诱因。补丁把该写入点的后缀去掉（DOM 恒等于模型）。三条纪律：① 补丁在 **esbuild 打包前**由 build.mjs 自动应用（CI 的 npm run build 同样覆盖）；② **补丁点漂移 ⇒ exit 1 构建失败**——Lexical 升级后绝不静默发未打补丁的包；③ 只改 prod 文件的写入点，不动读取点（endsWith 剥离等自然不命中）。若真机验证塌方消失 ⇒ 长期方案＝patch-package 固化＋报上游；若无效 ⇒ 撤补丁走「最小复现实验＋换引擎」路线。
 ## 五条红线（详见 ARCH.md §5）
 
 1. **正文永远不进服务器**（密文中继，改动要重新论证安全不变量）
