@@ -134,6 +134,7 @@ test('MCP-E2E 🔴 完整闭环：写 → 读回 → 搜到 → 提醒 → 导�
     assert.deepEqual(names, [
       'note_edit',
       'note_export',
+      'note_export_image',
       'note_image',
       'note_import',
       'note_locate',
@@ -230,6 +231,17 @@ test('MCP-E2E 🔴 完整闭环：写 → 读回 → 搜到 → 提醒 → 导�
     assert.equal(r14.ok, true);
     assert.ok(fs.existsSync(out), 'zip 应落盘');
     assert.ok(r14.bytes > 0);
+
+    // ⑫b 长图导出：从最外层 tools/call 进，产物字节自己验（不信返回值）
+    const png = path.join(os.tmpdir(), 'bj-mcp-e2e-' + Date.now() + '.png');
+    const r14b = await tool(mcp, 'note_export_image', { out: png });
+    assert.equal(r14b.ok, true, JSON.stringify(r14b));
+    assert.ok(fs.existsSync(png), 'PNG 应落盘');
+    const pb = fs.readFileSync(png);
+    assert.equal(pb.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', '产物不是 PNG');
+    assert.equal(pb.readUInt32BE(16), 1600, '出图宽度应为 1600（800×2）');
+    assert.equal(r14b.width, 1600);
+    assert.ok(pb.length > 5000, 'PNG 太小，多半是白图');
 
     // ⑬ 口令错必须报同一句，且**不得**与别的错区分
     const mcp2 = startMcp({

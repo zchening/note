@@ -25,6 +25,7 @@ import type { ToolCtx } from './tools-doc.ts';
 import { toolRemind, REM_MAX } from './tools-remind.ts';
 import { toolImage } from './tools-image.ts';
 import { toolExport, toolImport } from './tools-backup.ts';
+import { toolExportImage } from './tools-render.ts';
 import { serveStdio, rpcResult, rpcError, callTool, PROTOCOL_VERSION, SERVER_INFO } from './rpc.ts';
 import type { RpcRequest, ToolDef } from './rpc.ts';
 import * as path from 'node:path';
@@ -199,6 +200,26 @@ const TOOLS: ToolDef[] = [
       required: ['from'],
     },
   },
+  {
+    name: 'note_export_image',
+    description:
+      '把整篇笔记渲染成一张长图 PNG 并落盘（只读，不改笔记）。' +
+      '折叠组**默认全部展开**、提醒条目附在图末（正文里被提醒引用的文字带下划线）。' +
+      '图宽 1600px（800 CSS 宽 × 2 倍）；内容过高时自动降到 800px 宽，仍超单图上限会报错并给出已生成的 HTML 路径。' +
+      '返回 path/bytes/width/height/scale —— 这些数字取自产物 PNG 本身，可以直接引用。' +
+      '前提：本机需有 playwright + chromium；没有时不报"成功"，而是落一份 HTML 并报错带路径。' +
+      '要图里出现的内容必须已在笔记里（本工具不做排版以外的加工）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: NAME_DESC },
+        out: {
+          type: 'string',
+          description: '输出 PNG 绝对路径（必须 .png 结尾）。不给则存到 BJ_OUT_DIR/note-<名字>-<时间戳>.png',
+        },
+      },
+    },
+  },
 ];
 
 /* ---------------- 工具实现表 ---------------- */
@@ -239,6 +260,11 @@ const impls: Record<string, (args: Record<string, unknown>) => Promise<unknown>>
     return toolExport(backupCtx, a as never);
   },
   note_import: (a) => toolImport(backupCtx, a as never),
+  note_export_image: async (a) => {
+    const name = String(a.name || cfg.defaultNote || '');
+    registry.add(name);
+    return toolExportImage({ vault, defaultNote: cfg.defaultNote, outDir: cfg.outDir }, a as never);
+  },
 };
 
 /* ---------------- 方法分发 ---------------- */
