@@ -374,12 +374,18 @@ test('MJS-19 🔴 clear 只清过期的，不动未来提醒', async () => {
   assert.ok(seg.includes('cleared === 0'), '无可清时不得写远端');
 });
 
-test('MJS-20 🔴 cancel 只删提醒不动正文（新架构下正文与提醒本就解耦）', () => {
+test('MJS-20 🔴 cancel 只删提醒与它的 rem 标记，正文文字一个字不动', () => {
   const s = code('tools-remind.ts');
   const i = s.indexOf("case 'cancel'");
-  const seg = s.slice(i, i + 500);
-  assert.ok(seg.includes('reminders: list.filter'), '只应改 reminders');
-  assert.ok(!seg.includes('blocks:'), '不该碰 blocks');
+  const seg = s.slice(i, i + 600);
+  assert.ok(seg.includes('reminders: list.filter'), '必须改 reminders');
+  // 🔴 v3.4.x：取消提醒时必须同时摘掉 span.rem 标记。
+  //   留着指向已删 id 的绑定，网页端 normalize/validateDoc 会抛 E_SPAN_REM_MISSING，
+  //   笔记整篇打不开 —— 比"多一条下划线"严重得多。
+  assert.ok(seg.includes('stripRemMarks'), '必须摘掉指向已删提醒的 rem 标记');
+  assert.ok(!/text:\s*''/.test(seg), '正文文字不得清空（只摘标记，不删那行字）');
+  const h = code('tools-remind.ts');
+  assert.ok(h.includes('function stripRemMarks'), '摘标记要有独立实现，别在分支里手搓');
 });
 
 test('MJS-21 🔴 edit 锚点命中多处必须报歧义（绝不猜第一个）', () => {

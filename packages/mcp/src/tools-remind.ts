@@ -11,7 +11,7 @@
  *   那个文件刻意是零 DOM 依赖、now 可注入的纯函数，就是为了能在这里复用。
  */
 import { emptyDoc } from '@bj/shared-schema';
-import type { Doc, Reminder } from '@bj/shared-schema';
+import type { Block, Doc, Reminder, Span } from '@bj/shared-schema';
 import { collectRelTimeMatches, matchTimeAt } from '../../client/src/reminder/time-parse.ts';
 import { makeRemId } from '../../client/src/reminder/reconcile.ts';
 import { assertId } from './config.ts';
@@ -49,6 +49,108 @@ function atOf(iso: string): number {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) throw new Error('提醒时间无法解析为有效时刻：' + iso);
   return t;
+}
+
+/**
+ * 回写正文用的时间形态：`2027-3-1 10:00`。
+ *
+ * 🔴🔴 必须与网页端 `fmtRemInsert`（packages/client/src/reminder/format.ts）**逐字一致**：
+ *   对账（reconcile）靠正文里的时间串判"这条提醒还活着没"，
+ *   写出解析层认不出的形态 ⇒ 提醒几十秒内被判死删除，用户看到的是"加了又没"。
+ *   月日**不补零**、分钟补零、中间一个半角空格，这是 reShort 的匹配前提。
+ */
+function fmtInsert(at: number): string {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/**
+ * 生成挂好 rem 标记的提醒行：`<时间>　<事项>`。
+ *
+ * 🔴🔴 为什么必须同时写正文（老项目 MCP 也是这么做的）：
+ *   网页端每次加载/编辑都会跑 reconcileReminders，它只认「正文里能找到同一时刻时间串」
+ *   的提醒；找不到就把 doc.reminders 里那条判死移除（防幽灵提醒）。
+ *   只写 doc.reminders 不写正文 ⇒ 服务端刚写完就被客户端对账删掉，
+ *   而且**不报错**——MCP 返回 ok、过几十秒再看就没了。
+ *
+ * 🔴 为什么还要挂 span.rem：下划线是按这个真源字段画的。
+ *   只写时间文字不挂 rem ⇒ 提醒活着但正文没有下划线，用户以为没加上。
+ */
+function reminderBlock(at: number, text: string, id: string): Block {
+  const time = fmtInsert(at);
+  const spans: Span[] = [{ t: time, rem: id }];
+  const item = text.trim();
+  if (item !== '') spans.push({ t: '　' + item });
+  return { t: 'p', spans };
+}
+
+/**
+ * 正文里已经有这行文字、但没有 rem 标记时，把标记补到时间串上。
+ *
+ * 🔴 用户/旧数据经常是"正文里手写了时间 + 事项"，提醒只存在于 reminders 里；
+ *   不补标记的话提醒活着但**没有下划线**，用户会认为没加上。
+ */
+function attachRemMark(blocks: readonly Block[], stamp: string, id: string): Block[] {
+  const walk = (list: readonly Block[]): Block[] =>
+    list.map((b) => {
+      const out: Block = { ...b };
+      if (Array.isArray(b.spans) && !b.spans.some((s) => s.rem === id)) {
+        const next: Span[] = [];
+        let done = false;
+        for (const s of b.spans) {
+          if (done || s.rem) {
+            next.push(s);
+            continue;
+          }
+          const idx = s.t.indexOf(stamp);
+          if (idx === -1) {
+            next.push(s);
+            continue;
+          }
+          const before = s.t.slice(0, idx);
+          const after = s.t.slice(idx + stamp.length);
+          if (before !== '') next.push({ ...s, t: before });
+          next.push({ ...s, t: stamp, rem: id });
+          if (after !== '') next.push({ ...s, t: after });
+          done = true;
+        }
+        if (done) out.spans = next;
+      }
+      if (Array.isArray(b.children)) out.children = walk(b.children);
+      return out;
+    });
+  return walk(blocks);
+}
+
+/** 改写某条提醒在正文里的那一行（改文案/改时刻时用），找不到就原样返回。 */
+function rewriteReminderLine(blocks: readonly Block[], id: string, at: number, text: string): Block[] {
+  return blocks.map((b) => {
+    if (Array.isArray(b.spans) && b.spans.some((s) => s.rem === id)) {
+      return reminderBlock(at, text, id);
+    }
+    if (Array.isArray(b.children)) {
+      const out: Block = { ...b, children: rewriteReminderLine(b.children, id, at, text) };
+      return out;
+    }
+    return b;
+  });
+}
+
+/** 去掉指向已删提醒的 rem 标记（留着会让 validateDoc 报 E_SPAN_REM_MISSING）。 */function stripRemMarks(blocks: readonly Block[], ids: ReadonlySet<string>): Block[] {
+  return blocks.map((b) => {
+    const out: Block = { ...b };
+    if (Array.isArray(b.spans)) {
+      out.spans = b.spans.map((s) => {
+        if (!s.rem || !ids.has(s.rem)) return s;
+        const copy: Span = { ...s };
+        delete copy.rem;
+        return copy;
+      });
+    }
+    if (Array.isArray(b.title)) out.title = b.title;
+    if (Array.isArray(b.children)) out.children = stripRemMarks(b.children, ids);
+    return out;
+  });
 }
 
 /** 把一句中文时间解析成时刻。**复用网页端规则**，认不出就报"认不出"而不是猜。 */
@@ -118,6 +220,7 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
         //   （这正是新架构与老项目的一处差异：老项目提醒没有 done 字段。）
         const next: Doc = {
           ...doc,
+          blocks: rewriteReminderLine(doc.blocks ?? [], id, at, text),
           reminders: list.map((r) => {
             if (r.id !== id) return r;
             const cleared: Reminder = { id: r.id, at: r.at, text };
@@ -140,7 +243,14 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
         throw new Error(`未来提醒已达上限 ${REM_MAX} 条（与网页端一致）。请先取消旧的再加。`);
       }
       const rem: Reminder = { id, at: isoOf(at), text };
-      const next: Doc = { ...doc, reminders: [...list, rem].sort((a, b) => atOf(a.at) - atOf(b.at)) };
+      // 🔴🔴 正文必须同步写一行「时间　事项」：网页端对账靠它认亲（详见 reminderBlock 注释）。
+      //   已经有同一时刻的时间串时不重复写（用户可能自己就在正文里打过这句话）。
+      const stamp = fmtInsert(at);
+      const hasLine = plainOf(doc).includes(stamp);
+      const blocks = hasLine
+        ? attachRemMark(doc.blocks ?? [], stamp, id)
+        : [...(doc.blocks ?? []), reminderBlock(at, text, id)];
+      const next: Doc = { ...doc, blocks, reminders: [...list, rem].sort((a, b) => atOf(a.at) - atOf(b.at)) };
       await ctx.vault.save(name, next);
       return {
         ok: true,
@@ -150,6 +260,7 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
         id,
         text,
         futureCount: future.length + 1,
+        bodyLine: hasLine ? null : `${stamp}　${text}`,
       };
     }
     case 'list': {
@@ -177,7 +288,11 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
       //   新项目的提醒不依附正文（真源里是独立数组），所以这里本来就不会动正文；
       //   写这条注释是因为老项目是从正文行反解的，删提醒会留下孤儿文字行，
       //   而新项目不该继承那个副作用。
-      const next: Doc = { ...doc, reminders: list.filter((r) => r.id !== id) };
+      const next: Doc = {
+        ...doc,
+        blocks: stripRemMarks(doc.blocks ?? [], new Set([id])),
+        reminders: list.filter((r) => r.id !== id),
+      };
       await ctx.vault.save(name, next);
       return { ok: true, name, op: 'cancel', removed: hit };
     }
@@ -203,7 +318,12 @@ export async function toolRemind(ctx: ToolCtx, args: RemindArgs): Promise<unknow
         //   让所有设备重拉一遍，而内容一个字没变。
         return { ok: true, name, op: 'clear', cleared: 0, futureCount: keep.length };
       }
-      const next: Doc = { ...doc, reminders: keep };
+      const dropped = list.filter((r) => r.done || atOf(r.at) < now).map((r) => r.id);
+      const next: Doc = {
+        ...doc,
+        blocks: stripRemMarks(doc.blocks ?? [], new Set(dropped)),
+        reminders: keep,
+      };
       await ctx.vault.save(name, next);
       return { ok: true, name, op: 'clear', cleared, futureCount: keep.length };
     }

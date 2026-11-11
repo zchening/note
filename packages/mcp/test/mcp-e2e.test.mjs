@@ -212,11 +212,33 @@ test('MCP-E2E 🔴 完整闭环：写 → 读回 → 搜到 → 提醒 → 导�
     assert.equal(r10.list.length, 1);
     assert.equal(r10.list[0].text, '打电话');
 
+    // ⑨b 🔴 add 必须**同时**写正文行 + 挂 rem 标记：
+    //   只写 doc.reminders 的话，网页端对账会把这条当"幽灵提醒"删掉（不报错、几十秒后消失）；
+    //   只写文字不挂 rem 的话，提醒活着但正文没有下划线，用户以为没加上。
+    const r9b = await tool(mcp, 'note_read', { format: 'json' });
+    const rdoc = r9b.doc;
+    const marked = [];
+    const walkSpans = (l) => {
+      for (const b of l || []) {
+        for (const s of b.spans || []) if (s.rem) marked.push(s);
+        walkSpans(b.children);
+      }
+    };
+    walkSpans(rdoc.blocks);
+    assert.equal(marked.length, 1, '正文里应恰好一个 rem 标记：' + JSON.stringify(marked));
+    assert.equal(marked[0].rem, r9.id, 'rem 必须指向刚建的提醒 id');
+    assert.match(marked[0].t, /^\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{2}$/, '时间串形态必须能被网页端 reShort/reFull 认出：' + marked[0].t);
+    const plain9 = JSON.stringify(rdoc);
+    assert.ok(plain9.includes('打电话'), '正文里应有「时间　事项」那一行');
+
     // ⑩ 同一时刻同一事项必须覆盖而非重复
     const r11 = await tool(mcp, 'note_remind', { op: 'add', at: '明天下午三点', text: '改内容' });
     assert.equal(r11.overwrote, true, '同刻同事项必须覆盖');
     const r12 = await tool(mcp, 'note_remind', { op: 'list' });
     assert.equal(r12.list.length, 1, '覆盖后仍只有一条');
+    // ⑩b 改文案时正文那行也要跟着改（否则对账会把事项文本刷回旧值）
+    const r12b = await tool(mcp, 'note_read', { format: 'json' });
+    assert.ok(JSON.stringify(r12b.doc).includes('改内容'), '覆盖后正文行文案应更新');
 
     // ⑪ 过去时间必须拒
     const r13 = await mcp.call('tools/call', {
