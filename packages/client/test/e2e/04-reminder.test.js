@@ -819,9 +819,19 @@ test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 
   //   本条钉的是**用户可见行为的最终一致**：删掉分钟后，真源判死 + 正文无任何
   //   残留标记。补铺（IME 门控推迟回写的最终一致兜底）在 main.ts 门控分支内，
   //   由代码走查覆盖；真机验收以用户实测为准。
+  // 🔴🔴 日期必须**动态取未来**：本例先真加一条提醒、再删分钟验它判死。
+  //   写死 2026-10-18 时，日期一过 ⇒ 提醒一进真源就被判死 ⇒ 第 835 行等
+  //   u.rem-mark 必超时（2026-11-11 实测天天红）。取「今天+7 天」，
+  //   格式仍 YYYY-MM-DD HH:mm（长度不变 ⇒ caretTo(4) 与 startsWith 判据语义不变）。
+  //   与 REM-20 用 `M月D日HH:MM` 动态生成是同一口径。
+  const d7 = new Date(Date.now() + 7 * 86400000);
+  const p2 = (x) => String(x).padStart(2, '0');
+  const day = `${d7.getFullYear()}-${p2(d7.getMonth() + 1)}-${p2(d7.getDate())}`;
+  const full = `${day} 18:18`;
+  const cut = `${day} 18:`;
   const page = await openEditor(h.browser(), h.baseUrl(), `rem19-${Date.now()}`, 'pw');
   try {
-    await typeBody(page, '2026-10-18 18:18 哈哈');
+    await typeBody(page, full + ' 哈哈');
     await page.waitForTimeout(300); // 🔴 打字后等 Lexical DOM reconcile（REM-13 同款）
     await caretTo(page, 4);
     await page.waitForSelector('#timeChip:not(.hidden)', { timeout: 5000 });
@@ -839,9 +849,9 @@ test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 
     //   打字活跃期内对账判死：真源 reminders 必须归零、正文不得残留任何标记。
     await page.click('.ns-editor');
     await page.keyboard.press('Control+a');
-    await page.keyboard.type('2026-10-18 18: 哈哈');
+    await page.keyboard.type(cut + ' 哈哈');
     const after = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent ?? '');
-    assert.ok(after.startsWith('2026-10-18 18: '), `前置：分钟必须真被删掉，实际=${JSON.stringify(after)}`);
+    assert.ok(after.startsWith(cut + ' '), `前置：分钟必须真被删掉，实际=${JSON.stringify(after)}`);
     await withTimeout(
       page.waitForFunction(() => (window.__NOTESYNC_DOC__().reminders || []).length === 0, { timeout: 5000 }),
       6000, '等提醒被判死',
@@ -851,7 +861,7 @@ test('REM-19 🔴🔴 正文删掉时间串片段（删分钟）：提醒判死 
       8000, '等正文标记清零（最终一致）',
     );
     const body = await page.evaluate(() => document.querySelector('.ns-editor')?.textContent ?? '');
-    assert.ok(body.includes('2026-10-18 18:'), '🔴 摘标记绝不许动正文文字');
+    assert.ok(body.includes(cut), '🔴 摘标记绝不许动正文文字');
   } finally {
     await page.close();
   }
