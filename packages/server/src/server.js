@@ -1055,7 +1055,15 @@ const CSP = [
   "connect-src 'self' https:",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
-  "frame-ancestors 'none'",
+  // 🔴 v3.4.0：`'none'` → `'self' https://ns.xuyinji.com.cn`
+  //   官网 https://ns.xuyinji.com.cn 的首屏是**活体演示**：同域路径 /demo/ 由 Caddy
+  //   反代到本服务（8090），父页要 contentDocument 读写它（自动填口令、判正文揭纱、
+  //   手机端锁只读）。`'none'` 会把这条同源 iframe 直接挡死 —— 浏览器按**文档 URL**
+  //   算 origin，反代后 URL 就是 ns 域，所以 `'self'` 已能覆盖；ns 域再显式列一遍，
+  //   是为了让"谁能嵌"这件事在配置里看得见（而不是靠"反代后恰好同源"这个隐含前提）。
+  //   ⚠️ 这是**限定到我们自己的两个域**，不是 `*`：第三方站点仍然嵌不了。
+  //   判据：e2e-live 抓真域名响应头断言含 ns 域 + 反代后 iframe 能读到 contentDocument。
+  "frame-ancestors 'self' https://ns.xuyinji.com.cn",
   "base-uri 'none'",
   "object-src 'none'",
 ].join('; ');

@@ -81,7 +81,7 @@ import { sanitizeNoteName } from './ui/landing-logic.ts';
 import { blockFingerprintsOf, chooseRewritePath, planLocalMarkRewrite } from './reminder/local-mark.ts';
 // 🔴 重建前后的光标保位（用户报障「加完提醒光标跳到正文最后」），见 ./caret.ts 文件头
 import { $readCaretOffset, $restoreCaretAt } from './caret.ts';
-import { reconcileReminders } from './reminder/reconcile.ts';
+import { addReminder, reconcileReminders } from './reminder/reconcile.ts';
 import { ensureExactAlarmPermission } from './reminder/native-rem.ts';
 import { ReminderUI, lastNativeSyncOutcome } from './reminder/ui.ts';
 import { handleImageUpload } from './image/upload.ts';
@@ -176,6 +176,27 @@ declare global {
     __NOTESYNC_EDITOR__?: LexicalEditor;
     /** 读取最近一次提交的真源快照（深拷贝）。正式接口，非调试后门。 */
     __NOTESYNC_DOC__?: () => Doc;
+    /**
+     * v3.4.0 官网首屏「活体演示」桥（**只在 /demo 这一篇**挂，普通笔记恒 undefined）。
+     *
+     * 官网 ns.xuyinji.com.cn 的首屏是同源 iframe 里的真 App，父页每 400ms 驱动它：
+     * 「每次刷新回到《晚风记》」＋「把周六 10:00 那条提醒重新挂上下划线」。
+     * 老项目的做法是直改 `#editor` 的 innerHTML + 调全局 `window.addReminder`；
+     * bj 的编辑器由 Lexical 托管，直改 DOM 会被模型覆盖 ⇒ 必须走正式通道，
+     * 于是把这两件事收敛成一个显式接口，而不是让官网去猜内部结构。
+     *
+     * 🔴 为什么不复用 `ReminderUI.setDoc`：那条路径**刻意只写 reminders、不重建树**
+     *   （见 main.ts 里 2566 处的长注释，历史上整体替换把用户刚插的行冲掉过）。
+     *   演示重置要的是「整篇换掉」，语义相反，不能共用。
+     */
+    __NOTESYNC_DEMO__?: {
+      /** 整篇替换成纯文本（\n 分块），落真源并触发同步。内容没变返回 false。 */
+      setText: (text: string) => boolean;
+      /** 给正文里的时间串挂提醒（下划线由对账铺）。已过期/无效返回 false。 */
+      addReminder: (atMs: number, text: string) => boolean;
+      /** 当前正文块数（父页做"是否需要重置"的廉价判据）。 */
+      blockCount: () => number;
+    };
     /** v3.0.10 合成塌方守卫 e2e 驱动钩子（正式接口，仅驱动真实 update 监听）。 */
     __NOTESYNC_COMPOSE_TEST__?: {
       start: () => void;
@@ -3209,6 +3230,57 @@ function mountEditor(name: string, initialDoc?: Doc): void {
   // 以及 e2e 的「输入是否真进了真源」判据都走它，是正式接口的一部分。
   window.__NOTESYNC_DOC__ = (): Doc => structuredClone(latestDoc);
   window.__NOTESYNC_EDITOR__ = ed;
+
+  /* ---------------- 官网首屏「活体演示」桥（仅 /demo） ----------------
+   * 🔴 只在这一篇挂：这是演示入口，不是通用后门。普通笔记恒 undefined，
+   *   官网之外任何页面都拿不到「整篇替换正文」的能力。
+   * 🔴 currentNote 是 route 层净化后的名字（v3.3.5 起全链小写），不需要再 lowercase。
+   */
+  if (currentNote === 'demo') {
+    window.__NOTESYNC_DEMO__ = {
+      setText: (text: string): boolean => {
+        const lines = String(text ?? '').split('\n');
+        // 🔴 必须**保留 reminders**：演示笔记的那条「周六 10:00」是挂在真源里的，
+        //   只换正文却把 reminders 一起丢掉的话，官网每轮重置都要靠父页再调一次
+        //   addReminder 才补回来 —— 中间几秒没有下划线，补失败就永久没了。
+        //   保留后对账会按新正文重新铺标记（正文里的时间串还在 ⇒ alive）。
+        const next: Doc = normalize({
+          v: 1,
+          blocks: lines.map((t) => ({ t: 'p' as const, spans: t === '' ? [] : [{ t }] })),
+          ...(latestDoc.reminders ? { reminders: latestDoc.reminders } : {}),
+        });
+        // 🔴 先比 canonical 再动树：官网每次刷新都会调一次，内容没变时
+        //   整篇重建会让首屏闪一下，还会白写一趟密文到服务端。
+        if (canonicalize(next) === canonicalize(latestDoc)) return false;
+        latestDoc = next;
+        ed.update(() => {
+          docToLexical(next);
+        }, { discrete: true });
+        // 与生产路径同款：换完真源重跑链接识别（否则演示里的网址不会变链接）。
+        behaviors.linkifyNow();
+        syncRef?.noteEdit();
+        return true;
+      },
+      addReminder: (atMs: number, text: string): boolean => {
+        const iso = new Date(atMs).toISOString();
+        // 同刻已在列表里 ⇒ 幂等成功（官网每轮 tick 都会来问一次，不该重复落账）
+        if ((latestDoc.reminders ?? []).some((r) => r.at === iso)) return true;
+        const r = addReminder(latestDoc, atMs, text);
+        if (r.rejected) return false;
+        // 🔴 顺序不能反：先写 reminders 再对账铺标记，最后才重放树。
+        //   对账负责把 rem 挂到正文的时间串上，docToLexical 才会画下划线。
+        const marked = reconcileReminders(r.doc);
+        latestDoc = marked.doc;
+        ed.update(() => {
+          docToLexical(marked.doc);
+        }, { discrete: true });
+        behaviors.linkifyNow();
+        syncRef?.noteEdit();
+        return true;
+      },
+      blockCount: (): number => (latestDoc.blocks ?? []).length,
+    };
+  }
   // 🔴 v3.0.10 合成塌方守卫 e2e 驱动钩子（正式接口，仅用于驱动真实 update 监听）。
   //   桌面无法复现 Android InputConnection 的原生塌方，这条用真实 compositionstart
   //   事件 + 真实 ed.update 塌方，验证守卫确实在 update 监听里把真源回退。不含内容。
