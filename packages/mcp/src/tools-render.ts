@@ -36,7 +36,12 @@ const IMG_WAIT_MS = 5000;
 interface PageLike {
   setContent(html: string, opts: { waitUntil: 'load'; timeout: number }): Promise<void>;
   evaluate<T>(fn: () => T | Promise<T>): Promise<T>;
-  screenshot(opts: { path: string; fullPage: boolean; type: 'png' }): Promise<Buffer>;
+  screenshot(opts: {
+    path: string;
+    type: 'png';
+    fullPage?: boolean;
+    clip?: { x: number; y: number; width: number; height: number };
+  }): Promise<Buffer>;
   close(): Promise<void>;
 }
 
@@ -198,20 +203,20 @@ export async function toolExportImage(
     // 先按 2x 量；超限降到 1x；仍超限就报错，不产出残缺图
     let scale = 2;
     let page = await open(page0(browser, scale), html);
-    let h = await measure(page);
+    let box = await sheetBox(page);
 
-    if (h * scale > MAX_PX) {
+    if (box.height * scale > MAX_PX) {
       await page.close().catch(() => {});
       scale = 1;
       page = await open(page0(browser, scale), html);
-      h = await measure(page);
+      box = await sheetBox(page);
     }
-    if (h * scale > MAX_PX) {
+    if (box.height * scale > MAX_PX) {
       await page.close().catch(() => {});
       const p = writeFallbackHtml(out, html);
       throw new Error(
         '无法出图：内容太高（' +
-          h +
+          box.height +
           'px，超过单图上限 ' +
           MAX_PX +
           'px）。已生成 HTML 版：' +
@@ -221,7 +226,10 @@ export async function toolExportImage(
     }
 
     await hideBrokenImages(page);
-    const buf = await page.screenshot({ path: out, fullPage: true, type: 'png' });
+    // 🔴 只截纸卡本身（clip），不整页截：
+    //   整页截会按视口 1000 CSS 高铺满，短笔记下半张全是灰底空白
+    //   —— 用户拿到的是"半张白纸"，而我们自己的尺寸字段还理直气壮。
+    const buf = await page.screenshot({ path: out, clip: box, type: 'png' });
     const dims = pngDims(buf);
     return {
       ok: true,
@@ -249,8 +257,27 @@ async function open(p: Promise<PageLike>, html: string): Promise<PageLike> {
   return page;
 }
 
-async function measure(page: PageLike): Promise<number> {
-  return page.evaluate(() => Math.max(document.documentElement.scrollHeight, document.body.scrollHeight));
+/**
+ * 量纸卡（.sheet）的外框，截图就按它裁。
+ *
+ * 🔴 不能用 `document.documentElement.scrollHeight`：
+ *   那是"视口 vs 内容"的较大值 —— 内容比视口矮时它会返回视口高度，
+ *   于是短笔记的图会被撑到 2000 设备像素、下半张全空白。
+ *   判据 IMG-05 钉的就是这一条。
+ */
+async function sheetBox(page: PageLike): Promise<{ x: number; y: number; width: number; height: number }> {
+  const box = await page.evaluate(() => {
+    const el = document.querySelector('.sheet') as HTMLElement | null;
+    const r = (el ?? document.body).getBoundingClientRect();
+    return {
+      x: Math.round(r.left + window.scrollX),
+      y: Math.round(r.top + window.scrollY),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  });
+  if (box.width <= 0 || box.height <= 0) throw new Error('页面里没量到可截区域（.sheet 宽高为 0）');
+  return box;
 }
 
 function scheduleClose(browser: BrowserLike): void {

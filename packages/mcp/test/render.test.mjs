@@ -265,6 +265,22 @@ test('IMG-03 out 参数：不是 .png 结尾直接拒，不静默改后缀', asy
   }
 });
 
+test('IMG-05 短笔记不该带大片空白：图高必须贴着内容，不能被视口撑满', async () => {
+  const outDir = mkdtempSync(path.join(os.tmpdir(), 'ns-render-short-'));
+  const doc = { v: 1, blocks: [{ t: 'h2', spans: [{ t: '短' }] }, { t: 'p', spans: [{ t: '一行字' }] }] };
+  try {
+    const r = await toolExportImage({ vault: fakeVault(doc), defaultNote: 'short', outDir }, { name: 'short' });
+    const { height } = pngSize(readFileSync(r.path));
+    // 视口是 1000 CSS 高 ⇒ 按整页截会得到 ≥2000 设备像素，下半张全是空白。
+    // 这条笔记的内容不到 200 CSS 高，出图应贴着内容长。
+    assert.ok(height < 1000, '短笔记出图高 ' + height + 'px：被视口撑出大片空白了');
+    assert.ok(height > 200, '高度 ' + height + 'px 太小，内容可能没画进去');
+    assert.equal(r.height, height);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('IMG-04 笔记不存在时说清楚，不是抛底层解密码错误', async () => {
   const outDir = mkdtempSync(path.join(os.tmpdir(), 'ns-render-miss-'));
   try {
