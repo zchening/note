@@ -35,6 +35,7 @@ const IMG_WAIT_MS = 5000;
 
 interface PageLike {
   setContent(html: string, opts: { waitUntil: 'load'; timeout: number }): Promise<void>;
+  setViewportSize(size: { width: number; height: number }): Promise<void>;
   evaluate<T>(fn: () => T | Promise<T>): Promise<T>;
   screenshot(opts: {
     path: string;
@@ -226,6 +227,12 @@ export async function toolExportImage(
     }
 
     await hideBrokenImages(page);
+    // 🔴🔴 截图前必须把视口撑到纸卡高度：playwright-core ≥1.5x 的 `clip` 会被
+    //   **钳在视口内**（本机实测 1.62.0）：视口 800×1000 时，即便 clip 给的是
+    //   800×4876，产出的 PNG 也只有 1600×2000 —— 长笔记被齐腰截断，
+    //   而返回的 width/height 是从这张残图里读的，所以"尺寸自洽、零报错"，
+    //   极难发现。撑高视口后 clip 才按真实内容尺寸生效。
+    await page.setViewportSize({ width: VIEW_W, height: Math.ceil(box.height) });
     // 🔴 只截纸卡本身（clip），不整页截：
     //   整页截会按视口 1000 CSS 高铺满，短笔记下半张全是灰底空白
     //   —— 用户拿到的是"半张白纸"，而我们自己的尺寸字段还理直气壮。
