@@ -220,6 +220,24 @@ function indexHtml(version, date, sha) {
 <meta name="apple-mobile-web-app-title" content="NoteSyncX">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>NoteSync</title>
+<!-- 🔴🔴 首屏 critical CSS：外链 app.css 没生效时，**只靠 class 藏着的 DOM 会整片裸奔**
+     （#draftBar 起步就是 class="conflictbar hidden"，.hidden 只在 app.css 里定义）。
+     用户见过的一种失败形态正是「载入中…」+ 冲突条 + 两个系统默认小按钮同时露出。
+     这三行纯结构规则让那种形态不可能出现：该藏的藏住、载入态居中且铺满视口。
+
+     🔴 三条硬约束（判据：test/e2e/34-boot-critical-css.test.js）：
+       ① **零颜色**：色彩只在 theme.ts / styles.css；这里写死色值会在夜间模式或换色板时
+          变成第二份真相。app.js 没跑时 CSS 变量也落空，所以宁可留 UA 默认色。
+       ② **零 JS / 零版本号**：不碰 LN-07 的抢跳脚本判据、不碰 check-versions 的
+          「index.html 只许一个 semver」判据。
+       ③ 必须位于 stylesheet **之前**：同特异性下后加载的 app.css 才能覆盖兜底规则，
+          否则内联会长期压住正式样式。
+     id 是给 e2e 机械剥离用的（变异判据），不是样式钩子，别拿它写选择器。 -->
+<style id="ns-critical">
+.hidden { display: none !important; }
+html, body { margin: 0; height: 100%; }
+#boot { min-height: 100%; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+</style>
 <link rel="preload" as="style" href="${cssHref}">
 <link rel="stylesheet" href="${cssHref}">
 </head>
