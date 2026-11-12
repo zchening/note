@@ -67,6 +67,16 @@ jobs:
       - name: 类型检查
         run: npm run typecheck
 
+      - name: 装 Chromium（MCP 出图单测 + e2e + 首屏闸都要真浏览器）
+        # 🔴🔴 必须排在「全量单元测试」**之前**：packages/mcp/test 里的
+        #   MCP-E2E / IMG-01 / IMG-05 会真跑 chromium 出图，而 Install 用了
+        #   --ignore-scripts（不下载浏览器）。这步原先排在单测之后 ⇒ 单测必红 ⇒
+        #   build 作业不执行 ⇒ APK / OTA / Release 全不出（v3.4.3 首次打 tag 实锤）。
+        #   开发机装过 Chromium 恒绿，只有 CI 抓得到，别再挪回去。
+        # 🔴 --with-deps：Linux runner 上缺系统库时 Chromium 起不来，
+        #   报错是 "Host system is missing dependencies"，而不是"浏览器没装"，极易误判。
+        run: npx playwright install chromium --with-deps
+
       - name: 全量单元测试（真源层 + 客户端 + 服务端 + MCP）
         # 任一红 → 本作业失败 → build 不执行 → 不出包
         run: npm test
@@ -98,11 +108,6 @@ jobs:
         #   sed 注入），所以**本作业只能查到 www 为止**，android 那一端由 build 作业的
         #   「三端版本一致性」在注入之后查。写成一份脚本两个模式，不复制两份逻辑。
         run: node tools/check-versions.mjs --skip-android
-
-      - name: 装 Chromium（e2e 与首屏闸要真浏览器）
-        # 🔴 --with-deps：Linux runner 上缺系统库时 Chromium 起不来，
-        #   报错是 "Host system is missing dependencies"，而不是"浏览器没装"，极易误判。
-        run: npx playwright install chromium --with-deps
 
       - name: e2e 子集（真浏览器：编辑器往返 + 同步）
         # 🔴 --test-concurrency=6：**串行会超时**。每个文件都要起一次
