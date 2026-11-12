@@ -136,16 +136,45 @@ function rewriteReminderLine(blocks: readonly Block[], id: string, at: number, t
   });
 }
 
-/** 去掉指向已删提醒的 rem 标记（留着会让 validateDoc 报 E_SPAN_REM_MISSING）。 */function stripRemMarks(blocks: readonly Block[], ids: ReadonlySet<string>): Block[] {
+/** 去掉指向已删提醒的 rem 标记（留着会让 validateDoc 报 E_SPAN_REM_MISSING）。 */
+function stripRemMarks(blocks: readonly Block[], ids: ReadonlySet<string>): Block[] {
+  /**
+   * 🔴 摘掉 rem 之后必须**合并相邻同属性 span**：
+   *   canonical 会把「属性相同、只是被切开的两段」合成一段，于是
+   *   canonicalize(parse(canonicalize(doc))) !== canonicalize(doc)，
+   *   vault.save 的幂等自检直接抛「canonical 往返不自洽，拒绝写入」——
+   *   症状是"取消提醒失败"，而正文看起来完全正常。
+   *   这个形状正是 attachRemMark 切开、随后摘标记留下的。
+   */
+  const coalesce = (spans: Span[]): Span[] => {
+    const out: Span[] = [];
+    for (const s of spans) {
+      const prev = out[out.length - 1];
+      if (prev) {
+        const a: Record<string, unknown> = { ...prev };
+        const b: Record<string, unknown> = { ...s };
+        delete a.t;
+        delete b.t;
+        if (JSON.stringify(a) === JSON.stringify(b)) {
+          prev.t += s.t;
+          continue;
+        }
+      }
+      out.push({ ...s });
+    }
+    return out;
+  };
   return blocks.map((b) => {
     const out: Block = { ...b };
     if (Array.isArray(b.spans)) {
-      out.spans = b.spans.map((s) => {
-        if (!s.rem || !ids.has(s.rem)) return s;
-        const copy: Span = { ...s };
-        delete copy.rem;
-        return copy;
-      });
+      out.spans = coalesce(
+        b.spans.map((s) => {
+          if (!s.rem || !ids.has(s.rem)) return s;
+          const copy: Span = { ...s };
+          delete copy.rem;
+          return copy;
+        }),
+      );
     }
     if (Array.isArray(b.title)) out.title = b.title;
     if (Array.isArray(b.children)) out.children = stripRemMarks(b.children, ids);
